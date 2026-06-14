@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from gsim.common.stack.materials import MaterialProperties
-from gsim.common.stack.overlays import load_overlay, merge_overlay
+from gsim.common.stack.overlays import load_overlay, load_overlay_data, merge_overlay
 
 
 class TestLoadOverlay:
@@ -28,6 +28,27 @@ materials:
         assert "SiO2" in result
         assert result["SiO2"].permittivity == 4.0
         assert result["SiO2"].loss_tangent == 0.001
+
+    def test_load_overlay_data_accepts_mapping(self):
+        result = load_overlay_data(
+            {
+                "materials": {
+                    "Si": {
+                        "relative_permittivity": 11.45,
+                        "dispersion_models": [
+                            {
+                                "type": "constant",
+                                "permittivity": 11.45,
+                                "source": "test PDK",
+                            }
+                        ],
+                    }
+                }
+            }
+        )
+
+        assert result["Si"].permittivity == 11.45
+        assert result["Si"].dispersion_models[0].source == "test PDK"
 
     def test_load_with_frequency_validity(self, tmp_path):
         yaml_content = """
@@ -76,6 +97,21 @@ materials:
         result = load_overlay(overlay_path)
         assert "sapphire" in result
         assert result["sapphire"].permittivity == [9.3, 9.3, 11.5]
+
+    def test_load_accepts_pdk_relative_permittivity_alias(self, tmp_path):
+        yaml_content = """
+materials:
+  Si:
+    relative_permittivity: 11.45
+    loss_tangent: 0.0001
+"""
+        overlay_path = tmp_path / "overlay.yaml"
+        overlay_path.write_text(yaml_content)
+
+        result = load_overlay(overlay_path)
+
+        assert result["Si"].permittivity == 11.45
+        assert result["Si"].loss_tangent == 0.0001
 
     def test_load_with_wavelength_validity(self, tmp_path):
         yaml_content = """

@@ -44,6 +44,7 @@ from gsim.common.stack.materials import (
 )
 from gsim.common.stack.overlays import (
     load_overlay,
+    load_overlay_data,
     merge_overlay,
 )
 from gsim.common.stack.visualization import (
@@ -179,6 +180,7 @@ __all__ = [
     "get_material_properties",
     "get_stack",
     "load_overlay",
+    "load_overlay_data",
     "load_stack_yaml",
     "merge_overlay",
     "parse_layer_stack",

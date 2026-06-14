@@ -11,7 +11,9 @@ priority than user overrides).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -21,10 +23,23 @@ from gsim.common.stack.materials import (
     ValidityRange,
 )
 
+_FIELD_ALIASES = {
+    "permittivity": ("permittivity", "relative_permittivity", "epsilon_r", "eps_r"),
+    "conductivity": ("conductivity",),
+    "loss_tangent": ("loss_tangent",),
+    "permeability": ("permeability", "relative_permeability", "mu_r"),
+}
 
-def _parse_tensor_or_scalar(entry: dict, key: str) -> float | list[float] | None:
+
+def _parse_tensor_or_scalar(
+    entry: Mapping[str, Any], key: str
+) -> float | list[float] | None:
     """Parse a key that can be scalar or list-of-3 from an overlay dict."""
-    val = entry.get(key)
+    val = None
+    for alias in _FIELD_ALIASES.get(key, (key,)):
+        if alias in entry:
+            val = entry[alias]
+            break
     if val is None:
         return None
     if isinstance(val, list):
@@ -32,12 +47,12 @@ def _parse_tensor_or_scalar(entry: dict, key: str) -> float | list[float] | None
     return float(val)
 
 
-def load_overlay(path: str | Path) -> dict[str, MaterialProperties]:
-    """Load a PDK overlay from a YAML file.
+def load_overlay_data(data: Mapping[str, Any] | None) -> dict[str, MaterialProperties]:
+    """Load a PDK overlay from an in-memory mapping.
 
-    The YAML file should have the format:
+    The mapping should have the format:
 
-    ```yaml
+    ```python
     materials:
       SiO2:
         permittivity: 4.1
@@ -47,18 +62,11 @@ def load_overlay(path: str | Path) -> dict[str, MaterialProperties]:
     ```
 
     Args:
-        path: Path to the overlay YAML file.
+        data: Mapping containing a ``materials`` section.
 
     Returns:
-        Dict of material name -> MaterialProperties from the overlay.
+        Dict of material name -> MaterialProperties from the overlay mapping.
     """
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"Overlay file not found: {path}")
-
-    with open(path) as f:
-        data = yaml.safe_load(f)
-
     if not data or "materials" not in data:
         return {}
 
@@ -105,6 +113,27 @@ def load_overlay(path: str | Path) -> dict[str, MaterialProperties]:
         overlay_materials[name] = MaterialProperties(**props_kwargs)
 
     return overlay_materials
+
+
+def load_overlay(path: str | Path) -> dict[str, MaterialProperties]:
+    """Load a PDK overlay from a YAML/JSON file.
+
+    The file should have the format accepted by :func:`load_overlay_data`.
+
+    Args:
+        path: Path to the overlay YAML/JSON file.
+
+    Returns:
+        Dict of material name -> MaterialProperties from the overlay.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Overlay file not found: {path}")
+
+    with open(path) as f:
+        data = yaml.safe_load(f)
+
+    return load_overlay_data(data)
 
 
 def merge_overlay(
