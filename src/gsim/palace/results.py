@@ -22,7 +22,7 @@ import re
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -38,10 +38,31 @@ logger = logging.getLogger(__name__)
 _INDEXED_CSV_COLUMN_RE = re.compile(
     r"^(?P<prefix>[A-Za-z][A-Za-z0-9_]*)\[(?P<index>\d+)\](?P<suffix>.*)$"
 )
+_TERMINAL_MATRIX_COLUMN_RE = re.compile(r"\[i\]\[(?P<index>\d+)\]")
 _CSV_INDEX_SECTIONS = {
     "domain-E.csv": "Domains.Postprocessing.Energy",
     "surface-Q.csv": "Boundaries.Postprocessing.Dielectric",
     "port-EPR.csv": "Boundaries.Postprocessing.SurfaceFlux",
+}
+_TERMINAL_MATRIX_SPECS = {
+    "C": {
+        "file_name": "terminal-C.csv",
+        "source_unit": "F",
+        "display_scale": 1.0e15,
+        "display_unit": "fF",
+    },
+    "Cm": {
+        "file_name": "terminal-Cm.csv",
+        "source_unit": "F",
+        "display_scale": 1.0e15,
+        "display_unit": "fF",
+    },
+    "Cinv": {
+        "file_name": "terminal-Cinv.csv",
+        "source_unit": "1/F",
+        "display_scale": 1.0,
+        "display_unit": "1/F",
+    },
 }
 
 
@@ -444,6 +465,61 @@ class IndexedCsv:
         return tuple(column.to_dict() for column in self.columns)
 
 
+@dataclass(frozen=True)
+class TerminalMatrix:
+    """Palace electrostatic terminal matrix with named terminals."""
+
+    source_path: Path
+    matrix_kind: str
+    dataframe: pd.DataFrame
+    terminal_names: tuple[str, ...]
+    source_unit: str
+    display_scale: float
+    display_unit: str
+
+    @property
+    def display_dataframe(self) -> pd.DataFrame:
+        """Return a copy scaled for notebook display."""
+        frame = self.dataframe * self.display_scale
+        frame.attrs.update(
+            {
+                "matrix_kind": self.matrix_kind,
+                "source_unit": self.source_unit,
+                "display_scale": self.display_scale,
+                "display_unit": self.display_unit,
+                "csv_path": str(self.source_path),
+            }
+        )
+        return frame
+
+    def to_long_dataframe(self) -> pd.DataFrame:
+        """Return a long-form terminal-pair table."""
+        import pandas as pd
+
+        rows: list[dict[str, Any]] = []
+        for row_offset, row_name in enumerate(self.terminal_names, start=1):
+            for col_offset, col_name in enumerate(self.terminal_names, start=1):
+                value = float(self.dataframe.loc[row_name, col_name])
+                rows.append(
+                    {
+                        "matrix_kind": self.matrix_kind,
+                        "matrix_csv_path": str(self.source_path),
+                        "row_index": row_offset,
+                        "column_index": col_offset,
+                        "row_terminal": row_name,
+                        "column_terminal": col_name,
+                        "element": f"{row_name} -> {col_name}",
+                        "is_diagonal": row_offset == col_offset,
+                        "value_si": value,
+                        "source_unit": self.source_unit,
+                        "display_value": value * self.display_scale,
+                        "display_unit": self.display_unit,
+                        "display_scale": self.display_scale,
+                    }
+                )
+        return pd.DataFrame.from_records(rows)
+
+
 def load_sparams(
     source: str | Path | dict,
     *,
@@ -588,6 +664,66 @@ def load_postprocessing_index_map(
     )
 
 
+def load_terminal_matrix(
+    source: str | Path | dict,
+    matrix_kind: str = "C",
+    *,
+    index_map_path: str | Path | None = None,
+    terminal_names: tuple[str, ...] | list[str] | None = None,
+    display_scale: float | None = None,
+    display_unit: str | None = None,
+) -> TerminalMatrix:
+    """Load a Palace electrostatic terminal matrix with named terminals.
+
+    Args:
+        source: CSV path, simulation directory, Palace output directory, or
+            results dict.
+        matrix_kind: One of ``"C"``, ``"Cm"``, or ``"Cinv"``.
+        index_map_path: Optional explicit ``palace_index_map.json`` path.
+        terminal_names: Optional explicit terminal labels. If omitted, labels
+            come from ``Boundaries.Terminal`` rows in ``palace_index_map.json``.
+        display_scale: Optional display scale. Defaults to fF for capacitance
+            matrices and 1 for inverse capacitance.
+        display_unit: Optional display unit label.
+
+    Returns:
+        :class:`TerminalMatrix` with SI values and display helpers.
+    """
+    kind = _normalize_terminal_matrix_kind(matrix_kind)
+    spec = _TERMINAL_MATRIX_SPECS[kind]
+    csv_path = _resolve_terminal_matrix_csv(source, kind)
+    raw = _read_terminal_matrix_csv(csv_path)
+    labels = _resolve_terminal_matrix_labels(
+        source,
+        raw.shape[0],
+        index_map_path=index_map_path,
+        terminal_names=terminal_names,
+    )
+    matrix = cast("pd.DataFrame", raw.copy())
+    matrix.index = labels
+    matrix.columns = labels
+    matrix.attrs.update(
+        {
+            "matrix_kind": kind,
+            "source_unit": spec["source_unit"],
+            "csv_path": str(csv_path),
+        }
+    )
+    return TerminalMatrix(
+        source_path=csv_path,
+        matrix_kind=kind,
+        dataframe=matrix,
+        terminal_names=tuple(labels),
+        source_unit=spec["source_unit"],
+        display_scale=(
+            float(spec["display_scale"])
+            if display_scale is None
+            else float(display_scale)
+        ),
+        display_unit=spec["display_unit"] if display_unit is None else display_unit,
+    )
+
+
 def load_indexed_csv(
     source: str | Path | dict,
     csv_name: str | None = None,
@@ -707,6 +843,14 @@ def _parse_indexed_csv_column(col: str) -> tuple[str, int, str] | None:
     )
 
 
+def _parse_terminal_matrix_column_index(column: str) -> int:
+    match = _TERMINAL_MATRIX_COLUMN_RE.search(column.strip())
+    if match is None:
+        msg = f"Could not parse Palace electrostatic matrix column: {column!r}"
+        raise ValueError(msg)
+    return int(match.group("index"))
+
+
 def _section_for_csv(csv_name: str) -> str:
     try:
         return _CSV_INDEX_SECTIONS[csv_name]
@@ -744,6 +888,149 @@ def _resolve_source(
         msg = f"port-S.csv not found in {output_dir} or its subdirectories"
         raise FileNotFoundError(msg)
     return csv_path, output_dir
+
+
+def _resolve_terminal_matrix_csv(source: str | Path | dict, matrix_kind: str) -> Path:
+    csv_name = str(_TERMINAL_MATRIX_SPECS[matrix_kind]["file_name"])
+    if isinstance(source, dict):
+        csv_val = source.get(csv_name)
+        if csv_val is None:
+            msg = f"Results dict has no {csv_name!r} entry"
+            raise FileNotFoundError(msg)
+        return Path(csv_val)
+
+    path = Path(source)
+    if path.is_file():
+        return path
+    found = _find_file(path, csv_name)
+    if found is None:
+        msg = f"{csv_name} not found in {path} or its subdirectories"
+        raise FileNotFoundError(msg)
+    return found
+
+
+def _read_terminal_matrix_csv(csv_path: Path) -> pd.DataFrame:
+    import pandas as pd
+
+    if not csv_path.exists():
+        raise FileNotFoundError(csv_path)
+
+    frame = pd.read_csv(csv_path, skipinitialspace=True)
+    frame.columns = [str(column).strip() for column in frame.columns]
+    if frame.empty or len(frame.columns) < 2:
+        msg = f"Palace electrostatic matrix CSV is empty or incomplete: {csv_path}"
+        raise ValueError(msg)
+
+    row_column = frame.columns[0]
+    row_indices = frame[row_column].astype(float).round().astype(int).tolist()
+    matrix_columns = list(frame.columns[1:])
+    column_indices = [
+        _parse_terminal_matrix_column_index(column) for column in matrix_columns
+    ]
+
+    if len(set(row_indices)) != len(row_indices):
+        msg = f"Duplicate Palace matrix row indices in {csv_path}: {row_indices}"
+        raise ValueError(msg)
+    if len(set(column_indices)) != len(column_indices):
+        msg = f"Duplicate Palace matrix column indices in {csv_path}: {column_indices}"
+        raise ValueError(msg)
+    if len(row_indices) != len(column_indices):
+        msg = (
+            f"Palace electrostatic matrix must be square; found "
+            f"{len(row_indices)} rows and {len(column_indices)} columns in {csv_path}"
+        )
+        raise ValueError(msg)
+
+    expected_indices = set(range(1, len(row_indices) + 1))
+    if set(row_indices) != expected_indices or set(column_indices) != expected_indices:
+        msg = (
+            "Palace electrostatic matrix indices must be contiguous and 1-based "
+            f"in {csv_path}"
+        )
+        raise ValueError(msg)
+
+    matrix = frame[matrix_columns].astype(float)
+    matrix.index = row_indices
+    matrix.columns = column_indices
+    return cast(
+        "pd.DataFrame", matrix.sort_index().reindex(sorted(column_indices), axis=1)
+    )
+
+
+def _resolve_terminal_matrix_labels(
+    source: str | Path | dict,
+    terminal_count: int,
+    *,
+    index_map_path: str | Path | None,
+    terminal_names: tuple[str, ...] | list[str] | None,
+) -> tuple[str, ...]:
+    if terminal_names is not None:
+        labels = tuple(str(name) for name in terminal_names)
+    else:
+        labels = _terminal_names_from_index_map(
+            source,
+            terminal_count,
+            index_map_path=index_map_path,
+        )
+
+    if len(labels) != terminal_count:
+        msg = (
+            f"Terminal label count ({len(labels)}) does not match Palace matrix "
+            f"size ({terminal_count})."
+        )
+        raise ValueError(msg)
+    if len(set(labels)) != len(labels):
+        msg = f"Terminal labels must be unique: {labels!r}"
+        raise ValueError(msg)
+    return labels
+
+
+def _terminal_names_from_index_map(
+    source: str | Path | dict,
+    terminal_count: int,
+    *,
+    index_map_path: str | Path | None,
+) -> tuple[str, ...]:
+    index_map = load_postprocessing_index_map(source, index_map_path=index_map_path)
+    labels_by_index: dict[int, str] = {}
+    for index in range(1, terminal_count + 1):
+        entries = index_map.entry_for_index("Boundaries.Terminal", index)
+        if entries is None:
+            labels_by_index[index] = f"T{index}"
+            continue
+        terminal_name = entries.extra.get("terminal_name")
+        labels_by_index[index] = (
+            str(terminal_name)
+            if terminal_name is not None
+            else entries.primary_physical_name
+        )
+    return tuple(labels_by_index[index] for index in range(1, terminal_count + 1))
+
+
+def _normalize_terminal_matrix_kind(matrix_kind: str) -> str:
+    aliases = {
+        "c": "C",
+        "capacitance": "C",
+        "mutual": "Cm",
+        "cm": "Cm",
+        "c_m": "Cm",
+        "inverse": "Cinv",
+        "cinv": "Cinv",
+        "c_inv": "Cinv",
+    }
+    key = matrix_kind.strip()
+    normalized = _TERMINAL_MATRIX_SPECS.get(key)
+    if normalized is not None:
+        return key
+    alias = aliases.get(key.lower())
+    if alias is not None:
+        return alias
+    allowed = ", ".join(_TERMINAL_MATRIX_SPECS)
+    msg = (
+        f"Unknown Palace terminal matrix kind {matrix_kind!r}; "
+        f"expected one of {allowed}."
+    )
+    raise ValueError(msg)
 
 
 def _resolve_report_csv(source: str | Path | dict, csv_name: str | None) -> Path:

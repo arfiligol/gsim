@@ -104,11 +104,13 @@ from gsim.palace.results import (
     IndexedCsvColumn,
     SParam,
     SParams,
+    TerminalMatrix,
     get_port_map,
     load_fields,
     load_indexed_csv,
     load_postprocessing_index_map,
     load_sparams,
+    load_terminal_matrix,
 )
 
 # Visualization
@@ -146,6 +148,7 @@ __all__ = [
     "Stack",
     "StackLayer",
     "TerminalConfig",
+    "TerminalMatrix",
     "TransientConfig",
     "ValidationResult",
     "WavePortConfig",
@@ -164,6 +167,7 @@ __all__ = [
     "load_postprocessing_index_map",
     "load_sparams",
     "load_stack_yaml",
+    "load_terminal_matrix",
     "parse_layer_stack",
     "plot_cross_section",
     "plot_mesh",

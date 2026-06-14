@@ -14,6 +14,7 @@ from gsim.palace.results import (
     load_indexed_csv,
     load_postprocessing_index_map,
     load_sparams,
+    load_terminal_matrix,
 )
 
 
@@ -82,6 +83,65 @@ def indexed_report_dir(tmp_path: Path) -> Path:
     )
     (palace_dir / "surface-Q.csv").write_text(
         "m, p_surf[2], Q_surf[2]\n1, 1.0e-7, 2.0e6\n"
+    )
+    return tmp_path
+
+
+@pytest.fixture
+def terminal_matrix_dir(tmp_path: Path) -> Path:
+    """Create a minimal Palace electrostatic matrix output with an index map."""
+    palace_dir = tmp_path / "output" / "palace"
+    palace_dir.mkdir(parents=True)
+
+    index_map = {
+        "schema_version": 1,
+        "entries": [
+            {
+                "section": "Boundaries.Terminal",
+                "index": 1,
+                "entry_name": "left_metal",
+                "role": "pec_surface",
+                "attributes": [11],
+                "physical_names": ["D1_TOP_M1@left"],
+                "dimension": 2,
+                "terminal_name": "left",
+            },
+            {
+                "section": "Boundaries.Terminal",
+                "index": 2,
+                "entry_name": "right_metal",
+                "role": "pec_surface",
+                "attributes": [12],
+                "physical_names": ["D1_TOP_M1@right"],
+                "dimension": 2,
+                "terminal_name": "right",
+            },
+        ],
+    }
+    (tmp_path / "palace_index_map.json").write_text(json.dumps(index_map))
+    _write_terminal_matrix_csv(
+        palace_dir / "terminal-C.csv",
+        "C",
+        [
+            [1.0e-15, -2.0e-15],
+            [-2.0e-15, 4.0e-15],
+        ],
+    )
+    _write_terminal_matrix_csv(
+        palace_dir / "terminal-Cm.csv",
+        "Cm",
+        [
+            [0.0, 2.0e-15],
+            [2.0e-15, 0.0],
+        ],
+    )
+    _write_terminal_matrix_csv(
+        palace_dir / "terminal-Cinv.csv",
+        "Cinv",
+        [
+            [1.0e15, 2.0e15],
+            [2.0e15, 4.0e15],
+        ],
     )
     return tmp_path
 
@@ -331,6 +391,86 @@ class TestIndexedCsv:
             load_indexed_csv(csv_path)
 
 
+class TestTerminalMatrix:
+    """Tests for electrostatic terminal matrix loading through index maps."""
+
+    def test_load_terminal_matrix_names_from_index_map(
+        self, terminal_matrix_dir: Path
+    ) -> None:
+        matrix = load_terminal_matrix(terminal_matrix_dir, "C")
+
+        assert matrix.matrix_kind == "C"
+        assert matrix.terminal_names == ("left", "right")
+        assert list(matrix.dataframe.index) == ["left", "right"]
+        assert list(matrix.dataframe.columns) == ["left", "right"]
+        assert matrix.dataframe.loc["left", "right"] == pytest.approx(-2.0e-15)
+        assert matrix.dataframe.attrs["source_unit"] == "F"
+        assert matrix.display_dataframe.loc["left", "left"] == pytest.approx(1.0)
+        assert matrix.display_dataframe.attrs["display_unit"] == "fF"
+
+        table = matrix.to_long_dataframe()
+        left_right = table.set_index("element").loc["left -> right"]
+        assert left_right["row_index"] == 1
+        assert left_right["column_index"] == 2
+        assert not left_right["is_diagonal"]
+        assert left_right["value_si"] == pytest.approx(-2.0e-15)
+        assert left_right["display_value"] == pytest.approx(-2.0)
+
+    def test_load_terminal_matrix_accepts_results_dict(
+        self, terminal_matrix_dir: Path
+    ) -> None:
+        results = {
+            "terminal-Cm.csv": terminal_matrix_dir
+            / "output"
+            / "palace"
+            / "terminal-Cm.csv",
+            "palace_index_map.json": terminal_matrix_dir / "palace_index_map.json",
+        }
+
+        matrix = load_terminal_matrix(results, "Cm")
+
+        assert matrix.matrix_kind == "Cm"
+        assert matrix.dataframe.loc["left", "right"] == pytest.approx(2.0e-15)
+        assert matrix.display_dataframe.loc["left", "right"] == pytest.approx(2.0)
+
+    def test_load_terminal_matrix_supports_cinv_units(
+        self, terminal_matrix_dir: Path
+    ) -> None:
+        matrix = load_terminal_matrix(terminal_matrix_dir, "Cinv")
+
+        assert matrix.source_unit == "1/F"
+        assert matrix.display_unit == "1/F"
+        assert matrix.display_dataframe.loc["right", "right"] == pytest.approx(4.0e15)
+
+    def test_load_terminal_matrix_accepts_explicit_terminal_names(
+        self, tmp_path: Path
+    ) -> None:
+        csv_path = tmp_path / "terminal-C.csv"
+        _write_terminal_matrix_csv(
+            csv_path,
+            "C",
+            [
+                [1.0e-15, 0.0],
+                [0.0, 2.0e-15],
+            ],
+        )
+
+        matrix = load_terminal_matrix(csv_path, terminal_names=("top", "bottom"))
+
+        assert matrix.terminal_names == ("top", "bottom")
+        assert matrix.display_dataframe.loc["bottom", "bottom"] == pytest.approx(2.0)
+
+    def test_load_terminal_matrix_rejects_terminal_label_mismatch(
+        self, terminal_matrix_dir: Path
+    ) -> None:
+        with pytest.raises(ValueError, match="Terminal label count"):
+            load_terminal_matrix(
+                terminal_matrix_dir,
+                "C",
+                terminal_names=("left", "right", "readout"),
+            )
+
+
 class TestSParamsSaveLoad:
     """Tests for SParams save_npz/from_file round-trip."""
 
@@ -356,3 +496,29 @@ class TestSParamsSaveLoad:
     def test_from_file_missing_raises(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError):
             SParams.from_file(tmp_path / "nonexistent.npz")
+
+
+def _write_terminal_matrix_csv(
+    path: Path,
+    matrix_kind: str,
+    values: list[list[float]],
+) -> None:
+    headers = {
+        "C": "C[i][{index}] (F)",
+        "Cm": "C_m[i][{index}] (F)",
+        "Cinv": "C_inv[i][{index}] (1/F)",
+    }
+    lines = [
+        ",".join(
+            ["i"]
+            + [
+                headers[matrix_kind].format(index=index)
+                for index in range(1, len(values) + 1)
+            ]
+        )
+    ]
+    for row_index, row in enumerate(values, start=1):
+        lines.append(
+            ",".join([f"{float(row_index):.2e}"] + [str(value) for value in row])
+        )
+    path.write_text("\n".join(lines) + "\n")
