@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from gdsfactory.component import Component
 
     from gsim.common import Geometry, LayerStack
+    from gsim.palace.mesh import PostprocessingConfig
     from gsim.palace.results import SParams
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,7 @@ class PalaceSimMixin:
     _stack_kwargs: dict[str, Any]
     _pec_blocks: list
     _hints: dict[str, Any]
+    _last_postprocessing_config: PostprocessingConfig | None
     absorbing_boundary: bool
     _airbox_config: dict[str, float]
 
@@ -1350,6 +1352,9 @@ class PalaceSimMixin:
         validate_mesh: bool = True,
         photonic: bool = False,
         photononic: bool | None = None,
+        postprocessing: PostprocessingConfig | None = None,
+        reuse_postprocessing: bool = True,
+        write_artifacts: bool = True,
     ) -> Path:
         """Write Palace config.json after mesh generation.
 
@@ -1358,8 +1363,18 @@ class PalaceSimMixin:
         simulations, pass ``photonic=True`` to skip this validation.
 
         Args:
+            validate_mesh: Validate the generated mesh/config after writing.
             photonic: Skip conductor-oriented mesh validation when ``True``.
             photononic: Deprecated alias for ``photonic``.
+            postprocessing: Optional typed Palace postprocessing config built
+                from the mesh manifest. When provided, its domain and boundary
+                fragments are merged into ``config.json`` and its index map is
+                written beside the config.
+            reuse_postprocessing: Reuse the last provided postprocessing config
+                when ``postprocessing`` is omitted. This keeps upload/run paths
+                from silently dropping a previously configured index map.
+            write_artifacts: Write ``mesh_manifest.json`` and, when
+                postprocessing is active, ``palace_index_map.json``.
 
         Returns:
             Path to the generated config.json
@@ -1390,6 +1405,18 @@ class PalaceSimMixin:
                 "Was mesh() called with write_config=True already?"
             )
 
+        if postprocessing is not None:
+            self._last_postprocessing_config = postprocessing
+        elif reuse_postprocessing:
+            postprocessing = getattr(self, "_last_postprocessing_config", None)
+
+        domain_postprocessing_config = None
+        boundary_postprocessing_config = None
+        if postprocessing is not None:
+            postprocessing_fragments = postprocessing.to_config()
+            domain_postprocessing_config = postprocessing_fragments["domains"]
+            boundary_postprocessing_config = postprocessing_fragments["boundaries"]
+
         stack = self._resolve_stack()
         electrostatic_config = getattr(self, "electrostatic", None)
         terminals = getattr(self, "terminals", None)
@@ -1405,7 +1432,18 @@ class PalaceSimMixin:
             hints=self._hints,
             electrostatic_config=electrostatic_config,
             terminals=terminals or [],
+            postprocessing_config=domain_postprocessing_config,
+            boundary_postprocessing_config=boundary_postprocessing_config,
         )
+
+        if write_artifacts:
+            self._last_mesh_result.manifest.write_json(
+                config_path.parent / "mesh_manifest.json"
+            )
+            if postprocessing is not None:
+                postprocessing.index_map.write_json(
+                    config_path.parent / "palace_index_map.json"
+                )
 
         # Validate mesh and config unless this is a photonic workflow.
         if not photonic and validate_mesh:

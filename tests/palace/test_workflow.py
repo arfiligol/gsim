@@ -13,6 +13,10 @@ import gdsfactory as gf
 import pytest
 
 from gsim.palace import DrivenSim, EigenmodeSim, ElectrostaticSim
+from gsim.palace.mesh import (
+    SurfaceFluxSpec,
+    build_postprocessing_config_from_manifest,
+)
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -160,6 +164,51 @@ class TestDrivenSimWorkflow:
         )
         config_path = driven_sim.write_config(photonic=True)
         assert Path(config_path).exists()
+
+    def test_write_config_accepts_manifest_postprocessing(self, driven_sim):
+        """High-level write_config wires postprocessing config and artifacts."""
+        postprocessing = build_postprocessing_config_from_manifest(
+            driven_sim._last_mesh_result.manifest,
+            surface_flux=(
+                SurfaceFluxSpec(
+                    role="boundary_surface",
+                    entry_names=("absorbing",),
+                    flux_type="Power",
+                    two_sided=None,
+                ),
+            ),
+        )
+
+        config_path = driven_sim.write_config(postprocessing=postprocessing)
+        output_dir = Path(config_path).parent
+        config = json.loads(config_path.read_text())
+
+        assert config["Domains"]["Postprocessing"]["Energy"]
+        assert config["Boundaries"]["Postprocessing"]["SurfaceFlux"][0]["Type"] == (
+            "Power"
+        )
+
+        manifest_path = output_dir / "mesh_manifest.json"
+        index_map_path = output_dir / "palace_index_map.json"
+        assert manifest_path.exists()
+        assert index_map_path.exists()
+
+        manifest_json = json.loads(manifest_path.read_text())
+        index_map_json = json.loads(index_map_path.read_text())
+        assert manifest_json["entries"]
+        assert index_map_json["entries"][0]["section"].startswith(
+            "Domains.Postprocessing"
+        )
+
+        # Upload/run helpers regenerate config.json without passing arguments.
+        # The last explicit postprocessing config must therefore survive a
+        # later write_config() call.
+        driven_sim.write_config()
+        regenerated_config = json.loads(config_path.read_text())
+        assert (
+            regenerated_config["Boundaries"]["Postprocessing"]["SurfaceFlux"][0]["Type"]
+            == "Power"
+        )
 
 
 # ---------------------------------------------------------------------------
