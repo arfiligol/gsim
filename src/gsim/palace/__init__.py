@@ -100,6 +100,7 @@ from gsim.palace.ports import (
 
 # Results utilities
 from gsim.palace.results import (
+    EigenmodeReport,
     Eigenmodes,
     IndexedCsv,
     IndexedCsvColumn,
@@ -109,6 +110,7 @@ from gsim.palace.results import (
     get_port_map,
     load_domain_energy_summary,
     load_eigenmode_history,
+    load_eigenmode_report,
     load_eigenmodes,
     load_fields,
     load_indexed_csv,
@@ -132,6 +134,7 @@ __all__ = [
     "DrivenConfig",
     "DrivenSim",
     "EigenmodeConfig",
+    "EigenmodeReport",
     "EigenmodeSim",
     "Eigenmodes",
     "ElectrostaticConfig",
@@ -175,6 +178,7 @@ __all__ = [
     "get_stack",
     "load_domain_energy_summary",
     "load_eigenmode_history",
+    "load_eigenmode_report",
     "load_eigenmodes",
     "load_fields",
     "load_indexed_csv",

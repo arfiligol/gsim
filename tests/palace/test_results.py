@@ -9,11 +9,13 @@ import numpy as np
 import pytest
 
 from gsim.palace.results import (
+    EigenmodeReport,
     Eigenmodes,
     SParams,
     get_port_map,
     load_domain_energy_summary,
     load_eigenmode_history,
+    load_eigenmode_report,
     load_eigenmodes,
     load_indexed_csv,
     load_port_epr_summary,
@@ -107,6 +109,29 @@ def indexed_report_dir(tmp_path: Path) -> Path:
     )
     (palace_dir / "port-EPR.csv").write_text("m, p[3]\n1, -2.5e-4\n")
     return tmp_path
+
+
+@pytest.fixture
+def eigenmode_report_dir(indexed_report_dir: Path) -> Path:
+    """Create a Palace eigenmode report output with AMR and EPR tables."""
+    palace_dir = indexed_report_dir / "output" / "palace"
+    iteration01 = palace_dir / "iteration01"
+    iteration01.mkdir()
+    _write_eig_csv(
+        iteration01 / "eig.csv",
+        [
+            [1, 6.0, 0.01, 100.0, 1.0e-7, 1.0e-4],
+            [2, 8.0, 0.02, 200.0, 2.0e-7, 2.0e-4],
+        ],
+    )
+    _write_eig_csv(
+        palace_dir / "eig.csv",
+        [
+            [1, 6.3, 0.02, 110.0, 1.0e-8, 1.0e-5],
+            [2, 8.4, 0.04, 210.0, 2.0e-8, 2.0e-5],
+        ],
+    )
+    return indexed_report_dir
 
 
 @pytest.fixture
@@ -506,6 +531,73 @@ class TestEigenmodes:
         assert len(final_rows) == 1
         assert final_rows.iloc[0]["source_kind"] == "final"
         assert final_rows.iloc[0]["source_iteration"] is None
+
+
+class TestEigenmodeReport:
+    """Tests for composed Palace eigenmode report bundles."""
+
+    def test_load_eigenmode_report_composes_existing_summaries(
+        self,
+        eigenmode_report_dir: Path,
+    ) -> None:
+        report = load_eigenmode_report(eigenmode_report_dir)
+
+        assert isinstance(report, EigenmodeReport)
+        assert report.eigenmodes.n_modes == 2
+        assert report.modes["frequency_ghz"].tolist() == pytest.approx([6.3, 8.4])
+        assert report.mode_history["iteration_index"].drop_duplicates().tolist() == [
+            1,
+            2,
+        ]
+        assert report.pass_summary["n_modes"].tolist() == [2, 2]
+        assert report.domain_energy.iloc[0]["source_name"] == "D1_SUBSTRATE"
+        assert report.surface_q.iloc[0]["interface_type"] == "MA"
+        assert (
+            report.surface_interface_summary.set_index("interface_type").loc[
+                "MA",
+                "surface_count",
+            ]
+            == 1
+        )
+        assert report.port_epr.iloc[0]["source_name"] == "P1"
+        assert report.index_map["entry_name"].tolist() == [
+            "substrate",
+            "ma_interface",
+            "readout_port_surface",
+        ]
+        assert report.missing_reports == ()
+        assert bool(report.sources.set_index("name").loc["surface-Q.csv", "loaded"])
+
+    def test_load_eigenmode_report_allows_missing_optional_epr(
+        self,
+        eigenmode_dir: Path,
+    ) -> None:
+        report = load_eigenmode_report(eigenmode_dir)
+
+        assert report.eigenmodes.n_modes == 2
+        assert report.domain_energy.empty
+        assert report.surface_q.empty
+        assert report.port_epr.empty
+        assert report.index_map.empty
+        assert report.missing_reports == (
+            "palace_index_map.json",
+            "domain-E.csv",
+            "surface-Q.csv",
+            "port-EPR.csv",
+        )
+        sources = report.sources.set_index("name")
+        assert bool(sources.loc["eig.csv", "loaded"])
+        assert not bool(sources.loc["domain-E.csv", "loaded"])
+
+    def test_load_eigenmode_report_requires_bulk_and_surface_epr(
+        self,
+        eigenmode_dir: Path,
+    ) -> None:
+        with pytest.raises(
+            FileNotFoundError,
+            match=r"domain-E\.csv, surface-Q\.csv",
+        ):
+            load_eigenmode_report(eigenmode_dir, require_epr=True)
 
 
 class TestIndexedCsv:

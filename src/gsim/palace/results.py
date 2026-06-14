@@ -46,6 +46,7 @@ _CSV_INDEX_SECTIONS = {
     "surface-Q.csv": "Boundaries.Postprocessing.Dielectric",
     "port-EPR.csv": "Boundaries.Postprocessing.SurfaceFlux",
 }
+_REPORT_SOURCE_COLUMNS = ("name", "path", "required", "present", "loaded", "message")
 _TERMINAL_MATRIX_SPECS = {
     "C": {
         "file_name": "terminal-C.csv",
@@ -526,6 +527,39 @@ class Eigenmodes:
 
 
 @dataclass(frozen=True)
+class EigenmodeReport:
+    """Composed Palace Eigenmode report tables for notebook workflows."""
+
+    eigenmodes: Eigenmodes
+    mode_history: pd.DataFrame
+    pass_summary: pd.DataFrame
+    domain_energy: pd.DataFrame
+    surface_q: pd.DataFrame
+    surface_interface_summary: pd.DataFrame
+    port_epr: pd.DataFrame
+    index_map: pd.DataFrame
+    sources: pd.DataFrame
+
+    @property
+    def modes(self) -> pd.DataFrame:
+        """Return final mode rows with notebook-facing column names."""
+        return self.eigenmodes.to_report_dataframe()
+
+    @property
+    def missing_reports(self) -> tuple[str, ...]:
+        """Optional report names that were expected but absent."""
+        if self.sources.empty:
+            return ()
+        missing = self.sources.loc[
+            (~self.sources["required"])
+            & (~self.sources["present"])
+            & (self.sources["name"] != "iteration*/eig.csv"),
+            "name",
+        ]
+        return tuple(str(name) for name in missing)
+
+
+@dataclass(frozen=True)
 class TerminalMatrix:
     """Palace electrostatic terminal matrix with named terminals."""
 
@@ -851,6 +885,133 @@ def summarize_eigenmode_history(
             "max_abs_relative_delta_to_previous_percent"
         ]
     return summary.sort_values("iteration_index").reset_index(drop=True)
+
+
+def load_eigenmode_report(
+    source: str | Path | dict,
+    *,
+    index_map_path: str | Path | None = None,
+    include_final: bool = True,
+    require_epr: bool = False,
+) -> EigenmodeReport:
+    """Load final Eigenmode rows plus optional indexed EPR report tables.
+
+    This is a thin composition layer over the stricter primitive loaders. The
+    final ``eig.csv`` is required. Palace indexed reports are loaded
+    independently when present and are reported as missing rather than forcing
+    every Eigenmode run to emit all EPR families.
+    """
+    import pandas as pd
+
+    eigenmodes = load_eigenmodes(source)
+    source_rows: list[dict[str, Any]] = []
+    source_rows.append(
+        _report_source_row(
+            "eig.csv",
+            eigenmodes.source_path,
+            required=True,
+            present=True,
+            loaded=True,
+            message="loaded final eigenmode modes",
+        )
+    )
+
+    mode_history = _load_eigenmode_history_for_report(
+        source,
+        eigenmodes,
+        include_final=include_final,
+        source_rows=source_rows,
+    )
+    pass_summary = (
+        _empty_eigenmode_pass_summary()
+        if mode_history.empty
+        else summarize_eigenmode_history(mode_history)
+    )
+
+    resolved_index_map_path = _find_optional_postprocessing_index_map_path(
+        source,
+        index_map_path=index_map_path,
+    )
+    index_map_present = (
+        resolved_index_map_path is not None and resolved_index_map_path.exists()
+    )
+    index_map_loaded = False
+    if index_map_present:
+        index_map = load_postprocessing_index_map(
+            source,
+            index_map_path=resolved_index_map_path,
+        )
+        index_map_frame = _postprocessing_index_map_to_dataframe(index_map)
+        index_map_loaded = True
+        index_message = "loaded postprocessing index map"
+    else:
+        index_map_frame = _empty_index_map_dataframe()
+        index_message = "not found"
+    source_rows.append(
+        _report_source_row(
+            "palace_index_map.json",
+            resolved_index_map_path,
+            required=False,
+            present=index_map_present,
+            loaded=index_map_loaded,
+            message=index_message,
+        )
+    )
+
+    domain_energy, domain_source = _load_optional_eigenmode_report_table(
+        source,
+        "domain-E.csv",
+        loader=load_domain_energy_summary,
+        empty_factory=_empty_domain_energy_summary,
+        index_map_path=resolved_index_map_path,
+        index_map_present=index_map_present,
+    )
+    source_rows.append(domain_source)
+    surface_q, surface_source = _load_optional_eigenmode_report_table(
+        source,
+        "surface-Q.csv",
+        loader=load_surface_q_summary,
+        empty_factory=_empty_surface_q_summary,
+        index_map_path=resolved_index_map_path,
+        index_map_present=index_map_present,
+    )
+    source_rows.append(surface_source)
+    port_epr, port_source = _load_optional_eigenmode_report_table(
+        source,
+        "port-EPR.csv",
+        loader=load_port_epr_summary,
+        empty_factory=_empty_port_epr_summary,
+        index_map_path=resolved_index_map_path,
+        index_map_present=index_map_present,
+    )
+    source_rows.append(port_source)
+
+    if require_epr:
+        required_failures = [
+            row["name"]
+            for row in (domain_source, surface_source)
+            if not bool(row["loaded"])
+        ]
+        if required_failures:
+            failure_names = ", ".join(str(name) for name in required_failures)
+            msg = f"Missing required eigenmode EPR reports: {failure_names}"
+            raise FileNotFoundError(msg)
+
+    surface_interface_summary = summarize_surface_q_by_interface(surface_q)
+    return EigenmodeReport(
+        eigenmodes=eigenmodes,
+        mode_history=mode_history,
+        pass_summary=pass_summary,
+        domain_energy=domain_energy,
+        surface_q=surface_q,
+        surface_interface_summary=surface_interface_summary,
+        port_epr=port_epr,
+        index_map=index_map_frame,
+        sources=pd.DataFrame.from_records(
+            source_rows,
+            columns=_REPORT_SOURCE_COLUMNS,
+        ),
+    )
 
 
 def load_postprocessing_index_map(
@@ -1311,6 +1472,320 @@ def get_port_map(source: str | Path | dict) -> dict[int, str]:
 # -----------------------------------------------------------------------
 # Internal helpers
 # -----------------------------------------------------------------------
+
+
+def _report_source_row(
+    name: str,
+    path: str | Path | None,
+    *,
+    required: bool,
+    present: bool,
+    loaded: bool,
+    message: str,
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "path": None if path is None else str(path),
+        "required": required,
+        "present": present,
+        "loaded": loaded,
+        "message": message,
+    }
+
+
+def _load_eigenmode_history_for_report(
+    source: str | Path | dict,
+    eigenmodes: Eigenmodes,
+    *,
+    include_final: bool,
+    source_rows: list[dict[str, Any]],
+) -> pd.DataFrame:
+    import pandas as pd
+
+    history_source = _eigenmode_history_source(source, eigenmodes.source_path)
+    iteration_paths = _find_eigenmode_iteration_csvs(history_source)
+    source_rows.append(
+        _report_source_row(
+            "iteration*/eig.csv",
+            None,
+            required=False,
+            present=bool(iteration_paths),
+            loaded=bool(iteration_paths),
+            message=(
+                f"loaded {len(iteration_paths)} AMR iteration files"
+                if iteration_paths
+                else "no AMR iteration eig.csv files found"
+            ),
+        )
+    )
+
+    if not include_final and not iteration_paths:
+        return _empty_eigenmode_history()
+
+    try:
+        return load_eigenmode_history(history_source, include_final=include_final)
+    except (FileNotFoundError, ValueError):
+        if not include_final:
+            return _empty_eigenmode_history()
+        final_history = _eigenmodes_to_history_frame(
+            eigenmodes,
+            iteration_index=1,
+            label="Final",
+            is_final=True,
+            source_kind="final",
+            source_iteration=None,
+        )
+        return cast(
+            "pd.DataFrame",
+            _add_eigenmode_convergence_columns(pd.DataFrame(final_history)),
+        )
+
+
+def _eigenmode_history_source(source: str | Path | dict, eig_csv_path: Path) -> Path:
+    if isinstance(source, dict):
+        return eig_csv_path.parent
+
+    path = Path(source)
+    return path.parent if path.is_file() else path
+
+
+def _find_eigenmode_iteration_csvs(source: str | Path) -> tuple[Path, ...]:
+    path = Path(source)
+    if path.is_file() or not path.exists():
+        return ()
+    try:
+        output_dir = _resolve_palace_output_dir(path)
+    except FileNotFoundError:
+        return ()
+    return tuple(
+        iteration_dir / "eig.csv"
+        for iteration_dir, _ in _iteration_dirs(output_dir)
+        if (iteration_dir / "eig.csv").exists()
+    )
+
+
+def _find_optional_postprocessing_index_map_path(
+    source: str | Path | dict,
+    *,
+    index_map_path: str | Path | None,
+) -> Path | None:
+    if index_map_path is not None:
+        return Path(index_map_path)
+    return _find_postprocessing_index_map(source)
+
+
+def _postprocessing_index_map_to_dataframe(
+    index_map: PostprocessingIndexMap,
+) -> pd.DataFrame:
+    import pandas as pd
+
+    rows = [
+        {"schema_version": index_map.schema_version, **row}
+        for row in index_map.to_rows()
+    ]
+    if not rows:
+        return _empty_index_map_dataframe()
+    return pd.DataFrame.from_records(rows)
+
+
+def _load_optional_eigenmode_report_table(
+    source: str | Path | dict,
+    csv_name: str,
+    *,
+    loader: Any,
+    empty_factory: Any,
+    index_map_path: Path | None,
+    index_map_present: bool,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    csv_path = _find_optional_report_csv(source, csv_name)
+    if csv_path is None or not csv_path.exists():
+        return empty_factory(), _report_source_row(
+            csv_name,
+            csv_path,
+            required=False,
+            present=False,
+            loaded=False,
+            message="not found",
+        )
+
+    if not index_map_present:
+        return empty_factory(), _report_source_row(
+            csv_name,
+            csv_path,
+            required=False,
+            present=True,
+            loaded=False,
+            message="missing palace_index_map.json",
+        )
+
+    report_source = {
+        csv_name: csv_path,
+        "palace_index_map.json": index_map_path,
+    }
+    loaded = loader(report_source, index_map_path=index_map_path)
+    return loaded, _report_source_row(
+        csv_name,
+        csv_path,
+        required=False,
+        present=True,
+        loaded=True,
+        message="loaded",
+    )
+
+
+def _find_optional_report_csv(source: str | Path | dict, csv_name: str) -> Path | None:
+    try:
+        return _resolve_report_csv(source, csv_name)
+    except (FileNotFoundError, ValueError):
+        pass
+
+    if isinstance(source, dict):
+        for value in source.values():
+            path = Path(value)
+            root = path.parent if path.suffix else path
+            found = _find_file(root, csv_name) if root.exists() else None
+            if found is not None:
+                return found
+        return None
+
+    path = Path(source)
+    root = path.parent if path.is_file() else path
+    if not root.exists():
+        return None
+    return _find_file(root, csv_name)
+
+
+def _empty_eigenmode_history() -> pd.DataFrame:
+    import pandas as pd
+
+    return pd.DataFrame(
+        columns=[
+            "iteration_index",
+            "label",
+            "is_final",
+            "source_kind",
+            "source_iteration",
+            "source_path",
+            "mode_index",
+            "frequency_ghz",
+            "imaginary_frequency_ghz",
+            "q_factor",
+            "backward_error",
+            "absolute_error",
+        ]
+    )
+
+
+def _empty_eigenmode_pass_summary() -> pd.DataFrame:
+    import pandas as pd
+
+    return pd.DataFrame(
+        columns=[
+            "iteration_index",
+            "label",
+            "is_final",
+            "n_modes",
+            "max_abs_delta_to_previous_mhz",
+            "max_abs_relative_delta_to_previous_percent",
+            "max_abs_delta_to_final_mhz",
+            "max_abs_relative_delta_to_final_percent",
+            "max_abs_imaginary_relative_delta_to_previous_percent",
+            "hfss_max_delta_freq_percent",
+        ]
+    )
+
+
+def _empty_index_map_dataframe() -> pd.DataFrame:
+    import pandas as pd
+
+    return pd.DataFrame(
+        columns=[
+            "schema_version",
+            "section",
+            "index",
+            "entry_name",
+            "role",
+            "attributes",
+            "physical_names",
+            "dimension",
+            "source",
+            "interface_of",
+            "exterior_of",
+            "metadata",
+        ]
+    )
+
+
+def _empty_domain_energy_summary() -> pd.DataFrame:
+    import pandas as pd
+
+    return pd.DataFrame(
+        columns=[
+            "row_index",
+            "sample_column",
+            "sample_value",
+            "mode_index",
+            "domain_index",
+            "section",
+            "source_name",
+            "physical_name",
+            "entry_name",
+            "role",
+            "attributes",
+            "E_elec_j",
+            "E_mag_j",
+            "p_elec",
+            "p_mag",
+        ]
+    )
+
+
+def _empty_surface_q_summary() -> pd.DataFrame:
+    import pandas as pd
+
+    return pd.DataFrame(
+        columns=[
+            "row_index",
+            "sample_column",
+            "sample_value",
+            "mode_index",
+            "surface_index",
+            "section",
+            "source_name",
+            "physical_name",
+            "entry_name",
+            "role",
+            "attributes",
+            "interface_type",
+            "p_surf",
+            "q_surf",
+            "inverse_q",
+        ]
+    )
+
+
+def _empty_port_epr_summary() -> pd.DataFrame:
+    import pandas as pd
+
+    return pd.DataFrame(
+        columns=[
+            "row_index",
+            "sample_column",
+            "sample_value",
+            "mode_index",
+            "port_index",
+            "section",
+            "source_name",
+            "physical_name",
+            "entry_name",
+            "role",
+            "attributes",
+            "postprocessing_type",
+            "p_port",
+            "abs_p_port",
+            "abs_p_port_fraction",
+        ]
+    )
 
 
 def _load_indexed_quantity_summary(
