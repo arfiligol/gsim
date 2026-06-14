@@ -301,7 +301,7 @@ def _setup_mesh_fields(
                     continue
 
                 # Skip exterior/domain-boundary surfaces — these are surfaces
-                # that only belong to one volume (labelled "...__None" in the
+                # that only belong to one volume (labelled "...___None" in the
                 # boolean pipeline). Refining their edges would force fine mesh
                 # at the simulation domain boundary, wasting elements where no
                 # internal field concentration exists.
@@ -309,7 +309,7 @@ def _setup_mesh_fields(
                 is_exterior = False
                 for pg_tag in pg_tags:
                     name = gmsh.model.getPhysicalName(dim, pg_tag)
-                    if name and "__None" in name:
+                    if name and gmsh_utils.is_exterior_physical_name(name):
                         is_exterior = True
                         break
                 if is_exterior:

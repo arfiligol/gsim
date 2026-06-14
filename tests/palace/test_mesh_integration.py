@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 
 import gdsfactory as gf
+import gmsh
 import pytest
 
 from gsim.common import Layer, LayerStack
@@ -68,6 +69,25 @@ def _make_sim(component, tmp_path, planar_conductors=False, layer="topmetal2"):
     return sim
 
 
+def _mesh_physical_names(mesh_path: Path) -> set[str]:
+    """Read physical group names from a generated mesh artifact."""
+    was_initialized = gmsh.isInitialized()
+    if not was_initialized:
+        gmsh.initialize()
+    try:
+        gmsh.open(str(mesh_path))
+        names = {
+            gmsh.model.getPhysicalName(dim, tag)
+            for dim, tag in gmsh.model.getPhysicalGroups()
+            if gmsh.model.getPhysicalName(dim, tag)
+        }
+        gmsh.clear()
+    finally:
+        if not was_initialized:
+            gmsh.finalize()
+    return names
+
+
 @pytest.fixture(scope="module")
 def volumetric_sim(tmp_path_factory):
     """Mesh once with volumetric conductors, share across tests."""
@@ -117,6 +137,18 @@ class TestCPWMeshVolumetricConductors:
         """Absorbing boundary surfaces must be present."""
         groups = volumetric_sim._last_mesh_result.groups
         assert "absorbing" in groups["boundary_surfaces"], "No absorbing boundary"
+
+    def test_generated_interface_names_use_meshwell_delimiter(self, volumetric_sim):
+        """Generated interface physical names use meshwell-style delimiters."""
+        mesh_path = Path(volumetric_sim._output_dir) / "palace.msh"
+        physical_names = _mesh_physical_names(mesh_path)
+
+        assert any("___" in name for name in physical_names)
+        assert any(name.endswith("___None") for name in physical_names)
+        assert not any(
+            name.endswith("__None") and not name.endswith("___None")
+            for name in physical_names
+        )
 
     def test_config_json_valid(self, volumetric_sim):
         """Generated config.json must have required Palace sections."""

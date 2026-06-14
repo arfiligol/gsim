@@ -427,12 +427,12 @@ def assign_physical_groups(
         }
         via_boundary: dict[str, list[int]] = {}
         for pg_name, pg_tag in pg_map.items():
-            parts = pg_name.split("__")
+            parts = gmsh_utils.split_interface_physical_name(pg_name)
             via_parts = [p for p in parts if p in via_layers]
             if len(via_parts) != 1:
                 continue
             others = [p for p in parts if p != via_parts[0]]
-            # Skip outer-boundary side ("__None") and via<->conductor interfaces
+            # Skip outer-boundary side ("___None") and via<->conductor interfaces
             if not others or "None" in others:
                 continue
             if any(o in cond_via_names for o in others):
@@ -441,9 +441,9 @@ def assign_physical_groups(
         if via_boundary:
             groups["via_boundary_surfaces"] = via_boundary
 
-    # --- Boundary surfaces (outer faces labelled *__None by the pipeline) ---
+    # --- Boundary surfaces (outer faces labelled *___None by the pipeline) ---
     boundary_pgs: list[int] = [
-        pg for name, pg in pg_map.items() if name.endswith("__None")
+        pg for name, pg in pg_map.items() if gmsh_utils.is_exterior_physical_name(name)
     ]
     if boundary_pgs:
         groups["boundary_surfaces"]["absorbing"] = {

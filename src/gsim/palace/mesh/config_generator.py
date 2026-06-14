@@ -495,7 +495,7 @@ def generate_palace_config(
 
     if "absorbing" in groups["boundary_surfaces"] and absorbing_boundary:
         absorbing_pg = groups["boundary_surfaces"]["absorbing"]["phys_group"]
-        # phys_group may be a list (multiple __None groups) or a single int
+        # phys_group may be a list (multiple ___None groups) or a single int
         attrs = absorbing_pg if isinstance(absorbing_pg, list) else [absorbing_pg]
         boundaries["Absorbing"] = {
             "Attributes": attrs,

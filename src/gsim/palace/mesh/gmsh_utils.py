@@ -12,6 +12,27 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 _CORNER_TURN_THRESHOLD_DEG = 45.0
+INTERFACE_DELIMITER = "___"
+_LEGACY_INTERFACE_DELIMITER = "__"
+_EXTERIOR_SUFFIXES = (
+    f"{INTERFACE_DELIMITER}None",
+    f"{_LEGACY_INTERFACE_DELIMITER}None",
+)
+
+
+def is_exterior_physical_name(name: str) -> bool:
+    """Return whether a physical name identifies a one-sided exterior boundary."""
+    return name.endswith(_EXTERIOR_SUFFIXES)
+
+
+def split_interface_physical_name(name: str) -> tuple[str, ...]:
+    """Split a mesh interface physical name, accepting legacy delimiters."""
+    if INTERFACE_DELIMITER in name:
+        return tuple(name.split(INTERFACE_DELIMITER))
+    if _LEGACY_INTERFACE_DELIMITER in name:
+        return tuple(name.split(_LEGACY_INTERFACE_DELIMITER))
+    return (name,)
+
 
 # ---------------------------------------------------------------------------
 # Minimalistic meshwell-style entity + boolean pipeline
@@ -276,7 +297,11 @@ def run_boolean_pipeline(entities: list[Entity]) -> dict[str, int]:
     for stag, names in surf_to_names.items():
         if stag in assigned_surfs:
             continue
-        label = "__".join(sorted(names)) if len(names) > 1 else f"{names[0]}__None"
+        label = (
+            INTERFACE_DELIMITER.join(sorted(names))
+            if len(names) > 1
+            else f"{names[0]}{INTERFACE_DELIMITER}None"
+        )
         name_combo_to_surfs.setdefault(label, []).append(stag)
 
     for label, stags in name_combo_to_surfs.items():
@@ -989,7 +1014,7 @@ def set_periodic_mesh(
         assignments on periodic faces:
 
         1. periodic donor/receiver groups are created from matched side surfaces
-        2. those surfaces are removed from existing ``*__None`` groups
+        2. those surfaces are removed from existing ``*___None`` groups
 
         This preserves MFEM's one-boundary-element-per-face requirement.
 
@@ -1008,12 +1033,12 @@ def set_periodic_mesh(
         raise ValueError(msg)
 
     # Only use outer boundary dim=2 groups as periodic candidates.
-    # In the boolean pipeline these are labeled with the "__None" suffix.
+    # In the boolean pipeline these are labeled with the "___None" suffix.
     # Including all dim=2 groups can accidentally pair interior interfaces,
     # which can produce invalid non-manifold topology in downstream solvers.
     surface_tags: set[int] = set()
     for pg_name, pg_tag in pg_map.items():
-        if not pg_name.endswith("__None"):
+        if not is_exterior_physical_name(pg_name):
             continue
         if (2, pg_tag) not in gmsh.model.getPhysicalGroups(2):
             continue
@@ -1126,7 +1151,7 @@ def set_periodic_mesh(
     logger.info("Matched %s periodic surface pairs (direction=%s)", matched, direction)
 
     # Rebuild physical groups to avoid overlapping boundary assignments:
-    # remove periodic-side surfaces from existing *__None groups, then create
+    # remove periodic-side surfaces from existing *___None groups, then create
     # dedicated periodic donor/receiver groups for Palace config generation.
     master_set = {int(tag) for tag in master_surfs}
     slave_set = {int(tag) for tag in slave_surfs}
@@ -1135,7 +1160,7 @@ def set_periodic_mesh(
     if periodic_side_surfaces:
         updated_pg_map = dict(pg_map)
         for pg_name, pg_tag in list(pg_map.items()):
-            if not pg_name.endswith("__None"):
+            if not is_exterior_physical_name(pg_name):
                 continue
             if (2, pg_tag) not in gmsh.model.getPhysicalGroups(2):
                 continue
