@@ -446,6 +446,17 @@ class TestElectrostaticSimWorkflow:
         assert "LumpedPort" not in boundaries
         assert "WavePort" not in boundaries
 
+        index_map_path = Path(electrostatic_sim._output_dir) / "palace_index_map.json"
+        assert index_map_path.exists()
+        index_map = json.loads(index_map_path.read_text())
+        terminal_rows = [
+            row
+            for row in index_map["entries"]
+            if row["section"] == "Boundaries.Terminal"
+        ]
+        assert {row["index"] for row in terminal_rows} == {1, 2}
+        assert {row["terminal_name"] for row in terminal_rows} == {"T1", "T2"}
+
     def test_planar_conductor_terminal_not_grounded(
         self, tmp_path_factory, cpw_component
     ):

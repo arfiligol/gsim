@@ -13,6 +13,7 @@ from gsim.palace.mesh.postprocessing import (
     DielectricInterfaceSpec,
     SurfaceFluxSpec,
     build_postprocessing_config_from_manifest,
+    build_terminal_index_map_from_manifest,
 )
 
 
@@ -354,6 +355,64 @@ def test_postprocessing_index_map_supports_bidirectional_lookup() -> None:
     assert index_map.entry_for_index(
         "Boundaries.Postprocessing.SurfaceFlux", 2
     ).attributes == (41, 42)
+
+
+def test_build_terminal_index_map_from_manifest_links_boundary_indices() -> None:
+    manifest = build_mesh_manifest(_minimal_groups())
+
+    index_map = build_terminal_index_map_from_manifest(
+        manifest,
+        (
+            {"Index": 1, "Attributes": [21]},
+            {"Index": 2, "Attributes": [22, 61]},
+        ),
+        terminal_names=("signal", "ground"),
+    )
+
+    assert index_map.to_rows() == (
+        {
+            "section": "Boundaries.Terminal",
+            "index": 1,
+            "entry_name": "metal_xy",
+            "role": "conductor_surface",
+            "attributes": [21],
+            "physical_names": ["metal_xy"],
+            "entity_tags": [201],
+            "dimension": 2,
+            "source": "gsim_gmsh",
+            "metadata": {"dim": 2},
+            "terminal_name": "signal",
+            "terminal_attributes": [21],
+        },
+        {
+            "section": "Boundaries.Terminal",
+            "index": 2,
+            "entry_name": "ground",
+            "role": "pec_surface",
+            "attributes": [22],
+            "physical_names": ["ground"],
+            "entity_tags": [202],
+            "dimension": 2,
+            "source": "gsim_gmsh",
+            "metadata": {"dim": 2},
+            "terminal_name": "ground",
+            "terminal_attributes": [22, 61],
+        },
+        {
+            "section": "Boundaries.Terminal",
+            "index": 2,
+            "entry_name": "via_boundary",
+            "role": "via_boundary_surface",
+            "attributes": [61, 62],
+            "physical_names": ["via_boundary"],
+            "dimension": 2,
+            "source": "gsim_gmsh",
+            "terminal_name": "ground",
+            "terminal_attributes": [22, 61],
+        },
+    )
+    assert index_map.physical_name_for_index("Boundaries.Terminal", 1) == "metal_xy"
+    assert index_map.indices_for_physical_name("via_boundary") == (2,)
 
 
 def test_generate_palace_config_merges_boundary_postprocessing(tmp_path: Path) -> None:

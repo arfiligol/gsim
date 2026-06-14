@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -294,6 +294,60 @@ def build_postprocessing_config_from_manifest(
     )
 
 
+def build_terminal_index_map_from_manifest(
+    manifest: MeshManifest,
+    terminal_entries: Iterable[Mapping[str, Any]],
+    *,
+    terminal_names: tuple[str, ...] = (),
+) -> PostprocessingIndexMap:
+    """Build an index map for Palace ``Boundaries.Terminal`` entries.
+
+    Electrostatic capacitance matrices refer to Palace terminal indices. This
+    builder links those indices back to the manifest physical groups selected
+    by generated ``config.json`` terminal attributes.
+    """
+    manifest_entries = {
+        attribute: entry
+        for entry in manifest.entries
+        if entry.role
+        in {
+            "conductor_surface",
+            "pec_surface",
+            "via_boundary_surface",
+        }
+        for attribute in entry.attributes
+    }
+    index_entries: list[PostprocessingIndexEntry] = []
+
+    for terminal_entry in terminal_entries:
+        index = terminal_entry.get("Index")
+        if not isinstance(index, int):
+            continue
+        terminal_name = (
+            terminal_names[index - 1]
+            if 0 <= index - 1 < len(terminal_names)
+            else f"T{index}"
+        )
+        attributes = _as_int_tuple(terminal_entry.get("Attributes", ()))
+        for attribute in attributes:
+            entry = manifest_entries.get(attribute)
+            if entry is None:
+                continue
+            index_entries.append(
+                _index_entry(
+                    section="Boundaries.Terminal",
+                    index=index,
+                    entry=entry,
+                    extra={
+                        "terminal_name": terminal_name,
+                        "terminal_attributes": list(attributes),
+                    },
+                )
+            )
+
+    return PostprocessingIndexMap(entries=tuple(index_entries))
+
+
 def _selected_entries(
     *,
     manifest: MeshManifest,
@@ -331,6 +385,18 @@ def _index_entry(
     )
 
 
+def _as_int_tuple(value: Any) -> tuple[int, ...]:
+    if isinstance(value, bool):
+        return ()
+    if isinstance(value, int):
+        return (value,)
+    if isinstance(value, (str, bytes)) or not isinstance(value, Iterable):
+        return ()
+    return tuple(
+        item for item in value if isinstance(item, int) and not isinstance(item, bool)
+    )
+
+
 __all__ = [
     "DielectricInterfaceSpec",
     "DielectricInterfaceType",
@@ -340,4 +406,5 @@ __all__ = [
     "SurfaceFluxSpec",
     "SurfaceFluxType",
     "build_postprocessing_config_from_manifest",
+    "build_terminal_index_map_from_manifest",
 ]

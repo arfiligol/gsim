@@ -6,6 +6,7 @@ DrivenSim, EigenmodeSim, ElectrostaticSim.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import tempfile
@@ -1389,6 +1390,10 @@ class PalaceSimMixin:
             >>> config_path = sim.write_config(photonic=True)
         """
         from gsim.palace.mesh.generator import write_config as gen_write_config
+        from gsim.palace.mesh.postprocessing import (
+            PostprocessingIndexMap,
+            build_terminal_index_map_from_manifest,
+        )
 
         if photononic is not None:
             logger.warning(
@@ -1440,8 +1445,26 @@ class PalaceSimMixin:
             self._last_mesh_result.manifest.write_json(
                 config_path.parent / "mesh_manifest.json"
             )
+            index_map_entries = []
             if postprocessing is not None:
-                postprocessing.index_map.write_json(
+                index_map_entries.extend(postprocessing.index_map.entries)
+
+            if self.simulation_type == "electrostatic":
+                config = json.loads(config_path.read_text())
+                terminal_entries = config.get("Boundaries", {}).get("Terminal", [])
+                if isinstance(terminal_entries, list):
+                    terminal_names = tuple(
+                        terminal.name for terminal in terminals or []
+                    )
+                    terminal_map = build_terminal_index_map_from_manifest(
+                        self._last_mesh_result.manifest,
+                        terminal_entries,
+                        terminal_names=terminal_names,
+                    )
+                    index_map_entries.extend(terminal_map.entries)
+
+            if index_map_entries:
+                PostprocessingIndexMap(entries=tuple(index_map_entries)).write_json(
                     config_path.parent / "palace_index_map.json"
                 )
 

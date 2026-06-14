@@ -53,6 +53,7 @@ from gsim.palace.mesh.postprocessing import (
     SurfaceFluxSpec,
     SurfaceFluxType,
     build_postprocessing_config_from_manifest,
+    build_terminal_index_map_from_manifest,
 )
 from gsim.palace.models.mesh import MeshConfig
 
@@ -74,6 +75,7 @@ __all__ = [
     "SurfaceFluxType",
     "build_mesh_manifest",
     "build_postprocessing_config_from_manifest",
+    "build_terminal_index_map_from_manifest",
     "generate_mesh",
     "gmsh_utils",
     "write_config",
