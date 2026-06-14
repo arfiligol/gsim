@@ -65,6 +65,51 @@ def assign_physical_groups(
     # Helper: entity name -> (phys_group, surface_tags)
     entity_by_name: dict[str, gmsh_utils.Entity] = {e.name: e for e in entities}
 
+    def _surface_bbox(
+        tags: list[int],
+    ) -> tuple[float, float, float, float, float, float] | None:
+        bboxes: list[tuple[float, float, float, float, float, float]] = []
+        for tag in tags:
+            with contextlib.suppress(Exception):
+                bboxes.append(kernel.getBoundingBox(2, tag))
+        if not bboxes:
+            return None
+        return (
+            min(bbox[0] for bbox in bboxes),
+            min(bbox[1] for bbox in bboxes),
+            min(bbox[2] for bbox in bboxes),
+            max(bbox[3] for bbox in bboxes),
+            max(bbox[4] for bbox in bboxes),
+            max(bbox[5] for bbox in bboxes),
+        )
+
+    def _append_pec_surface(
+        *,
+        key: str,
+        entity_name: str,
+        entity: gmsh_utils.Entity,
+        layer_name: str,
+        island_index: int | None = None,
+    ) -> None:
+        pg = pg_map.get(entity_name)
+        if pg is None:
+            return
+        surf_tags = [tag for dim, tag in entity.dimtags if dim == 2]
+        if not surf_tags:
+            return
+        surface_info = {
+            "phys_group": pg,
+            "tags": surf_tags,
+            "layer": layer_name,
+            "physical_name": key,
+        }
+        bbox = _surface_bbox(surf_tags)
+        if bbox is not None:
+            surface_info["bbox"] = bbox
+        if island_index is not None:
+            surface_info["island_index"] = island_index
+        groups["pec_surfaces"][key] = surface_info
+
     # Build set of via and shaped-dielectric layer names
     via_layers: set[str] = set()
     shaped_dielectric_layers: set[str] = set()
@@ -125,14 +170,30 @@ def assign_physical_groups(
         if tag_info.get("surfaces_xy"):
             pec_name = f"{layer_name}_pec"
             entity = entity_by_name.get(pec_name)
-            pg = pg_map.get(pec_name)
-            if entity and pg is not None:
-                surf_tags = [t for d, t in entity.dimtags if d == 2]
-                if surf_tags:
-                    groups["pec_surfaces"][layer_name] = {
-                        "phys_group": pg,
-                        "tags": surf_tags,
-                    }
+            if entity:
+                _append_pec_surface(
+                    key=layer_name,
+                    entity_name=pec_name,
+                    entity=entity,
+                    layer_name=layer_name,
+                )
+            else:
+                split_entities = sorted(
+                    (
+                        name,
+                        split_entity,
+                    )
+                    for name, split_entity in entity_by_name.items()
+                    if name.startswith(f"{layer_name}_pec_")
+                )
+                for index, (split_name, split_entity) in enumerate(split_entities):
+                    _append_pec_surface(
+                        key=split_name,
+                        entity_name=split_name,
+                        entity=split_entity,
+                        layer_name=layer_name,
+                        island_index=index,
+                    )
 
             # Always collect refinement lines for planar conductors — either
             # from explicit refinement_lines (if they survived boolean) or

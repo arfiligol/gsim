@@ -1321,14 +1321,26 @@ def build_entities(
             # are processed first and survive boolean cuts against conductor
             # shell surfaces that sit at the same z-height.
             pec_mesh_order = -1 if is_via else 0
-            entities.append(
-                Entity(
-                    name=f"{layer_name}_pec",
-                    dim=2,
-                    mesh_order=pec_mesh_order,
-                    tags=tag_info["surfaces_xy"],
+            surface_tags = tag_info["surfaces_xy"]
+            if len(surface_tags) == 1:
+                entities.append(
+                    Entity(
+                        name=f"{layer_name}_pec",
+                        dim=2,
+                        mesh_order=pec_mesh_order,
+                        tags=surface_tags,
+                    )
                 )
-            )
+            else:
+                for index, surface_tag in enumerate(surface_tags):
+                    entities.append(
+                        Entity(
+                            name=f"{layer_name}_pec_{index}",
+                            dim=2,
+                            mesh_order=pec_mesh_order,
+                            tags=[surface_tag],
+                        )
+                    )
 
         if tag_info.get("volumes"):
             if is_via:

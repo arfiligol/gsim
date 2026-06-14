@@ -267,6 +267,30 @@ def generate_palace_config(
         terminal_layer_names: set[str] = {t.layer for t in terminals}
         via_boundary = groups.get("via_boundary_surfaces", {})
 
+        def _pec_matches_terminal(
+            pec_name: str,
+            pec_info: dict[str, object],
+            terminal,
+        ) -> bool:
+            pec_layer = pec_info.get("layer", pec_name)
+            if pec_layer != terminal.layer and pec_name != terminal.layer:
+                return False
+            if terminal.center is None:
+                return True
+            bbox = pec_info.get("bbox")
+            if (
+                not isinstance(bbox, (list, tuple))
+                or len(bbox) != 6
+                or not all(isinstance(value, (int, float)) for value in bbox)
+            ):
+                return False
+            x, y = terminal.center
+            tol = 1e-6
+            return (
+                float(bbox[0]) - tol <= x <= float(bbox[3]) + tol
+                and float(bbox[1]) - tol <= y <= float(bbox[4]) + tol
+            )
+
         def _via_touches(via_name: str, conductor_layer_name: str) -> bool:
             """Z-range overlap (or touching) between a via and a conductor."""
             via = stack.layers.get(via_name)
@@ -292,8 +316,9 @@ def generate_palace_config(
                 if surf_layer == terminal.layer:
                     attrs.append(surf_info["phys_group"])
             # Planar (thin) conductor surfaces (keyed by layer name)
-            if terminal.layer in pec_surfaces:
-                attrs.append(pec_surfaces[terminal.layer]["phys_group"])
+            for pec_name, pec_info in pec_surfaces.items():
+                if _pec_matches_terminal(pec_name, pec_info, terminal):
+                    attrs.append(pec_info["phys_group"])
             # Vias touching this terminal's layer
             for via_name, via_pgs in via_boundary.items():
                 if _via_touches(via_name, terminal.layer):

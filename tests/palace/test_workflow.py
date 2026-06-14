@@ -493,6 +493,55 @@ class TestElectrostaticSimWorkflow:
             f"Terminal attrs {terminal_attrs} overlap Ground {ground_attrs}"
         )
 
+    def test_same_layer_planar_terminals_can_select_islands_by_center(
+        self,
+        tmp_path_factory,
+    ):
+        """Center selectors split same-layer PEC islands into distinct terminals."""
+        gf.gpdk.PDK.activate()
+        component = gf.Component()
+        left = component << gf.c.rectangle(
+            (30, 20),
+            centered=True,
+            layer=gf.gpdk.LAYER.M1,
+        )
+        left.movex(-35)
+        right = component << gf.c.rectangle(
+            (30, 20),
+            centered=True,
+            layer=gf.gpdk.LAYER.M1,
+        )
+        right.movex(35)
+
+        tmp_path = tmp_path_factory.mktemp("electrostatic_same_layer")
+        sim = ElectrostaticSim()
+        sim.set_output_dir(str(tmp_path / "palace-sim"))
+        sim.set_geometry(component)
+        sim.set_stack(substrate_thickness=2.0, air_above=300.0)
+        sim.add_terminal("left", layer="metal1", center=(-35, 0))
+        sim.add_terminal("right", layer="metal1", center=(35, 0))
+        sim.set_electrostatic()
+        sim.mesh(preset="coarse", planar_conductors=True)
+        sim.write_config()
+
+        output_dir = sim._output_dir
+        assert output_dir is not None
+        config = json.loads((Path(output_dir) / "config.json").read_text())
+        terminals = config["Boundaries"]["Terminal"]
+        assert len(terminals) == 2
+        assert terminals[0]["Attributes"]
+        assert terminals[1]["Attributes"]
+        assert set(terminals[0]["Attributes"]).isdisjoint(terminals[1]["Attributes"])
+
+        index_map = json.loads((Path(output_dir) / "palace_index_map.json").read_text())
+        terminal_rows = [
+            row
+            for row in index_map["entries"]
+            if row["section"] == "Boundaries.Terminal"
+        ]
+        assert {row["terminal_name"] for row in terminal_rows} == {"left", "right"}
+        assert {row["role"] for row in terminal_rows} == {"pec_surface"}
+
 
 # ---------------------------------------------------------------------------
 # Validation error tests (no gmsh needed)

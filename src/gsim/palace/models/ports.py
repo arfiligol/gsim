@@ -125,12 +125,14 @@ class TerminalConfig(BaseModel):
     Attributes:
         name: Terminal name
         layer: Target conductor layer
+        center: Optional XY point used to select one conductor island on layer
     """
 
     model_config = ConfigDict(validate_assignment=True)
 
     name: str
     layer: str
+    center: tuple[float, float] | None = None
 
 
 class WavePortConfig(BaseModel):

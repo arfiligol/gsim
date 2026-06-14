@@ -101,6 +101,7 @@ class ElectrostaticSim(PalaceSimMixin, BaseModel):
         name: str,
         *,
         layer: str,
+        center: tuple[float, float] | None = None,
     ) -> None:
         """Add a terminal for capacitance extraction.
 
@@ -109,6 +110,9 @@ class ElectrostaticSim(PalaceSimMixin, BaseModel):
         Args:
             name: Terminal name
             layer: Target conductor layer
+            center: Optional XY point used to select one conductor island on
+                ``layer``. When omitted, all conductor surfaces on the layer
+                are assigned to the terminal.
 
         Example:
             >>> sim.add_terminal("T1", layer="topmetal2")
@@ -120,6 +124,7 @@ class ElectrostaticSim(PalaceSimMixin, BaseModel):
             TerminalConfig(
                 name=name,
                 layer=layer,
+                center=center,
             )
         )
 
