@@ -111,6 +111,8 @@ from gsim.palace.results import (
     load_postprocessing_index_map,
     load_sparams,
     load_terminal_matrix,
+    load_terminal_matrix_history,
+    summarize_terminal_matrix_history,
 )
 
 # Visualization
@@ -168,6 +170,7 @@ __all__ = [
     "load_sparams",
     "load_stack_yaml",
     "load_terminal_matrix",
+    "load_terminal_matrix_history",
     "parse_layer_stack",
     "plot_cross_section",
     "plot_mesh",
@@ -177,6 +180,7 @@ __all__ = [
     "print_stack_table",
     "resolve_palace_materials_at_frequency",
     "run_simulation",
+    "summarize_terminal_matrix_history",
 ]
 
 

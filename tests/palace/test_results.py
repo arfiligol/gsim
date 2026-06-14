@@ -15,6 +15,8 @@ from gsim.palace.results import (
     load_postprocessing_index_map,
     load_sparams,
     load_terminal_matrix,
+    load_terminal_matrix_history,
+    summarize_terminal_matrix_history,
 )
 
 
@@ -469,6 +471,76 @@ class TestTerminalMatrix:
                 "C",
                 terminal_names=("left", "right", "readout"),
             )
+
+
+class TestTerminalMatrixHistory:
+    """Tests for electrostatic terminal matrix convergence histories."""
+
+    def test_history_deduplicates_matching_final_and_summarizes(
+        self, terminal_matrix_dir: Path
+    ) -> None:
+        palace_dir = terminal_matrix_dir / "output" / "palace"
+        iteration01 = palace_dir / "iteration01"
+        iteration02 = palace_dir / "iteration02"
+        iteration01.mkdir()
+        iteration02.mkdir()
+        pass1 = [
+            [1.0e-15, -0.1e-15],
+            [-0.1e-15, 2.0e-15],
+        ]
+        pass2 = [
+            [1.5e-15, -0.2e-15],
+            [-0.2e-15, 3.0e-15],
+        ]
+        _write_terminal_matrix_csv(iteration01 / "terminal-C.csv", "C", pass1)
+        _write_terminal_matrix_csv(iteration02 / "terminal-C.csv", "C", pass2)
+        _write_terminal_matrix_csv(palace_dir / "terminal-C.csv", "C", pass2)
+
+        history = load_terminal_matrix_history(palace_dir, "C")
+
+        assert history["pass_index"].drop_duplicates().tolist() == [1, 2]
+        assert len(history) == 8
+        left_left_pass2 = history.loc[
+            (history["pass_index"] == 2)
+            & (history["row_terminal"] == "left")
+            & (history["column_terminal"] == "left")
+        ].iloc[0]
+        assert left_left_pass2["display_value"] == pytest.approx(1.5)
+        assert left_left_pass2["display_delta_to_previous"] == pytest.approx(0.5)
+        assert left_left_pass2["display_delta_to_final"] == pytest.approx(0.0)
+
+        summary = summarize_terminal_matrix_history(history)
+        pass2_summary = summary.loc[summary["pass_index"] == 2].iloc[0]
+        assert pass2_summary["n_elements"] == 4
+        assert pass2_summary["n_diagonal_elements"] == 2
+        assert pass2_summary["n_off_diagonal_elements"] == 2
+        assert pass2_summary["max_abs_display_delta_to_previous"] == pytest.approx(1.0)
+
+    def test_history_appends_nonmatching_final(self, terminal_matrix_dir: Path) -> None:
+        palace_dir = terminal_matrix_dir / "output" / "palace"
+        iteration01 = palace_dir / "iteration01"
+        iteration01.mkdir()
+        _write_terminal_matrix_csv(
+            iteration01 / "terminal-Cm.csv",
+            "Cm",
+            [
+                [0.0, 1.0e-15],
+                [1.0e-15, 0.0],
+            ],
+        )
+
+        history = load_terminal_matrix_history(palace_dir, "Cm")
+
+        assert history["pass_index"].drop_duplicates().tolist() == [1, 2]
+        final_rows = history.loc[history["is_final"]]
+        assert len(final_rows) == 4
+        assert set(final_rows["label"]) == {"Final"}
+        final_left_right = final_rows.loc[
+            (final_rows["row_terminal"] == "left")
+            & (final_rows["column_terminal"] == "right")
+        ].iloc[0]
+        assert final_left_right["display_value"] == pytest.approx(2.0)
+        assert final_left_right["display_delta_to_previous"] == pytest.approx(1.0)
 
 
 class TestSParamsSaveLoad:

@@ -39,6 +39,7 @@ _INDEXED_CSV_COLUMN_RE = re.compile(
     r"^(?P<prefix>[A-Za-z][A-Za-z0-9_]*)\[(?P<index>\d+)\](?P<suffix>.*)$"
 )
 _TERMINAL_MATRIX_COLUMN_RE = re.compile(r"\[i\]\[(?P<index>\d+)\]")
+_ITERATION_DIR_RE = re.compile(r"iteration(\d+)$")
 _CSV_INDEX_SECTIONS = {
     "domain-E.csv": "Domains.Postprocessing.Energy",
     "surface-Q.csv": "Boundaries.Postprocessing.Dielectric",
@@ -690,38 +691,140 @@ def load_terminal_matrix(
         :class:`TerminalMatrix` with SI values and display helpers.
     """
     kind = _normalize_terminal_matrix_kind(matrix_kind)
-    spec = _TERMINAL_MATRIX_SPECS[kind]
     csv_path = _resolve_terminal_matrix_csv(source, kind)
-    raw = _read_terminal_matrix_csv(csv_path)
-    labels = _resolve_terminal_matrix_labels(
-        source,
-        raw.shape[0],
+    return _load_terminal_matrix_from_csv(
+        csv_path,
+        kind,
+        label_source=source,
         index_map_path=index_map_path,
         terminal_names=terminal_names,
+        display_scale=display_scale,
+        display_unit=display_unit,
     )
-    matrix = cast("pd.DataFrame", raw.copy())
-    matrix.index = labels
-    matrix.columns = labels
-    matrix.attrs.update(
-        {
-            "matrix_kind": kind,
-            "source_unit": spec["source_unit"],
-            "csv_path": str(csv_path),
-        }
+
+
+def load_terminal_matrix_history(
+    source: str | Path,
+    matrix_kind: str = "C",
+    *,
+    index_map_path: str | Path | None = None,
+    terminal_names: tuple[str, ...] | list[str] | None = None,
+    include_final: bool = True,
+    display_scale: float | None = None,
+    display_unit: str | None = None,
+) -> pd.DataFrame:
+    """Load Palace electrostatic terminal matrices across AMR passes.
+
+    ``source`` should be the Palace output directory or simulation directory.
+    Iteration directories named ``iterationN`` or ``iterationNN`` are treated as
+    AMR passes; the final matrix is appended unless it duplicates the last pass.
+    """
+    import pandas as pd
+
+    base = Path(source)
+    if base.is_file():
+        msg = "load_terminal_matrix_history() expects a simulation/output directory."
+        raise ValueError(msg)
+
+    kind = _normalize_terminal_matrix_kind(matrix_kind)
+    pass_frames: list[pd.DataFrame] = []
+    last_raw: pd.DataFrame | None = None
+
+    for iteration_dir, pass_index in _iteration_dirs(base):
+        csv_path = iteration_dir / str(_TERMINAL_MATRIX_SPECS[kind]["file_name"])
+        if not csv_path.exists():
+            continue
+        matrix = _load_terminal_matrix_from_csv(
+            csv_path,
+            kind,
+            label_source=base,
+            index_map_path=index_map_path,
+            terminal_names=terminal_names,
+            display_scale=display_scale,
+            display_unit=display_unit,
+        )
+        pass_frames.append(
+            _terminal_matrix_to_history_frame(
+                matrix,
+                pass_index=pass_index,
+                label=f"Pass {pass_index}",
+                is_final=False,
+            )
+        )
+        last_raw = _read_terminal_matrix_csv(csv_path)
+
+    if include_final:
+        final_csv_path = _find_terminal_matrix_final_csv(base, kind)
+        if final_csv_path is not None:
+            final_raw = _read_terminal_matrix_csv(final_csv_path)
+            if last_raw is None or not _terminal_matrices_match(last_raw, final_raw):
+                matrix = _load_terminal_matrix_from_csv(
+                    final_csv_path,
+                    kind,
+                    label_source=base,
+                    index_map_path=index_map_path,
+                    terminal_names=terminal_names,
+                    display_scale=display_scale,
+                    display_unit=display_unit,
+                )
+                pass_index = 1 if not pass_frames else _next_pass_index(pass_frames)
+                pass_frames.append(
+                    _terminal_matrix_to_history_frame(
+                        matrix,
+                        pass_index=pass_index,
+                        label="Final",
+                        is_final=True,
+                    )
+                )
+
+    if not pass_frames:
+        csv_name = _TERMINAL_MATRIX_SPECS[kind]["file_name"]
+        msg = f"No Palace electrostatic {csv_name} files found under {base}"
+        raise FileNotFoundError(msg)
+
+    return _add_terminal_matrix_convergence_columns(
+        pd.concat(pass_frames, ignore_index=True)
     )
-    return TerminalMatrix(
-        source_path=csv_path,
-        matrix_kind=kind,
-        dataframe=matrix,
-        terminal_names=tuple(labels),
-        source_unit=spec["source_unit"],
-        display_scale=(
-            float(spec["display_scale"])
-            if display_scale is None
-            else float(display_scale)
-        ),
-        display_unit=spec["display_unit"] if display_unit is None else display_unit,
+
+
+def summarize_terminal_matrix_history(history: pd.DataFrame) -> pd.DataFrame:
+    """Build per-pass summary rows from terminal matrix history."""
+    frame = _add_terminal_matrix_convergence_columns(history)
+    if frame.empty:
+        return frame
+
+    summary = (
+        frame.groupby(
+            ["matrix_kind", "pass_index", "label", "is_final", "display_unit"],
+            sort=True,
+        )
+        .agg(
+            n_elements=("element", "nunique"),
+            n_diagonal_elements=("is_diagonal", "sum"),
+            max_abs_value=("value_si", lambda column: column.abs().max()),
+            max_abs_display_value=("display_value", lambda column: column.abs().max()),
+            max_abs_delta_to_previous=("abs_delta_to_previous_si", "max"),
+            max_abs_display_delta_to_previous=(
+                "abs_display_delta_to_previous",
+                "max",
+            ),
+            max_abs_relative_delta_to_previous_percent=(
+                "abs_relative_delta_to_previous_percent",
+                "max",
+            ),
+            max_abs_delta_to_final=("abs_delta_to_final_si", "max"),
+            max_abs_display_delta_to_final=("abs_display_delta_to_final", "max"),
+            max_abs_relative_delta_to_final_percent=(
+                "abs_relative_delta_to_final_percent",
+                "max",
+            ),
+        )
+        .reset_index()
     )
+    summary["n_off_diagonal_elements"] = (
+        summary["n_elements"] - summary["n_diagonal_elements"]
+    )
+    return summary.sort_values(["matrix_kind", "pass_index"]).reset_index(drop=True)
 
 
 def load_indexed_csv(
@@ -890,6 +993,49 @@ def _resolve_source(
     return csv_path, output_dir
 
 
+def _load_terminal_matrix_from_csv(
+    csv_path: Path,
+    matrix_kind: str,
+    *,
+    label_source: str | Path | dict,
+    index_map_path: str | Path | None,
+    terminal_names: tuple[str, ...] | list[str] | None,
+    display_scale: float | None,
+    display_unit: str | None,
+) -> TerminalMatrix:
+    spec = _TERMINAL_MATRIX_SPECS[matrix_kind]
+    raw = _read_terminal_matrix_csv(csv_path)
+    labels = _resolve_terminal_matrix_labels(
+        label_source,
+        raw.shape[0],
+        index_map_path=index_map_path,
+        terminal_names=terminal_names,
+    )
+    matrix = cast("pd.DataFrame", raw.copy())
+    matrix.index = labels
+    matrix.columns = labels
+    matrix.attrs.update(
+        {
+            "matrix_kind": matrix_kind,
+            "source_unit": spec["source_unit"],
+            "csv_path": str(csv_path),
+        }
+    )
+    return TerminalMatrix(
+        source_path=csv_path,
+        matrix_kind=matrix_kind,
+        dataframe=matrix,
+        terminal_names=tuple(labels),
+        source_unit=spec["source_unit"],
+        display_scale=(
+            float(spec["display_scale"])
+            if display_scale is None
+            else float(display_scale)
+        ),
+        display_unit=spec["display_unit"] if display_unit is None else display_unit,
+    )
+
+
 def _resolve_terminal_matrix_csv(source: str | Path | dict, matrix_kind: str) -> Path:
     csv_name = str(_TERMINAL_MATRIX_SPECS[matrix_kind]["file_name"])
     if isinstance(source, dict):
@@ -907,6 +1053,19 @@ def _resolve_terminal_matrix_csv(source: str | Path | dict, matrix_kind: str) ->
         msg = f"{csv_name} not found in {path} or its subdirectories"
         raise FileNotFoundError(msg)
     return found
+
+
+def _find_terminal_matrix_final_csv(base: Path, matrix_kind: str) -> Path | None:
+    csv_name = str(_TERMINAL_MATRIX_SPECS[matrix_kind]["file_name"])
+    candidates = [
+        base / csv_name,
+        base / "output" / "palace" / csv_name,
+        base / "palace" / csv_name,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def _read_terminal_matrix_csv(csv_path: Path) -> pd.DataFrame:
@@ -955,6 +1114,86 @@ def _read_terminal_matrix_csv(csv_path: Path) -> pd.DataFrame:
     return cast(
         "pd.DataFrame", matrix.sort_index().reindex(sorted(column_indices), axis=1)
     )
+
+
+def _terminal_matrix_to_history_frame(
+    matrix: TerminalMatrix,
+    *,
+    pass_index: int,
+    label: str,
+    is_final: bool,
+) -> pd.DataFrame:
+    frame = matrix.to_long_dataframe()
+    frame.insert(0, "is_final", is_final)
+    frame.insert(0, "label", label)
+    frame.insert(0, "pass_index", pass_index)
+    return frame
+
+
+def _add_terminal_matrix_convergence_columns(history: pd.DataFrame) -> pd.DataFrame:
+    frame = history.copy()
+    if frame.empty:
+        return frame
+
+    frame = frame.sort_values(
+        ["matrix_kind", "row_index", "column_index", "pass_index"]
+    ).reset_index(drop=True)
+    grouped = frame.groupby(["matrix_kind", "row_index", "column_index"], sort=True)
+
+    previous_value = grouped["value_si"].shift(1)
+    final_value = grouped["value_si"].transform("last")
+    display_scale = frame["display_scale"]
+
+    frame["delta_to_previous_si"] = frame["value_si"] - previous_value
+    frame["abs_delta_to_previous_si"] = frame["delta_to_previous_si"].abs()
+    frame["relative_delta_to_previous_percent"] = (
+        frame["delta_to_previous_si"] / previous_value.abs()
+    ) * 1.0e2
+    frame["abs_relative_delta_to_previous_percent"] = frame[
+        "relative_delta_to_previous_percent"
+    ].abs()
+
+    frame["delta_to_final_si"] = frame["value_si"] - final_value
+    frame["abs_delta_to_final_si"] = frame["delta_to_final_si"].abs()
+    frame["relative_delta_to_final_percent"] = (
+        frame["delta_to_final_si"] / final_value.abs()
+    ) * 1.0e2
+    frame["abs_relative_delta_to_final_percent"] = frame[
+        "relative_delta_to_final_percent"
+    ].abs()
+
+    frame["display_delta_to_previous"] = frame["delta_to_previous_si"] * display_scale
+    frame["abs_display_delta_to_previous"] = frame["display_delta_to_previous"].abs()
+    frame["display_delta_to_final"] = frame["delta_to_final_si"] * display_scale
+    frame["abs_display_delta_to_final"] = frame["display_delta_to_final"].abs()
+    return frame.sort_values(["pass_index", "row_index", "column_index"]).reset_index(
+        drop=True
+    )
+
+
+def _iteration_dirs(output_dir: Path) -> tuple[tuple[Path, int], ...]:
+    if not output_dir.exists():
+        raise FileNotFoundError(output_dir)
+    dirs: list[tuple[Path, int]] = []
+    for path in output_dir.iterdir():
+        if not path.is_dir():
+            continue
+        match = _ITERATION_DIR_RE.fullmatch(path.name)
+        if match is None:
+            continue
+        dirs.append((path, int(match.group(1))))
+    return tuple(sorted(dirs, key=lambda item: item[1]))
+
+
+def _next_pass_index(pass_frames: list[pd.DataFrame]) -> int:
+    max_index = 0
+    for frame in pass_frames:
+        max_index = max(max_index, int(cast("Any", frame["pass_index"].max())))
+    return max_index + 1
+
+
+def _terminal_matrices_match(left: pd.DataFrame, right: pd.DataFrame) -> bool:
+    return left.equals(right)
 
 
 def _resolve_terminal_matrix_labels(
