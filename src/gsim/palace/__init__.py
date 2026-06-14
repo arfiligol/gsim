@@ -100,6 +100,7 @@ from gsim.palace.ports import (
 
 # Results utilities
 from gsim.palace.results import (
+    Eigenmodes,
     IndexedCsv,
     IndexedCsvColumn,
     SParam,
@@ -107,6 +108,8 @@ from gsim.palace.results import (
     TerminalMatrix,
     get_port_map,
     load_domain_energy_summary,
+    load_eigenmode_history,
+    load_eigenmodes,
     load_fields,
     load_indexed_csv,
     load_port_epr_summary,
@@ -115,6 +118,7 @@ from gsim.palace.results import (
     load_surface_q_summary,
     load_terminal_matrix,
     load_terminal_matrix_history,
+    summarize_eigenmode_history,
     summarize_surface_q_by_interface,
     summarize_terminal_matrix_history,
 )
@@ -129,6 +133,7 @@ __all__ = [
     "DrivenSim",
     "EigenmodeConfig",
     "EigenmodeSim",
+    "Eigenmodes",
     "ElectrostaticConfig",
     "ElectrostaticSim",
     "Geometry",
@@ -169,6 +174,8 @@ __all__ = [
     "get_port_map",
     "get_stack",
     "load_domain_energy_summary",
+    "load_eigenmode_history",
+    "load_eigenmodes",
     "load_fields",
     "load_indexed_csv",
     "load_port_epr_summary",
@@ -187,6 +194,7 @@ __all__ = [
     "print_stack_table",
     "resolve_palace_materials_at_frequency",
     "run_simulation",
+    "summarize_eigenmode_history",
     "summarize_surface_q_by_interface",
     "summarize_terminal_matrix_history",
 ]

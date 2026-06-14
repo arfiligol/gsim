@@ -9,9 +9,12 @@ import numpy as np
 import pytest
 
 from gsim.palace.results import (
+    Eigenmodes,
     SParams,
     get_port_map,
     load_domain_energy_summary,
+    load_eigenmode_history,
+    load_eigenmodes,
     load_indexed_csv,
     load_port_epr_summary,
     load_postprocessing_index_map,
@@ -19,6 +22,7 @@ from gsim.palace.results import (
     load_surface_q_summary,
     load_terminal_matrix,
     load_terminal_matrix_history,
+    summarize_eigenmode_history,
     summarize_surface_q_by_interface,
     summarize_terminal_matrix_history,
 )
@@ -160,6 +164,19 @@ def terminal_matrix_dir(tmp_path: Path) -> Path:
             [1.0e15, 2.0e15],
             [2.0e15, 4.0e15],
         ],
+    )
+    return tmp_path
+
+
+@pytest.fixture
+def eigenmode_dir(tmp_path: Path) -> Path:
+    """Create a minimal Palace eigenmode output directory."""
+    palace_dir = tmp_path / "output" / "palace"
+    palace_dir.mkdir(parents=True)
+    (palace_dir / "eig.csv").write_text(
+        "m, Re{f} (GHz), Im{f} (GHz), Q, Error (Bkwd.), Error (Abs.)\n"
+        "1.00e+00, 6.1, 0.01, 300.0, 1.0e-7, 2.0e-4\n"
+        "2.00e+00, 7.2, 0.02, 400.0, 2.0e-7, 3.0e-4\n"
     )
     return tmp_path
 
@@ -349,6 +366,146 @@ class TestGetPortMap:
     def test_legacy_numeric_fallback(self, sim_dir_no_names: Path) -> None:
         pm = get_port_map(sim_dir_no_names)
         assert pm == {1: "p1", 2: "p2"}
+
+
+class TestEigenmodes:
+    """Tests for Palace eigenmode CSV loading."""
+
+    def test_load_eigenmodes_normalizes_palace_columns(
+        self,
+        eigenmode_dir: Path,
+    ) -> None:
+        eigenmodes = load_eigenmodes(eigenmode_dir)
+
+        assert isinstance(eigenmodes, Eigenmodes)
+        assert eigenmodes.n_modes == 2
+        assert eigenmodes.mode_indices.tolist() == [1, 2]
+        np.testing.assert_allclose(eigenmodes.freq_real_ghz, [6.1, 7.2])
+        np.testing.assert_allclose(eigenmodes.freq_imag_ghz, [0.01, 0.02])
+        np.testing.assert_allclose(eigenmodes.q, [300.0, 400.0])
+
+        frame = eigenmodes.to_dataframe()
+        assert list(frame.columns) == [
+            "mode_index",
+            "freq_real_ghz",
+            "freq_imag_ghz",
+            "q",
+            "error_backward",
+            "error_absolute",
+        ]
+        assert frame.attrs["csv_path"].endswith("eig.csv")
+        assert tuple(frame.attrs["source_columns"]) == (
+            "m",
+            "Re{f} (GHz)",
+            "Im{f} (GHz)",
+            "Q",
+            "Error (Bkwd.)",
+            "Error (Abs.)",
+        )
+
+        report = eigenmodes.to_report_dataframe()
+        assert list(report.columns) == [
+            "mode_index",
+            "frequency_ghz",
+            "imaginary_frequency_ghz",
+            "q_factor",
+            "backward_error",
+            "absolute_error",
+        ]
+
+    def test_load_eigenmodes_accepts_results_dict(
+        self,
+        eigenmode_dir: Path,
+    ) -> None:
+        results = {
+            "eig.csv": eigenmode_dir / "output" / "palace" / "eig.csv",
+        }
+
+        eigenmodes = load_eigenmodes(results)
+
+        assert eigenmodes.source_path == results["eig.csv"]
+        np.testing.assert_allclose(eigenmodes.freq_real_ghz, [6.1, 7.2])
+
+    def test_load_eigenmodes_accepts_csv_path(self, eigenmode_dir: Path) -> None:
+        csv_path = eigenmode_dir / "output" / "palace" / "eig.csv"
+
+        eigenmodes = load_eigenmodes(csv_path)
+
+        assert eigenmodes.source_path == csv_path
+        assert eigenmodes.n_modes == 2
+
+    def test_load_eigenmodes_missing_csv_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError, match=r"eig\.csv"):
+            load_eigenmodes(tmp_path)
+
+    def test_load_eigenmodes_fills_optional_columns(self, tmp_path: Path) -> None:
+        palace_dir = tmp_path / "output" / "palace"
+        palace_dir.mkdir(parents=True)
+        (palace_dir / "eig.csv").write_text("m, Re{f} (GHz)\n1, 5.5\n")
+
+        eigenmodes = load_eigenmodes(tmp_path)
+
+        assert eigenmodes.freq_imag_ghz.tolist() == [0.0]
+        assert np.isnan(eigenmodes.q[0])
+
+    def test_load_eigenmode_history_deduplicates_final_and_summarizes(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        palace_dir = tmp_path / "output" / "palace"
+        iteration01 = palace_dir / "iteration01"
+        iteration02 = palace_dir / "iteration02"
+        iteration01.mkdir(parents=True)
+        iteration02.mkdir()
+        pass1 = [
+            [1, 6.0, 0.01, 100.0, 1.0e-7, 1.0e-4],
+            [2, 8.0, 0.02, 200.0, 2.0e-7, 2.0e-4],
+        ]
+        pass2 = [
+            [1, 6.3, 0.02, 110.0, 1.0e-8, 1.0e-5],
+            [2, 8.4, 0.04, 210.0, 2.0e-8, 2.0e-5],
+        ]
+        _write_eig_csv(iteration01 / "eig.csv", pass1)
+        _write_eig_csv(iteration02 / "eig.csv", pass2)
+        _write_eig_csv(palace_dir / "eig.csv", pass2)
+
+        history = load_eigenmode_history(tmp_path)
+
+        assert history["iteration_index"].drop_duplicates().tolist() == [1, 2]
+        assert len(history) == 4
+        mode1_pass2 = history.loc[
+            (history["iteration_index"] == 2) & (history["mode_index"] == 1)
+        ].iloc[0]
+        assert mode1_pass2["source_kind"] == "iteration"
+        assert mode1_pass2["source_iteration"] == 2
+        assert mode1_pass2["delta_to_previous_mhz"] == pytest.approx(300.0)
+        assert mode1_pass2["abs_relative_delta_to_previous_percent"] == pytest.approx(
+            5.0
+        )
+
+        summary = summarize_eigenmode_history(history)
+        pass2_summary = summary.loc[summary["iteration_index"] == 2].iloc[0]
+        assert pass2_summary["n_modes"] == 2
+        assert pass2_summary["max_abs_delta_to_previous_mhz"] == pytest.approx(400.0)
+        assert pass2_summary["hfss_max_delta_freq_percent"] == pytest.approx(5.0)
+
+    def test_load_eigenmode_history_appends_nonmatching_final(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        palace_dir = tmp_path / "output" / "palace"
+        iteration01 = palace_dir / "iteration01"
+        iteration01.mkdir(parents=True)
+        _write_eig_csv(iteration01 / "eig.csv", [[1, 6.0, 0.01, 100.0, 1e-7, 1e-4]])
+        _write_eig_csv(palace_dir / "eig.csv", [[1, 6.2, 0.02, 120.0, 1e-8, 1e-5]])
+
+        history = load_eigenmode_history(tmp_path)
+
+        assert history["iteration_index"].drop_duplicates().tolist() == [1, 2]
+        final_rows = history.loc[history["is_final"]]
+        assert len(final_rows) == 1
+        assert final_rows.iloc[0]["source_kind"] == "final"
+        assert final_rows.iloc[0]["source_iteration"] is None
 
 
 class TestIndexedCsv:
@@ -678,4 +835,12 @@ def _write_terminal_matrix_csv(
         lines.append(
             ",".join([f"{float(row_index):.2e}"] + [str(value) for value in row])
         )
+    path.write_text("\n".join(lines) + "\n")
+
+
+def _write_eig_csv(path: Path, rows: list[list[float]]) -> None:
+    lines = [
+        "m, Re{f} (GHz), Im{f} (GHz), Q, Error (Bkwd.), Error (Abs.)",
+    ]
+    lines.extend(", ".join(str(value) for value in row) for row in rows)
     path.write_text("\n".join(lines) + "\n")
