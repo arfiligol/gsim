@@ -122,7 +122,10 @@ from gsim.palace.results import (
     load_surface_q_summary,
     load_terminal_matrix,
     load_terminal_matrix_history,
+    summarize_domain_loss,
     summarize_eigenmode_history,
+    summarize_loss_budget,
+    summarize_surface_loss,
     summarize_surface_q_by_interface,
     summarize_terminal_matrix_history,
 )
@@ -202,7 +205,10 @@ __all__ = [
     "print_stack_table",
     "resolve_palace_materials_at_frequency",
     "run_simulation",
+    "summarize_domain_loss",
     "summarize_eigenmode_history",
+    "summarize_loss_budget",
+    "summarize_surface_loss",
     "summarize_surface_q_by_interface",
     "summarize_terminal_matrix_history",
 ]

@@ -26,7 +26,10 @@ from gsim.palace.results import (
     load_surface_q_summary,
     load_terminal_matrix,
     load_terminal_matrix_history,
+    summarize_domain_loss,
     summarize_eigenmode_history,
+    summarize_loss_budget,
+    summarize_surface_loss,
     summarize_surface_q_by_interface,
     summarize_terminal_matrix_history,
 )
@@ -604,6 +607,22 @@ class TestEigenmodeReport:
         assert interface_rows.loc[2, "loss_tangent"] == pytest.approx(0.0033)
         assert report.domain_energy.iloc[0]["source_name"] == "D1_SUBSTRATE"
         assert report.surface_q.iloc[0]["interface_type"] == "MA"
+        domain_loss = report.domain_loss.set_index("domain_index")
+        assert domain_loss.loc[1, "loss_tangent"] == pytest.approx(1.0e-6)
+        assert domain_loss.loc[1, "inverse_q"] == pytest.approx(5.0e-7)
+        assert domain_loss.loc[1, "q_equivalent"] == pytest.approx(2.0e6)
+        assert domain_loss.loc[1, "frequency_ghz"] == pytest.approx(6.3)
+        surface_loss = report.surface_loss.set_index("surface_index")
+        assert surface_loss.loc[2, "interface_type"] == "MA"
+        assert surface_loss.loc[2, "thickness"] == pytest.approx(0.002)
+        assert surface_loss.loc[2, "permittivity"] == pytest.approx(10.0)
+        assert surface_loss.loc[2, "loss_tangent"] == pytest.approx(0.0033)
+        assert surface_loss.loc[2, "inverse_q"] == pytest.approx(5.0e-7)
+        loss_budget = report.loss_budget.set_index("mode_index")
+        assert loss_budget.loc[1, "domain_inverse_q_sum"] == pytest.approx(5.0e-7)
+        assert loss_budget.loc[1, "surface_inverse_q_sum"] == pytest.approx(5.0e-7)
+        assert loss_budget.loc[1, "total_inverse_q_sum"] == pytest.approx(1.0e-6)
+        assert loss_budget.loc[1, "q_total"] == pytest.approx(1.0e6)
         assert (
             report.surface_interface_summary.set_index("interface_type").loc[
                 "MA",
@@ -631,7 +650,10 @@ class TestEigenmodeReport:
         assert report.domain_materials.empty
         assert report.dielectric_interfaces.empty
         assert report.domain_energy.empty
+        assert report.domain_loss.empty
         assert report.surface_q.empty
+        assert report.surface_loss.empty
+        assert report.loss_budget.empty
         assert report.port_epr.empty
         assert report.index_map.empty
         assert report.missing_reports == (
@@ -795,6 +817,38 @@ class TestIndexedReportSummaries:
         assert by_index.loc[99, "source_name"] == "Index 99"
         assert by_index.loc[99, "E_elec_j"] == pytest.approx(0.0)
 
+    def test_summarize_domain_loss_joins_effective_material_loss(
+        self, indexed_report_dir: Path
+    ) -> None:
+        domain_energy = load_domain_energy_summary(indexed_report_dir)
+        domain_materials = load_domain_material_summary(indexed_report_dir)
+
+        summary = summarize_domain_loss(
+            domain_energy,
+            domain_materials,
+            frequency_ghz=5.0,
+        )
+
+        by_index = summary.set_index("domain_index")
+        assert by_index.loc[1, "source_name"] == "D1_SUBSTRATE"
+        assert by_index.loc[1, "material_name"] == "silicon"
+        assert by_index.loc[1, "material_attribute"] == 10
+        assert by_index.loc[1, "material_permittivity"] == pytest.approx(11.45)
+        assert by_index.loc[1, "loss_tangent"] == pytest.approx(1.0e-6)
+        assert by_index.loc[1, "p_elec"] == pytest.approx(0.5)
+        assert by_index.loc[1, "inverse_q"] == pytest.approx(5.0e-7)
+        assert by_index.loc[1, "q_equivalent"] == pytest.approx(2.0e6)
+        assert by_index.loc[1, "gamma_hz"] == pytest.approx(5.0e9 * 5.0e-7)
+        assert by_index.loc[1, "gamma_rad_per_s"] == pytest.approx(
+            2.0 * np.pi * 5.0e9 * 5.0e-7
+        )
+        assert by_index.loc[1, "t1_us"] == pytest.approx(
+            1.0e6 / by_index.loc[1, "gamma_rad_per_s"]
+        )
+        assert by_index.loc[99, "source_name"] == "Index 99"
+        assert by_index.loc[99, "loss_tangent"] == pytest.approx(0.0)
+        assert by_index.loc[99, "inverse_q"] == pytest.approx(0.0)
+
     def test_load_surface_q_summary_and_interface_totals(
         self, indexed_report_dir: Path
     ) -> None:
@@ -818,6 +872,104 @@ class TestIndexedReportSummaries:
         assert by_interface.loc["MA", "p_surf_fraction"] == pytest.approx(1.0)
         assert by_interface.loc["MS", "surface_count"] == 0
         assert by_interface.loc["SA", "surface_count"] == 0
+
+    def test_summarize_surface_loss_joins_interface_parameters_and_rates(
+        self, indexed_report_dir: Path
+    ) -> None:
+        surface_q = load_surface_q_summary(indexed_report_dir)
+        dielectric_interfaces = load_dielectric_interface_summary(indexed_report_dir)
+
+        summary = summarize_surface_loss(
+            surface_q,
+            dielectric_interfaces,
+            frequency_ghz=5.0,
+        )
+
+        by_index = summary.set_index("surface_index")
+        assert by_index.loc[2, "source_name"] == "MA:D1_TOP_M1___D1_SUBSTRATE"
+        assert by_index.loc[2, "interface_type"] == "MA"
+        assert by_index.loc[2, "thickness"] == pytest.approx(0.002)
+        assert by_index.loc[2, "permittivity"] == pytest.approx(10.0)
+        assert by_index.loc[2, "loss_tangent"] == pytest.approx(0.0033)
+        assert by_index.loc[2, "p_surf"] == pytest.approx(1.0e-7)
+        assert by_index.loc[2, "q_surf"] == pytest.approx(2.0e6)
+        assert by_index.loc[2, "inverse_q"] == pytest.approx(5.0e-7)
+        assert by_index.loc[2, "q_equivalent"] == pytest.approx(2.0e6)
+        assert by_index.loc[2, "gamma_hz"] == pytest.approx(5.0e9 * 5.0e-7)
+
+    def test_summarize_loss_budget_combines_domain_and_surface_loss(
+        self, eigenmode_report_dir: Path
+    ) -> None:
+        modes = load_eigenmodes(eigenmode_report_dir)
+        domain_loss = summarize_domain_loss(
+            load_domain_energy_summary(eigenmode_report_dir),
+            load_domain_material_summary(eigenmode_report_dir),
+            modes=modes,
+        )
+        surface_loss = summarize_surface_loss(
+            load_surface_q_summary(eigenmode_report_dir),
+            load_dielectric_interface_summary(eigenmode_report_dir),
+            modes=modes,
+        )
+
+        budget = summarize_loss_budget(domain_loss, surface_loss, modes=modes)
+
+        row = budget.set_index("mode_index").loc[1]
+        assert row["frequency_ghz"] == pytest.approx(6.3)
+        assert row["q_eig"] == pytest.approx(110.0)
+        assert row["inverse_q_eig"] == pytest.approx(1.0 / 110.0)
+        assert row["domain_inverse_q_sum"] == pytest.approx(5.0e-7)
+        assert row["surface_inverse_q_sum"] == pytest.approx(5.0e-7)
+        assert row["total_inverse_q_sum"] == pytest.approx(1.0e-6)
+        assert row["eig_with_surface_inverse_q_sum"] == pytest.approx(
+            1.0 / 110.0 + 5.0e-7
+        )
+        assert row["q_total"] == pytest.approx(1.0e6)
+        assert row["q_eig_with_surface"] == pytest.approx(1.0 / (1.0 / 110.0 + 5.0e-7))
+        assert row["domain_vs_eig_relative_error"] == pytest.approx(
+            (5.0e-7 - 1.0 / 110.0) / (1.0 / 110.0)
+        )
+
+    def test_summarize_loss_budget_keeps_modes_separate(
+        self, indexed_report_dir: Path
+    ) -> None:
+        palace_dir = indexed_report_dir / "output" / "palace"
+        _write_eig_csv(
+            palace_dir / "eig.csv",
+            [
+                [1, 5.0, 0.0, 2.0e6, 0.0, 0.0],
+                [2, 6.0, 0.0, 4.0e6, 0.0, 0.0],
+            ],
+        )
+        (palace_dir / "domain-E.csv").write_text(
+            "m, E_elec[1] (J), p_elec[1]\n1, 2.0, 0.5\n2, 1.0, 0.25\n"
+        )
+        (palace_dir / "surface-Q.csv").write_text(
+            "m, p_surf[2], Q_surf[2]\n1, 1.0e-7, 2.0e6\n2, 2.0e-7, 4.0e6\n"
+        )
+
+        modes = load_eigenmodes(indexed_report_dir)
+        domain_loss = summarize_domain_loss(
+            load_domain_energy_summary(indexed_report_dir),
+            load_domain_material_summary(indexed_report_dir),
+            modes=modes,
+        )
+        surface_loss = summarize_surface_loss(
+            load_surface_q_summary(indexed_report_dir),
+            load_dielectric_interface_summary(indexed_report_dir),
+            modes=modes,
+        )
+        budget = summarize_loss_budget(domain_loss, surface_loss, modes=modes)
+
+        by_mode = budget.set_index("mode_index")
+        assert by_mode.loc[1, "frequency_ghz"] == pytest.approx(5.0)
+        assert by_mode.loc[1, "domain_inverse_q_sum"] == pytest.approx(5.0e-7)
+        assert by_mode.loc[1, "surface_inverse_q_sum"] == pytest.approx(5.0e-7)
+        assert by_mode.loc[1, "total_inverse_q_sum"] == pytest.approx(1.0e-6)
+        assert by_mode.loc[2, "frequency_ghz"] == pytest.approx(6.0)
+        assert by_mode.loc[2, "domain_inverse_q_sum"] == pytest.approx(2.5e-7)
+        assert by_mode.loc[2, "surface_inverse_q_sum"] == pytest.approx(2.5e-7)
+        assert by_mode.loc[2, "total_inverse_q_sum"] == pytest.approx(5.0e-7)
 
     def test_load_port_epr_summary_tracks_signed_and_abs_participation(
         self, indexed_report_dir: Path

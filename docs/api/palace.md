@@ -103,3 +103,37 @@
       show_source: false
       inherited_members: false
       members: false
+
+## Results
+
+::: gsim.palace.load_eigenmode_report
+    options:
+      show_source: false
+
+::: gsim.palace.summarize_domain_loss
+    options:
+      show_source: false
+
+::: gsim.palace.summarize_surface_loss
+    options:
+      show_source: false
+
+::: gsim.palace.summarize_loss_budget
+    options:
+      show_source: false
+
+::: gsim.palace.load_domain_energy_summary
+    options:
+      show_source: false
+
+::: gsim.palace.load_surface_q_summary
+    options:
+      show_source: false
+
+::: gsim.palace.load_domain_material_summary
+    options:
+      show_source: false
+
+::: gsim.palace.load_dielectric_interface_summary
+    options:
+      show_source: false
