@@ -579,7 +579,11 @@ class PalaceSimMixin:
     # Post-mesh validation
     # -------------------------------------------------------------------------
 
-    def validate_mesh(self) -> ValidationResult:
+    def validate_mesh(
+        self,
+        *,
+        material_overlay: Any | None = None,
+    ) -> ValidationResult:
         """Validate the generated mesh and config before cloud submission.
 
         Checks that physical groups are correctly assigned after meshing:
@@ -601,7 +605,7 @@ class PalaceSimMixin:
         """
         from gsim.palace.mesh.validation import validate_mesh as _validate_mesh
 
-        result = _validate_mesh(self)
+        result = _validate_mesh(self, material_overlay=material_overlay)
         if not result.valid:
             raise RuntimeError(f"Mesh validation failed:\n{result}")
         return result
@@ -1356,6 +1360,7 @@ class PalaceSimMixin:
         postprocessing: PostprocessingConfig | None = None,
         reuse_postprocessing: bool = True,
         write_artifacts: bool = True,
+        material_overlay: Any | None = None,
     ) -> Path:
         """Write Palace config.json after mesh generation.
 
@@ -1376,6 +1381,9 @@ class PalaceSimMixin:
                 from silently dropping a previously configured index map.
             write_artifacts: Write ``mesh_manifest.json`` and, when
                 postprocessing is active, ``palace_index_map.json``.
+            material_overlay: Optional PDK material overlay path, raw overlay
+                mapping, or loaded overlay mapping used to resolve Palace
+                material values without mutating the source layer stack.
 
         Returns:
             Path to the generated config.json
@@ -1439,6 +1447,7 @@ class PalaceSimMixin:
             terminals=terminals or [],
             postprocessing_config=domain_postprocessing_config,
             boundary_postprocessing_config=boundary_postprocessing_config,
+            material_overlay=material_overlay,
         )
 
         if write_artifacts:
@@ -1470,7 +1479,7 @@ class PalaceSimMixin:
 
         # Validate mesh and config unless this is a photonic workflow.
         if not photonic and validate_mesh:
-            validation = self.validate_mesh()
+            validation = self.validate_mesh(material_overlay=material_overlay)
             if not validation.valid:
                 raise ValueError(f"Mesh validation failed:\n{validation}")
 

@@ -186,6 +186,40 @@ def test_write_config_merges_postprocessing_config(tmp_path: Path) -> None:
     assert postprocessing["SurfaceFlux"] == [{"Attributes": [22]}]
 
 
+def test_write_config_applies_material_overlay_without_mutating_stack(
+    tmp_path: Path,
+) -> None:
+    groups = {
+        "volumes": {"Si": {"phys_group": 1}},
+        "conductor_surfaces": {},
+        "pec_surfaces": {},
+        "port_surfaces": {},
+        "boundary_surfaces": {},
+    }
+    stack = LayerStack(materials={"Si": {"permittivity": 11.9, "conductivity": 2.0}})
+    mesh_result = MeshResult(
+        mesh_path=tmp_path / "palace.msh",
+        groups=groups,
+        output_dir=tmp_path,
+        model_name="palace",
+        fmax=10e9,
+    )
+
+    config_path = write_config(
+        mesh_result=mesh_result,
+        stack=stack,
+        ports=[],
+        absorbing_boundary=False,
+        material_overlay={"materials": {"Si": {"relative_permittivity": 11.45}}},
+    )
+
+    material = json.loads(config_path.read_text())["Domains"]["Materials"][0]
+    assert material["Permittivity"] == 11.45
+    assert material["Conductivity"] == 2.0
+    assert stack.materials["Si"]["permittivity"] == 11.9
+    assert stack.materials["Si"]["conductivity"] == 2.0
+
+
 def test_build_postprocessing_config_from_manifest_has_stable_indices(
     tmp_path: Path,
 ) -> None:

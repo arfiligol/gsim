@@ -148,6 +148,14 @@ class TestMergeOverlay:
         assert merged["SiO2"].permittivity == 3.9
         assert merged["SiO2"].loss_tangent == 0.001
 
+    def test_merge_overrides_existing_material_alias(self):
+        overlay = {
+            "Si": MaterialProperties(permittivity=11.45),
+        }
+        merged = merge_overlay(overlay)
+        assert merged["silicon"].permittivity == 11.45
+        assert merged["Si"].permittivity == 11.45
+
     def test_merge_preserves_non_overlaid(self):
         overlay = {
             "custom": MaterialProperties(permittivity=5.0),

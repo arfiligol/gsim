@@ -159,13 +159,37 @@ def merge_overlay(
 
     merged = dict(base)
     for name, props in overlay.items():
-        if name in merged:
-            existing = merged[name]
-            merged[name] = _merge_material(existing, props)
+        canonical_name = _canonical_material_name(name, merged)
+        if canonical_name in merged:
+            existing = merged[canonical_name]
+            merged[canonical_name] = _merge_material(existing, props)
+            if canonical_name != name:
+                merged[name] = merged[canonical_name]
         else:
             merged[name] = props
 
     return merged
+
+
+def _canonical_material_name(
+    name: str,
+    materials: dict[str, MaterialProperties],
+) -> str:
+    from gsim.common.stack.materials import MATERIAL_ALIASES
+
+    if name in materials:
+        return name
+
+    normalized = name.lower().strip()
+    alias = MATERIAL_ALIASES.get(normalized)
+    if alias and alias in materials:
+        return alias
+
+    for material_name in materials:
+        if material_name.lower() == normalized:
+            return material_name
+
+    return name
 
 
 def _merge_material(

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import itertools
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 
@@ -152,7 +153,10 @@ def _get_port_vertices(mesh_path: Path, phys_group_tag: int) -> np.ndarray:
     gmsh.initialize()
     try:
         gmsh.open(str(mesh_path))
-        result = gmsh.model.mesh.getNodesForPhysicalGroup(2, phys_group_tag)
+        result = cast(
+            tuple[Any, ...],
+            gmsh.model.mesh.getNodesForPhysicalGroup(2, phys_group_tag),
+        )
         if len(result) == 3:
             _, coords, _ = result
         elif len(result) == 2:
@@ -318,7 +322,7 @@ def check_lumped_port_geometry(
     return errors
 
 
-def validate_mesh(sim) -> ValidationResult:
+def validate_mesh(sim, *, material_overlay=None) -> ValidationResult:
     """Validate generated mesh and config for a Palace simulation object."""
     errors: list[str] = []
     warnings_list: list[str] = []
@@ -389,7 +393,10 @@ def validate_mesh(sim) -> ValidationResult:
 
         config_path = output_dir / "config.json"
         try:
-            sim.write_config(validate_mesh=False)
+            sim.write_config(
+                validate_mesh=False,
+                material_overlay=material_overlay,
+            )
         except Exception as e:
             errors.append(f"Could not regenerate config.json during validate_mesh: {e}")
 

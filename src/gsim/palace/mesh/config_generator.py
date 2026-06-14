@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import gmsh
 
@@ -45,6 +45,7 @@ def generate_palace_config(
     terminals: list[TerminalConfig] | None = None,
     postprocessing_config: dict[str, Any] | None = None,
     boundary_postprocessing_config: dict[str, Any] | None = None,
+    material_overlay: Any | None = None,
 ) -> Path:
     """Generate Palace config.json file.
 
@@ -68,6 +69,9 @@ def generate_palace_config(
         boundary_postprocessing_config: Optional Palace
             ``Boundaries.Postprocessing`` entries merged into the generated
             boundary section.
+        material_overlay: Optional PDK material overlay path, raw overlay
+            mapping, or loaded overlay mapping used to resolve Palace material
+            values without mutating the source layer stack.
 
     Returns:
         Path to the generated config.json
@@ -161,11 +165,16 @@ def generate_palace_config(
     # Build domains section
     # Evaluate dispersion models at the center frequency of the sweep band
     stack_materials = stack.materials
-    if driven_config is not None:
+    if driven_config is not None or material_overlay is not None:
         from gsim.palace.materials import resolve_palace_materials_at_frequency
 
+        material_frequency = (
+            driven_config.center_frequency if driven_config is not None else fmax
+        )
         stack_materials = resolve_palace_materials_at_frequency(
-            stack.materials, driven_config.center_frequency
+            stack.materials,
+            material_frequency,
+            material_overlay=material_overlay,
         )
 
     materials: list[dict[str, object]] = []
@@ -534,9 +543,10 @@ def generate_palace_config(
 
         axis_lit: Literal["x", "y"] = "x" if axis == "x" else "y"
 
+        model_config = cast(dict[str, Any], config["Model"])
         floquet_vector = eigenmode_config.compute_floquet_wave_vector(
             periodic_axis=axis_lit,
-            l0=float(config["Model"]["L0"]),
+            l0=float(model_config["L0"]),
         )
 
         boundaries["Periodic"] = {
@@ -555,9 +565,10 @@ def generate_palace_config(
         # Boundary postprocessing is a Palace contract, not a private layout
         # convention. Keep it as an explicit merge point so role-based builders
         # can wire EPR/flux domains without hand-editing config.json.
-        boundary_postprocessing = dict(
-            boundaries.get("Postprocessing", {})
-            if isinstance(boundaries.get("Postprocessing"), dict)
+        existing_boundary_postprocessing = boundaries.get("Postprocessing")
+        boundary_postprocessing: dict[str, Any] = (
+            dict(existing_boundary_postprocessing)
+            if isinstance(existing_boundary_postprocessing, dict)
             else {}
         )
         boundary_postprocessing.update(deepcopy(boundary_postprocessing_config))
@@ -706,6 +717,7 @@ def write_config(
     terminals: list[TerminalConfig] | None = None,
     postprocessing_config: dict[str, Any] | None = None,
     boundary_postprocessing_config: dict[str, Any] | None = None,
+    material_overlay: Any | None = None,
 ) -> Path:
     """Write Palace config.json from a MeshResult.
 
@@ -726,6 +738,9 @@ def write_config(
         boundary_postprocessing_config: Optional Palace
             ``Boundaries.Postprocessing`` entries merged into the generated
             boundary section.
+        material_overlay: Optional PDK material overlay path, raw overlay
+            mapping, or loaded overlay mapping used to resolve Palace material
+            values without mutating the source layer stack.
 
     Returns:
         Path to the generated config.json
@@ -761,6 +776,7 @@ def write_config(
         terminals=terminals,
         postprocessing_config=postprocessing_config,
         boundary_postprocessing_config=boundary_postprocessing_config,
+        material_overlay=material_overlay,
     )
 
     # Update the mesh_result with the config path

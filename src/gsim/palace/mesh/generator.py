@@ -7,7 +7,7 @@ import math
 from dataclasses import dataclass, field
 from numbers import Integral
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import gmsh
 
@@ -419,6 +419,7 @@ def generate_mesh(
     high_order_optimize: bool = True,
     verbosity: int = 3,
     decimate_tolerance: float | None = None,
+    material_overlay: Any | None = None,
 ) -> MeshResult:
     """Generate mesh for Palace EM simulation.
 
@@ -461,6 +462,9 @@ def generate_mesh(
         decimate_tolerance: Relative tolerance for polygon decimation
             (None = no decimation; typical 0.001-0.01)
         verbosity: Sets gmsh verbosity level
+        material_overlay: Optional PDK material overlay path, raw overlay
+            mapping, or loaded overlay mapping used only for config material
+            resolution when ``write_config=True``.
 
     Returns:
         MeshResult with paths and metadata
@@ -724,6 +728,7 @@ def generate_mesh(
                 numerical_config,
                 absorbing_boundary,
                 periodic_axis,
+                material_overlay=material_overlay,
             )
 
         manifest = build_mesh_manifest(groups)

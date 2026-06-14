@@ -82,6 +82,49 @@ class TestResolvePalaceMaterialsAtFrequency:
         assert "custom_mat" in resolved
         assert resolved["custom_mat"]["permittivity"] == 5.0
 
+    def test_material_overlay_overrides_stack_material_values(self):
+        materials = {"Si": {"permittivity": 11.9, "conductivity": 2.0}}
+        overlay = {
+            "materials": {
+                "Si": {
+                    "relative_permittivity": 11.45,
+                    "loss_tangent": 1.0e-6,
+                    "dispersion_models": [
+                        {
+                            "type": "constant",
+                            "permittivity": 11.45,
+                            "validity_frequency": [0, 10e9],
+                            "source": "test PDK",
+                        }
+                    ],
+                }
+            }
+        }
+
+        resolved = resolve_palace_materials_at_frequency(
+            materials,
+            5e9,
+            material_overlay=overlay,
+        )
+
+        assert resolved["Si"]["permittivity"] == pytest.approx(11.45)
+        assert resolved["Si"]["loss_tangent"] == pytest.approx(1.0e-6)
+        assert resolved["Si"]["conductivity"] == pytest.approx(2.0)
+        assert materials["Si"]["permittivity"] == pytest.approx(11.9)
+        assert materials["Si"]["conductivity"] == pytest.approx(2.0)
+
+    def test_material_overlay_preserves_unknown_materials(self):
+        materials = {"custom_mat": {"permittivity": 5.0}}
+        overlay = {"materials": {"Si": {"relative_permittivity": 11.45}}}
+
+        resolved = resolve_palace_materials_at_frequency(
+            materials,
+            5e9,
+            material_overlay=overlay,
+        )
+
+        assert resolved["custom_mat"]["permittivity"] == pytest.approx(5.0)
+
     def test_empty_materials(self):
         resolved = resolve_palace_materials_at_frequency({}, 5e9)
         assert resolved == {}
