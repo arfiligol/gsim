@@ -7,6 +7,7 @@ configure -> validate -> mesh -> write_config, stopping before cloud submission.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import gdsfactory as gf
@@ -323,6 +324,134 @@ def test_reactive_port_parameters_go_to_lumped_element(tmp_path, cpw_component):
     assert "Direction" in rp
     # Passive port must share the same boundary attributes as the excited port
     assert rp["Attributes"] == p1["Attributes"]
+
+
+def test_run_local_direct_palace_supports_serial_wrapper_flag(tmp_path, monkeypatch):
+    """Direct local Palace runs can request the wrapper's serial path."""
+
+    sim = ElectrostaticSim()
+    sim.set_output_dir(tmp_path)
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "palace.msh").write_text("$MeshFormat\n", encoding="utf-8")
+    palace_executable = tmp_path / "palace"
+    palace_executable.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    commands: list[list[str]] = []
+
+    def fake_run(
+        cmd: list[str],
+        *,
+        cwd: Path,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        env: dict[str, str],
+    ) -> subprocess.CompletedProcess[str]:
+        assert check
+        assert capture_output
+        assert text
+        assert env
+        commands.append(cmd)
+        postpro_dir = Path(cwd) / "output" / "palace"
+        postpro_dir.mkdir(parents=True)
+        (postpro_dir / "terminal-C.csv").write_text("i\n", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    results = sim.run_local(
+        use_apptainer=False,
+        palace_executable=palace_executable,
+        num_processes=1,
+        num_threads=1,
+        serial=True,
+        verbose=False,
+    )
+
+    assert commands == [
+        [
+            str(palace_executable),
+            "-serial",
+            "-np",
+            "1",
+            "-nt",
+            "1",
+            "config.json",
+        ]
+    ]
+    assert (
+        results["terminal-C.csv"] == tmp_path / "output" / "palace" / "terminal-C.csv"
+    )
+
+
+def test_run_local_direct_palace_binary_mode_omits_wrapper_flags(tmp_path, monkeypatch):
+    """Direct solver binaries receive only config.json and OMP threads via env."""
+
+    sim = ElectrostaticSim()
+    sim.set_output_dir(tmp_path)
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "palace.msh").write_text("$MeshFormat\n", encoding="utf-8")
+    palace_binary = tmp_path / "palace-arm64.bin"
+    palace_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    commands: list[list[str]] = []
+    envs: list[dict[str, str]] = []
+
+    def fake_run(
+        cmd: list[str],
+        *,
+        cwd: Path,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        env: dict[str, str],
+    ) -> subprocess.CompletedProcess[str]:
+        assert check
+        assert capture_output
+        assert text
+        commands.append(cmd)
+        envs.append(env)
+        postpro_dir = Path(cwd) / "output" / "palace"
+        postpro_dir.mkdir(parents=True)
+        (postpro_dir / "terminal-C.csv").write_text("i\n", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    results = sim.run_local(
+        use_apptainer=False,
+        executable_mode="binary",
+        palace_executable=palace_binary,
+        num_processes=1,
+        num_threads=2,
+        verbose=False,
+    )
+
+    assert commands == [[str(palace_binary), "config.json"]]
+    assert envs[0]["OMP_NUM_THREADS"] == "2"
+    assert (
+        results["terminal-C.csv"] == tmp_path / "output" / "palace" / "terminal-C.csv"
+    )
+
+
+def test_run_local_direct_palace_binary_mode_rejects_multi_process(tmp_path):
+    """Direct solver binaries do not accept the wrapper's -np launcher flag."""
+
+    sim = ElectrostaticSim()
+    sim.set_output_dir(tmp_path)
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "palace.msh").write_text("$MeshFormat\n", encoding="utf-8")
+    palace_binary = tmp_path / "palace-arm64.bin"
+    palace_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="single-process"):
+        sim.run_local(
+            use_apptainer=False,
+            executable_mode="binary",
+            palace_executable=palace_binary,
+            num_processes=2,
+            verbose=False,
+        )
 
 
 # ---------------------------------------------------------------------------

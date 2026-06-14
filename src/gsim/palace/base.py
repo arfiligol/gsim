@@ -1645,8 +1645,10 @@ class PalaceSimMixin:
         palace_sif_path: str | Path | None = None,
         palace_executable: str | Path | None = None,
         use_apptainer: bool = True,
+        executable_mode: Literal["wrapper", "binary"] = "wrapper",
         num_processes: int | None = None,
         num_threads: int | None = None,
+        serial: bool = False,
         verbose: bool = True,
     ) -> SParams | dict[str, Path]:
         """Run simulation locally using Palace.
@@ -1663,10 +1665,15 @@ class PalaceSimMixin:
                 If None, uses PALACE_EXECUTABLE environment variable or "palace".
             use_apptainer: If True (default), run via Apptainer using SIF file.
                 If False, run Palace executable directly.
+            executable_mode: Direct Palace command style. ``"wrapper"`` expects
+                the Palace wrapper script that accepts ``-np``/``-nt`` flags.
+                ``"binary"`` calls the solver binary with only ``config.json``.
             num_processes: Number of MPI processes. If None (default),
                 uses all available CPUs.
             num_threads: Number of OpenMP threads to use for OpenMP builds, default is 1
                 or the value of OMP_NUM_THREADS in the environment
+            serial: When running direct Palace, pass the Palace wrapper's
+                ``-serial`` flag so smoke tests can avoid MPI launchers.
             verbose: Print progress messages and stream Palace output in real time
 
         Returns:
@@ -1710,9 +1717,13 @@ class PalaceSimMixin:
         config_path = output_dir / "config.json"
         mesh_path = output_dir / "palace.msh"
 
-        # Default to all available CPUs when caller does not specify -np.
         if num_processes is None:
-            num_processes = os.cpu_count() or 1
+            num_processes = (
+                1
+                if not use_apptainer and executable_mode == "binary"
+                else os.cpu_count() or 1
+            )
+        run_env = os.environ.copy()
 
         # Check required files exist
         if not config_path.exists():
@@ -1788,13 +1799,24 @@ class PalaceSimMixin:
                     )
                 exe_path = Path(resolved)
 
-            cmd = [
-                str(exe_path),
-                "-np",
-                str(num_processes),
-            ]
+            if executable_mode == "binary":
+                if num_processes != 1:
+                    raise ValueError(
+                        "executable_mode='binary' runs a single-process Palace "
+                        "binary; use executable_mode='wrapper' for -np support."
+                    )
+                if num_threads is not None:
+                    run_env["OMP_NUM_THREADS"] = str(num_threads)
+                cmd = [str(exe_path)]
+            else:
+                cmd = [str(exe_path)]
+                if serial:
+                    cmd.append("-serial")
+                cmd.extend(["-np", str(num_processes)])
 
-        if num_threads is not None:
+        if num_threads is not None and not (
+            not use_apptainer and executable_mode == "binary"
+        ):
             cmd.extend(["-nt", str(num_threads)])
         cmd.extend(["config.json"])
 
@@ -1826,6 +1848,7 @@ class PalaceSimMixin:
                     stderr=subprocess.STDOUT,
                     text=True,
                     bufsize=1,
+                    env=run_env,
                 ) as process:
                     if process.stdout is not None:
                         for line in process.stdout:
@@ -1850,6 +1873,7 @@ class PalaceSimMixin:
                     check=True,
                     capture_output=True,
                     text=True,
+                    env=run_env,
                 )
                 if result.stdout:
                     logger.debug(result.stdout)
