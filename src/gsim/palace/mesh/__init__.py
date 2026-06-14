@@ -38,14 +38,42 @@ from gsim.palace.mesh.generator import (
     generate_mesh,
     write_config,
 )
+from gsim.palace.mesh.manifest import (
+    MeshManifest,
+    MeshPhysicalGroup,
+    MeshRole,
+    build_mesh_manifest,
+)
+from gsim.palace.mesh.postprocessing import (
+    DielectricInterfaceSpec,
+    DielectricInterfaceType,
+    PostprocessingConfig,
+    PostprocessingIndexEntry,
+    PostprocessingIndexMap,
+    SurfaceFluxSpec,
+    SurfaceFluxType,
+    build_postprocessing_config_from_manifest,
+)
 from gsim.palace.models.mesh import MeshConfig
 
 from . import gmsh_utils
 
 __all__ = [
+    "DielectricInterfaceSpec",
+    "DielectricInterfaceType",
     "GeometryData",
     "MeshConfig",
+    "MeshManifest",
+    "MeshPhysicalGroup",
     "MeshResult",
+    "MeshRole",
+    "PostprocessingConfig",
+    "PostprocessingIndexEntry",
+    "PostprocessingIndexMap",
+    "SurfaceFluxSpec",
+    "SurfaceFluxType",
+    "build_mesh_manifest",
+    "build_postprocessing_config_from_manifest",
     "generate_mesh",
     "gmsh_utils",
     "write_config",

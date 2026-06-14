@@ -6,6 +6,7 @@ This module handles generating Palace config.json and collecting mesh statistics
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -42,6 +43,8 @@ def generate_palace_config(
     hints: dict[str, Any] | None = None,
     electrostatic_config: ElectrostaticConfig | None = None,
     terminals: list[TerminalConfig] | None = None,
+    postprocessing_config: dict[str, Any] | None = None,
+    boundary_postprocessing_config: dict[str, Any] | None = None,
 ) -> Path:
     """Generate Palace config.json file.
 
@@ -60,6 +63,11 @@ def generate_palace_config(
         absorbing_boundary: Whether to add absorbing (PML) boundary
         periodic_axis: Optional periodic axis identifier
         hints: Additional config hints merged into the JSON
+        postprocessing_config: Optional Palace ``Domains.Postprocessing`` entries
+            merged into the default empty postprocessing block.
+        boundary_postprocessing_config: Optional Palace
+            ``Boundaries.Postprocessing`` entries merged into the generated
+            boundary section.
 
     Returns:
         Path to the generated config.json
@@ -222,9 +230,13 @@ def generate_palace_config(
 
         materials.append(mat_entry)
 
+    postprocessing: dict[str, object] = {"Energy": [], "Probe": []}
+    if postprocessing_config:
+        postprocessing.update(deepcopy(postprocessing_config))
+
     config["Domains"] = {
         "Materials": materials,
-        "Postprocessing": {"Energy": [], "Probe": []},
+        "Postprocessing": postprocessing,
     }
 
     # Build boundaries section
@@ -514,6 +526,18 @@ def generate_palace_config(
 
     config["Boundaries"] = boundaries
 
+    if boundary_postprocessing_config:
+        # Boundary postprocessing is a Palace contract, not a private layout
+        # convention. Keep it as an explicit merge point so role-based builders
+        # can wire EPR/flux domains without hand-editing config.json.
+        boundary_postprocessing = dict(
+            boundaries.get("Postprocessing", {})
+            if isinstance(boundaries.get("Postprocessing"), dict)
+            else {}
+        )
+        boundary_postprocessing.update(deepcopy(boundary_postprocessing_config))
+        boundaries["Postprocessing"] = boundary_postprocessing
+
     # Merge any extra hints into the config
     if hints:
         config.update(hints)
@@ -655,6 +679,8 @@ def write_config(
     hints: dict[str, Any] | None = None,
     electrostatic_config: ElectrostaticConfig | None = None,
     terminals: list[TerminalConfig] | None = None,
+    postprocessing_config: dict[str, Any] | None = None,
+    boundary_postprocessing_config: dict[str, Any] | None = None,
 ) -> Path:
     """Write Palace config.json from a MeshResult.
 
@@ -670,6 +696,11 @@ def write_config(
         eigenmode_config: Optional EigenmodeConfig for eigenproblems settings
         absorbing_boundary: Whether to add absorbing (PML) boundary
         hints: Additional config hints merged into the JSON
+        postprocessing_config: Optional Palace ``Domains.Postprocessing`` entries
+            merged into the default empty postprocessing block.
+        boundary_postprocessing_config: Optional Palace
+            ``Boundaries.Postprocessing`` entries merged into the generated
+            boundary section.
 
     Returns:
         Path to the generated config.json
@@ -703,6 +734,8 @@ def write_config(
         hints=hints,
         electrostatic_config=electrostatic_config,
         terminals=terminals,
+        postprocessing_config=postprocessing_config,
+        boundary_postprocessing_config=boundary_postprocessing_config,
     )
 
     # Update the mesh_result with the config path

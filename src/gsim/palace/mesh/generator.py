@@ -29,6 +29,7 @@ from .geometry import (
     resolve_mesh_domain_bounds,
 )
 from .groups import assign_physical_groups
+from .manifest import MeshManifest, build_mesh_manifest
 
 if TYPE_CHECKING:
     from gsim.common.stack import LayerStack
@@ -135,6 +136,11 @@ class MeshResult:
     model_name: str = "palace"
     fmax: float = 100e9
     periodic_axis: str | None = None
+    manifest: MeshManifest = field(default_factory=MeshManifest)
+
+    def __post_init__(self) -> None:
+        if self.groups and not self.manifest.entries:
+            self.manifest = build_mesh_manifest(self.groups)
 
 
 def _setup_mesh_fields(
@@ -720,6 +726,8 @@ def generate_mesh(
                 periodic_axis,
             )
 
+        manifest = build_mesh_manifest(groups)
+
     finally:
         gmsh.clear()
         gmsh.finalize()
@@ -735,6 +743,7 @@ def generate_mesh(
         model_name=model_name,
         fmax=fmax,
         periodic_axis=periodic_axis,
+        manifest=manifest,
     )
 
     return result
