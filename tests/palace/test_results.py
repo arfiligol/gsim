@@ -8,7 +8,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from gsim.palace.results import SParams, get_port_map, load_sparams
+from gsim.palace.results import (
+    SParams,
+    get_port_map,
+    load_indexed_csv,
+    load_postprocessing_index_map,
+    load_sparams,
+)
 
 
 @pytest.fixture
@@ -37,6 +43,46 @@ def sim_dir(tmp_path: Path) -> Path:
     )
     (palace_dir / "port-S.csv").write_text(csv_content)
 
+    return tmp_path
+
+
+@pytest.fixture
+def indexed_report_dir(tmp_path: Path) -> Path:
+    """Create a minimal Palace indexed-report output with an index map."""
+    palace_dir = tmp_path / "output" / "palace"
+    palace_dir.mkdir(parents=True)
+
+    index_map = {
+        "schema_version": 1,
+        "entries": [
+            {
+                "section": "Domains.Postprocessing.Energy",
+                "index": 1,
+                "entry_name": "substrate",
+                "role": "dielectric_volume",
+                "attributes": [10],
+                "physical_names": ["D1_SUBSTRATE"],
+                "dimension": 3,
+                "metadata": {"material": "silicon"},
+            },
+            {
+                "section": "Boundaries.Postprocessing.Dielectric",
+                "index": 2,
+                "entry_name": "ma_interface",
+                "role": "boundary_surface",
+                "attributes": [20],
+                "physical_names": ["MA:D1_TOP_M1___D1_SUBSTRATE"],
+                "dimension": 2,
+            },
+        ],
+    }
+    (tmp_path / "palace_index_map.json").write_text(json.dumps(index_map))
+    (palace_dir / "domain-E.csv").write_text(
+        "m, E_elec[1] (J), p_elec[1], E_elec[99] (J)\n1, 2.0, 0.5, 0.0\n"
+    )
+    (palace_dir / "surface-Q.csv").write_text(
+        "m, p_surf[2], Q_surf[2]\n1, 1.0e-7, 2.0e6\n"
+    )
     return tmp_path
 
 
@@ -225,6 +271,64 @@ class TestGetPortMap:
     def test_legacy_numeric_fallback(self, sim_dir_no_names: Path) -> None:
         pm = get_port_map(sim_dir_no_names)
         assert pm == {1: "p1", 2: "p2"}
+
+
+class TestIndexedCsv:
+    """Tests for indexed Palace CSV loading through palace_index_map.json."""
+
+    def test_loads_postprocessing_index_map(self, indexed_report_dir: Path) -> None:
+        index_map = load_postprocessing_index_map(indexed_report_dir)
+
+        entry = index_map.entry_for_index("Domains.Postprocessing.Energy", 1)
+        assert entry is not None
+        assert entry.primary_physical_name == "D1_SUBSTRATE"
+        assert entry.metadata == {"material": "silicon"}
+
+    def test_load_indexed_csv_renames_physical_columns(
+        self, indexed_report_dir: Path
+    ) -> None:
+        result = load_indexed_csv(indexed_report_dir, "domain-E.csv")
+
+        assert result.section == "Domains.Postprocessing.Energy"
+        assert "E_elec[D1_SUBSTRATE] (J)" in result.dataframe.columns
+        assert "p_elec[D1_SUBSTRATE]" in result.dataframe.columns
+        assert "E_elec[99] (J)" in result.dataframe.columns
+        assert result.dataframe.loc[0, "E_elec[D1_SUBSTRATE] (J)"] == pytest.approx(2.0)
+        assert result.column_map[0]["physical_name"] == "D1_SUBSTRATE"
+        assert result.column_map[0]["role"] == "dielectric_volume"
+        assert result.column_map[2]["original_name"] == "E_elec[99] (J)"
+        assert "physical_name" not in result.column_map[2]
+
+    def test_load_indexed_csv_infers_surface_q_section(
+        self, indexed_report_dir: Path
+    ) -> None:
+        result = load_indexed_csv(indexed_report_dir, "surface-Q.csv")
+
+        assert result.section == "Boundaries.Postprocessing.Dielectric"
+        assert "p_surf[MA:D1_TOP_M1___D1_SUBSTRATE]" in result.dataframe.columns
+        assert result.columns[0].attributes == (20,)
+
+    def test_load_indexed_csv_accepts_results_dict(
+        self, indexed_report_dir: Path
+    ) -> None:
+        results = {
+            "domain-E.csv": indexed_report_dir / "output" / "palace" / "domain-E.csv",
+            "palace_index_map.json": indexed_report_dir / "palace_index_map.json",
+        }
+
+        result = load_indexed_csv(results, "domain-E.csv")
+
+        assert "E_elec[D1_SUBSTRATE] (J)" in result.dataframe.columns
+
+    def test_load_indexed_csv_requires_unknown_section(self, tmp_path: Path) -> None:
+        csv_path = tmp_path / "custom.csv"
+        csv_path.write_text("x[1]\n1\n")
+        (tmp_path / "palace_index_map.json").write_text(
+            json.dumps({"schema_version": 1, "entries": []})
+        )
+
+        with pytest.raises(ValueError, match="section"):
+            load_indexed_csv(csv_path)
 
 
 class TestSParamsSaveLoad:

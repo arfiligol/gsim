@@ -20,16 +20,29 @@ import json
 import logging
 import re
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import matplotlib.pyplot as plt
 import numpy as np
 
 if TYPE_CHECKING:
+    import pandas as pd
     from numpy.typing import NDArray
 
+    from gsim.palace.mesh.postprocessing import PostprocessingIndexMap
+
 logger = logging.getLogger(__name__)
+
+_INDEXED_CSV_COLUMN_RE = re.compile(
+    r"^(?P<prefix>[A-Za-z][A-Za-z0-9_]*)\[(?P<index>\d+)\](?P<suffix>.*)$"
+)
+_CSV_INDEX_SECTIONS = {
+    "domain-E.csv": "Domains.Postprocessing.Energy",
+    "surface-Q.csv": "Boundaries.Postprocessing.Dielectric",
+    "port-EPR.csv": "Boundaries.Postprocessing.SurfaceFlux",
+}
 
 
 # -----------------------------------------------------------------------
@@ -339,7 +352,7 @@ class SParams:
             arrays[f"S_{to_p}_{from_p}_db"] = sp.db
             arrays[f"S_{to_p}_{from_p}_deg"] = sp.deg
 
-        np.savez_compressed(filepath, **arrays)  # ty: ignore[invalid-argument-type]
+        np.savez_compressed(str(filepath), **arrays)  # pyright: ignore[reportArgumentType]
         logger.info("S-parameters saved to %s", filepath)
         return filepath
 
@@ -380,6 +393,55 @@ class SParams:
             f"{n_freq} freq points, "
             f"{len(self._data)} S-parameters)"
         )
+
+
+@dataclass(frozen=True)
+class IndexedCsvColumn:
+    """Mapping from one Palace indexed CSV column to mesh identity."""
+
+    original_name: str
+    renamed_name: str
+    quantity: str
+    index: int
+    section: str
+    physical_name: str | None = None
+    entry_name: str | None = None
+    role: str | None = None
+    attributes: tuple[int, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-friendly audit row."""
+        row: dict[str, Any] = {
+            "original_name": self.original_name,
+            "renamed_name": self.renamed_name,
+            "quantity": self.quantity,
+            "index": self.index,
+            "section": self.section,
+        }
+        if self.physical_name is not None:
+            row["physical_name"] = self.physical_name
+        if self.entry_name is not None:
+            row["entry_name"] = self.entry_name
+        if self.role is not None:
+            row["role"] = self.role
+        if self.attributes:
+            row["attributes"] = list(self.attributes)
+        return row
+
+
+@dataclass(frozen=True)
+class IndexedCsv:
+    """Palace indexed CSV with optional physical-name column labels."""
+
+    source_path: Path
+    section: str
+    dataframe: pd.DataFrame
+    columns: tuple[IndexedCsvColumn, ...]
+
+    @property
+    def column_map(self) -> tuple[dict[str, Any], ...]:
+        """Return JSON-friendly column provenance rows."""
+        return tuple(column.to_dict() for column in self.columns)
 
 
 def load_sparams(
@@ -454,6 +516,153 @@ def load_sparams(
     return SParams(freq=freq, data=data, port_names=port_names, files=files)
 
 
+def load_postprocessing_index_map(
+    source: str | Path | dict,
+    *,
+    index_map_path: str | Path | None = None,
+) -> PostprocessingIndexMap:
+    """Load ``palace_index_map.json`` as a postprocessing index map.
+
+    Args:
+        source: Simulation directory, Palace output directory, results dict, or
+            any path near the generated index-map artifact.
+        index_map_path: Optional explicit ``palace_index_map.json`` path.
+
+    Returns:
+        :class:`gsim.palace.mesh.PostprocessingIndexMap`.
+    """
+    from gsim.palace.mesh.postprocessing import (
+        PostprocessingIndexEntry,
+        PostprocessingIndexMap,
+    )
+
+    path = (
+        Path(index_map_path)
+        if index_map_path is not None
+        else _find_postprocessing_index_map(source)
+    )
+    if path is None or not path.exists():
+        msg = "palace_index_map.json not found"
+        raise FileNotFoundError(msg)
+
+    data = json.loads(path.read_text())
+    entries = tuple(
+        PostprocessingIndexEntry(
+            section=str(row["section"]),
+            index=int(row["index"]),
+            entry_name=str(row.get("entry_name", row.get("physical_name", ""))),
+            role=str(row.get("role", "")),
+            attributes=tuple(int(v) for v in row.get("attributes", ())),
+            entity_tags=tuple(int(v) for v in row.get("entity_tags", ())),
+            physical_names=tuple(str(v) for v in row.get("physical_names", ())),
+            dimension=_optional_int(row.get("dimension")),
+            source=_optional_str(row.get("source")),
+            interface_of=_optional_str_pair(row.get("interface_of")),
+            exterior_of=_optional_str(row.get("exterior_of")),
+            metadata=_as_mapping(row.get("metadata")),
+            extra={
+                key: value
+                for key, value in row.items()
+                if key
+                not in {
+                    "section",
+                    "index",
+                    "entry_name",
+                    "role",
+                    "attributes",
+                    "entity_tags",
+                    "physical_names",
+                    "dimension",
+                    "source",
+                    "interface_of",
+                    "exterior_of",
+                    "metadata",
+                }
+            },
+        )
+        for row in data.get("entries", ())
+    )
+    return PostprocessingIndexMap(
+        entries=entries,
+        schema_version=int(data.get("schema_version", 1)),
+    )
+
+
+def load_indexed_csv(
+    source: str | Path | dict,
+    csv_name: str | None = None,
+    *,
+    section: str | None = None,
+    index_map_path: str | Path | None = None,
+    rename_columns: bool = True,
+) -> IndexedCsv:
+    """Load a Palace indexed CSV and annotate columns from the index map.
+
+    Palace postprocessing reports use columns such as ``E_elec[1] (J)`` and
+    ``p_surf[2]``. This loader preserves the numeric report contract while
+    linking each index back to the generated ``palace_index_map.json`` artifact.
+
+    Args:
+        source: CSV path, simulation directory, Palace output directory, or
+            results dict.
+        csv_name: CSV name when ``source`` is a directory or results dict.
+        section: Palace index-map section. If omitted, common Palace report
+            filenames infer the section.
+        index_map_path: Optional explicit ``palace_index_map.json`` path.
+        rename_columns: If true, indexed columns with known physical names are
+            renamed from ``quantity[1]`` to ``quantity[physical-name]``.
+
+    Returns:
+        :class:`IndexedCsv` containing the DataFrame and column provenance rows.
+    """
+    import pandas as pd
+
+    csv_path = _resolve_report_csv(source, csv_name)
+    resolved_section = section or _section_for_csv(csv_path.name)
+    index_map = load_postprocessing_index_map(source, index_map_path=index_map_path)
+    frame = pd.read_csv(csv_path)
+    frame.columns = frame.columns.str.strip()
+
+    rename_map: dict[str, str] = {}
+    column_rows: list[IndexedCsvColumn] = []
+    for column in frame.columns:
+        parsed = _parse_indexed_csv_column(column)
+        if parsed is None:
+            continue
+        quantity, index, suffix = parsed
+        entry = index_map.entry_for_index(resolved_section, index)
+        physical_name = None if entry is None else entry.primary_physical_name
+        renamed = (
+            f"{quantity}[{physical_name}]{suffix}"
+            if rename_columns and physical_name is not None
+            else column
+        )
+        if renamed != column:
+            rename_map[column] = renamed
+        column_rows.append(
+            IndexedCsvColumn(
+                original_name=column,
+                renamed_name=renamed,
+                quantity=quantity,
+                index=index,
+                section=resolved_section,
+                physical_name=physical_name,
+                entry_name=None if entry is None else entry.entry_name,
+                role=None if entry is None else entry.role,
+                attributes=() if entry is None else entry.attributes,
+            )
+        )
+
+    if rename_map:
+        frame = frame.rename(columns=rename_map)
+    return IndexedCsv(
+        source_path=csv_path,
+        section=resolved_section,
+        dataframe=frame,
+        columns=tuple(column_rows),
+    )
+
+
 def get_port_map(source: str | Path | dict) -> dict[int, str]:
     """Return the ``{port_number: port_name}`` mapping.
 
@@ -486,6 +695,29 @@ def _parse_sparam_col(col: str) -> tuple[int, int, str] | None:
     return None
 
 
+def _parse_indexed_csv_column(col: str) -> tuple[str, int, str] | None:
+    """Parse ``quantity[index] suffix`` Palace report columns."""
+    match = _INDEXED_CSV_COLUMN_RE.fullmatch(col.strip())
+    if match is None:
+        return None
+    return (
+        match.group("prefix"),
+        int(match.group("index")),
+        match.group("suffix"),
+    )
+
+
+def _section_for_csv(csv_name: str) -> str:
+    try:
+        return _CSV_INDEX_SECTIONS[csv_name]
+    except KeyError:
+        msg = (
+            f"Cannot infer Palace index-map section for {csv_name!r}; "
+            "pass section= explicitly."
+        )
+        raise ValueError(msg) from None
+
+
 def _resolve_source(
     source: str | Path | dict,
     *,
@@ -512,6 +744,42 @@ def _resolve_source(
         msg = f"port-S.csv not found in {output_dir} or its subdirectories"
         raise FileNotFoundError(msg)
     return csv_path, output_dir
+
+
+def _resolve_report_csv(source: str | Path | dict, csv_name: str | None) -> Path:
+    """Resolve a Palace report CSV from a direct path, directory, or result dict."""
+    if isinstance(source, dict):
+        if csv_name is None:
+            candidates = [
+                name for name in _CSV_INDEX_SECTIONS if source.get(name) is not None
+            ]
+            if len(candidates) != 1:
+                msg = (
+                    "Pass csv_name= when a results dict contains zero or multiple "
+                    "indexed CSVs."
+                )
+                raise ValueError(msg)
+            csv_name = candidates[0]
+        csv_val = source.get(csv_name)
+        if csv_val is None:
+            msg = f"Results dict has no {csv_name!r} entry"
+            raise FileNotFoundError(msg)
+        return Path(csv_val)
+
+    path = Path(source)
+    if path.is_file():
+        if csv_name is not None and path.name != csv_name:
+            msg = f"CSV path {path} does not match csv_name={csv_name!r}"
+            raise ValueError(msg)
+        return path
+    if csv_name is None:
+        msg = "Pass csv_name= when source is a directory."
+        raise ValueError(msg)
+    found = _find_file(path, csv_name)
+    if found is None:
+        msg = f"{csv_name} not found in {path} or its subdirectories"
+        raise FileNotFoundError(msg)
+    return found
 
 
 def _load_port_map(
@@ -588,6 +856,58 @@ def _find_file(base: Path, name: str) -> Path | None:
 
     matches = list(base.rglob(name))
     return matches[0] if matches else None
+
+
+def _find_postprocessing_index_map(source: str | Path | dict) -> Path | None:
+    """Search common local/cloud locations for ``palace_index_map.json``."""
+    name = "palace_index_map.json"
+    if isinstance(source, dict):
+        explicit = source.get(name)
+        if explicit is not None:
+            return Path(explicit)
+        candidate_roots = [Path(value).parent for value in source.values()]
+    else:
+        path = Path(source)
+        candidate_roots = [path if path.is_dir() else path.parent]
+
+    for root in candidate_roots:
+        candidates = [
+            root / name,
+            root.parent / name,
+            root.parent.parent / name,
+            root / "input" / name,
+            root.parent / "input" / name,
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        if root.exists():
+            found = _find_file(root, name)
+            if found is not None:
+                return found
+    return None
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)
+
+
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
+def _optional_str_pair(value: Any) -> tuple[str, str] | None:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return None
+    return str(value[0]), str(value[1])
+
+
+def _as_mapping(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
 
 
 # -----------------------------------------------------------------------

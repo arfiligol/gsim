@@ -100,10 +100,14 @@ from gsim.palace.ports import (
 
 # Results utilities
 from gsim.palace.results import (
+    IndexedCsv,
+    IndexedCsvColumn,
     SParam,
     SParams,
     get_port_map,
     load_fields,
+    load_indexed_csv,
+    load_postprocessing_index_map,
     load_sparams,
 )
 
@@ -121,6 +125,8 @@ __all__ = [
     "ElectrostaticSim",
     "Geometry",
     "GeometryConfig",
+    "IndexedCsv",
+    "IndexedCsvColumn",
     "Layer",
     "LayerStack",
     "MagnetostaticConfig",
@@ -154,6 +160,8 @@ __all__ = [
     "get_port_map",
     "get_stack",
     "load_fields",
+    "load_indexed_csv",
+    "load_postprocessing_index_map",
     "load_sparams",
     "load_stack_yaml",
     "parse_layer_stack",
