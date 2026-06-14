@@ -47,6 +47,26 @@ _CSV_INDEX_SECTIONS = {
     "port-EPR.csv": "Boundaries.Postprocessing.SurfaceFlux",
 }
 _REPORT_SOURCE_COLUMNS = ("name", "path", "required", "present", "loaded", "message")
+_DOMAIN_MATERIAL_COLUMNS = (
+    "material_row_index",
+    "material_attribute",
+    "material_attributes",
+    "domain_index",
+    "section",
+    "source_name",
+    "physical_name",
+    "entry_name",
+    "role",
+    "attributes",
+    "metadata",
+    "material_name",
+    "permittivity",
+    "loss_tangent",
+    "conductivity",
+    "permeability",
+    "material_axes",
+    "raw_material",
+)
 _TERMINAL_MATRIX_SPECS = {
     "C": {
         "file_name": "terminal-C.csv",
@@ -533,6 +553,7 @@ class EigenmodeReport:
     eigenmodes: Eigenmodes
     mode_history: pd.DataFrame
     pass_summary: pd.DataFrame
+    domain_materials: pd.DataFrame
     domain_energy: pd.DataFrame
     surface_q: pd.DataFrame
     surface_interface_summary: pd.DataFrame
@@ -958,6 +979,35 @@ def load_eigenmode_report(
         )
     )
 
+    resolved_config_path = _find_optional_config_path(source, config_path=None)
+    config_present = resolved_config_path is not None and resolved_config_path.exists()
+    config_loaded = False
+    if config_present:
+        domain_materials = load_domain_material_summary(
+            source,
+            config_path=resolved_config_path,
+            index_map_path=resolved_index_map_path if index_map_present else None,
+        )
+        config_loaded = True
+        config_message = (
+            "loaded domain material summary"
+            if index_map_present
+            else "loaded domain material summary without palace_index_map.json"
+        )
+    else:
+        domain_materials = _empty_domain_material_summary()
+        config_message = "not found"
+    source_rows.append(
+        _report_source_row(
+            "config.json",
+            resolved_config_path,
+            required=False,
+            present=config_present,
+            loaded=config_loaded,
+            message=config_message,
+        )
+    )
+
     domain_energy, domain_source = _load_optional_eigenmode_report_table(
         source,
         "domain-E.csv",
@@ -1007,6 +1057,7 @@ def load_eigenmode_report(
         surface_interface_summary=surface_interface_summary,
         port_epr=port_epr,
         index_map=index_map_frame,
+        domain_materials=domain_materials,
         sources=pd.DataFrame.from_records(
             source_rows,
             columns=_REPORT_SOURCE_COLUMNS,
@@ -1460,6 +1511,86 @@ def load_port_epr_summary(
     return frame
 
 
+def load_domain_material_summary(
+    source: str | Path | dict,
+    *,
+    config_path: str | Path | None = None,
+    index_map_path: str | Path | None = None,
+) -> pd.DataFrame:
+    """Load Palace ``Domains.Materials`` with physical-name provenance.
+
+    The returned table interprets the effective material rows from
+    ``config.json`` and, when available, joins each material attribute back to
+    the domain postprocessing entries in ``palace_index_map.json``.
+    """
+    import pandas as pd
+
+    resolved_config_path = _find_optional_config_path(
+        source,
+        config_path=config_path,
+    )
+    if resolved_config_path is None or not resolved_config_path.exists():
+        msg = "config.json not found"
+        raise FileNotFoundError(msg)
+
+    data = json.loads(resolved_config_path.read_text())
+    materials = _domain_material_entries(data)
+    index_map = _load_optional_domain_material_index_map(
+        source,
+        index_map_path=index_map_path,
+    )
+
+    rows: list[dict[str, Any]] = []
+    for material_row_index, material in enumerate(materials, start=1):
+        attributes = _material_attributes(material)
+        if not attributes:
+            rows.append(
+                _domain_material_row(
+                    material_row_index=material_row_index,
+                    material_attribute=None,
+                    material_attributes=attributes,
+                    material=material,
+                    index_entry=None,
+                )
+            )
+            continue
+
+        for attribute in attributes:
+            matches = (
+                index_map.entries_for_attribute(
+                    attribute,
+                    section="Domains.Postprocessing.Energy",
+                )
+                if index_map is not None
+                else ()
+            )
+            if not matches:
+                rows.append(
+                    _domain_material_row(
+                        material_row_index=material_row_index,
+                        material_attribute=attribute,
+                        material_attributes=attributes,
+                        material=material,
+                        index_entry=None,
+                    )
+                )
+                continue
+            rows.extend(
+                _domain_material_row(
+                    material_row_index=material_row_index,
+                    material_attribute=attribute,
+                    material_attributes=attributes,
+                    material=material,
+                    index_entry=index_entry,
+                )
+                for index_entry in matches
+            )
+
+    if not rows:
+        return _empty_domain_material_summary()
+    return pd.DataFrame.from_records(rows, columns=_DOMAIN_MATERIAL_COLUMNS)
+
+
 def get_port_map(source: str | Path | dict) -> dict[int, str]:
     """Return the ``{port_number: port_name}`` mapping.
 
@@ -1491,6 +1622,155 @@ def _report_source_row(
         "loaded": loaded,
         "message": message,
     }
+
+
+def _domain_material_entries(data: Any) -> tuple[dict[str, Any], ...]:
+    if not isinstance(data, dict):
+        return ()
+    domains = data.get("Domains", {})
+    if not isinstance(domains, dict):
+        return ()
+    materials = domains.get("Materials", ())
+    if not isinstance(materials, (list, tuple)):
+        return ()
+    return tuple(entry for entry in materials if isinstance(entry, dict))
+
+
+def _load_optional_domain_material_index_map(
+    source: str | Path | dict,
+    *,
+    index_map_path: str | Path | None,
+) -> PostprocessingIndexMap | None:
+    resolved_index_map_path = _find_optional_postprocessing_index_map_path(
+        source,
+        index_map_path=index_map_path,
+    )
+    if resolved_index_map_path is None:
+        return None
+    return load_postprocessing_index_map(
+        source,
+        index_map_path=resolved_index_map_path,
+    )
+
+
+def _domain_material_row(
+    *,
+    material_row_index: int,
+    material_attribute: int | None,
+    material_attributes: tuple[int, ...],
+    material: dict[str, Any],
+    index_entry: Any | None,
+) -> dict[str, Any]:
+    physical_name = None
+    entry_name = None
+    role = None
+    section = None
+    domain_index = None
+    attributes = (material_attribute,) if material_attribute is not None else ()
+    metadata: dict[str, Any] = {}
+    source_name = (
+        f"Attribute {material_attribute}"
+        if material_attribute is not None
+        else f"Material row {material_row_index}"
+    )
+
+    if index_entry is not None:
+        domain_index = index_entry.index
+        section = index_entry.section
+        entry_name = index_entry.entry_name
+        role = index_entry.role
+        attributes = index_entry.attributes
+        physical_name = (
+            index_entry.physical_names[0] if index_entry.physical_names else None
+        )
+        source_name = index_entry.primary_physical_name
+        metadata = dict(index_entry.metadata)
+
+    return {
+        "material_row_index": material_row_index,
+        "material_attribute": material_attribute,
+        "material_attributes": material_attributes,
+        "domain_index": domain_index,
+        "section": section,
+        "source_name": source_name,
+        "physical_name": physical_name,
+        "entry_name": entry_name,
+        "role": role,
+        "attributes": attributes,
+        "metadata": metadata,
+        "material_name": _config_material_value(material, "Name", "Material"),
+        "permittivity": _optional_numeric(
+            _config_material_value(
+                material,
+                "Permittivity",
+                "RelativePermittivity",
+                "epsilon_r",
+                "eps_r",
+            )
+        ),
+        "loss_tangent": _optional_numeric(
+            _config_material_value(
+                material,
+                "LossTan",
+                "LossTangent",
+                "loss_tangent",
+                "tan_delta",
+            )
+        ),
+        "conductivity": _optional_numeric(
+            _config_material_value(
+                material,
+                "Conductivity",
+                "conductivity",
+            )
+        ),
+        "permeability": _optional_numeric(
+            _config_material_value(
+                material,
+                "Permeability",
+                "RelativePermeability",
+                "mu_r",
+            )
+        ),
+        "material_axes": _config_material_value(
+            material,
+            "MaterialAxes",
+            "Axes",
+        ),
+        "raw_material": dict(material),
+    }
+
+
+def _material_attributes(material: dict[str, Any]) -> tuple[int, ...]:
+    value = _config_material_value(material, "Attributes", "attributes")
+    if value is None:
+        return ()
+    if isinstance(value, (str, bytes)):
+        return (int(value),)
+    if isinstance(value, (int, float)):
+        return (int(value),)
+    return tuple(int(attribute) for attribute in value)
+
+
+def _config_material_value(material: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in material:
+            return material[key]
+    lower_keys = {str(key).lower(): value for key, value in material.items()}
+    for key in keys:
+        value = lower_keys.get(key.lower())
+        if value is not None:
+            return value
+    return None
+
+
+def _optional_numeric(value: Any) -> Any:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return value
 
 
 def _load_eigenmode_history_for_report(
@@ -1572,6 +1852,16 @@ def _find_optional_postprocessing_index_map_path(
     if index_map_path is not None:
         return Path(index_map_path)
     return _find_postprocessing_index_map(source)
+
+
+def _find_optional_config_path(
+    source: str | Path | dict,
+    *,
+    config_path: str | Path | None,
+) -> Path | None:
+    if config_path is not None:
+        return Path(config_path)
+    return _find_config_json(source)
 
 
 def _postprocessing_index_map_to_dataframe(
@@ -1714,6 +2004,12 @@ def _empty_index_map_dataframe() -> pd.DataFrame:
             "metadata",
         ]
     )
+
+
+def _empty_domain_material_summary() -> pd.DataFrame:
+    import pandas as pd
+
+    return pd.DataFrame(columns=_DOMAIN_MATERIAL_COLUMNS)
 
 
 def _empty_domain_energy_summary() -> pd.DataFrame:
@@ -2674,6 +2970,37 @@ def _find_postprocessing_index_map(source: str | Path | dict) -> Path | None:
             root.parent.parent / name,
             root / "input" / name,
             root.parent / "input" / name,
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        if root.exists():
+            found = _find_file(root, name)
+            if found is not None:
+                return found
+    return None
+
+
+def _find_config_json(source: str | Path | dict) -> Path | None:
+    """Search common local/cloud locations for Palace ``config.json``."""
+    name = "config.json"
+    if isinstance(source, dict):
+        explicit = source.get(name)
+        if explicit is not None:
+            return Path(explicit)
+        candidate_roots = [Path(value).parent for value in source.values()]
+    else:
+        path = Path(source)
+        candidate_roots = [path if path.is_dir() else path.parent]
+
+    for root in candidate_roots:
+        candidates = [
+            root / name,
+            root.parent / name,
+            root.parent.parent / name,
+            root / "input" / name,
+            root.parent / "input" / name,
+            root.parent.parent / "input" / name,
         ]
         for candidate in candidates:
             if candidate.exists():

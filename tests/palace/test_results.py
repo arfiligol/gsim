@@ -14,6 +14,7 @@ from gsim.palace.results import (
     SParams,
     get_port_map,
     load_domain_energy_summary,
+    load_domain_material_summary,
     load_eigenmode_history,
     load_eigenmode_report,
     load_eigenmodes,
@@ -101,6 +102,25 @@ def indexed_report_dir(tmp_path: Path) -> Path:
         ],
     }
     (tmp_path / "palace_index_map.json").write_text(json.dumps(index_map))
+    config = {
+        "Domains": {
+            "Materials": [
+                {
+                    "Attributes": [10],
+                    "Name": "silicon",
+                    "Permittivity": 11.45,
+                    "LossTan": 1.0e-6,
+                    "Conductivity": 2.0,
+                },
+                {
+                    "Attributes": [99],
+                    "Permittivity": 4.2,
+                    "LossTan": 0.0,
+                },
+            ]
+        }
+    }
+    (tmp_path / "config.json").write_text(json.dumps(config))
     (palace_dir / "domain-E.csv").write_text(
         "m, E_elec[1] (J), p_elec[1], E_elec[99] (J)\n1, 2.0, 0.5, 0.0\n"
     )
@@ -550,6 +570,11 @@ class TestEigenmodeReport:
             2,
         ]
         assert report.pass_summary["n_modes"].tolist() == [2, 2]
+        material_rows = report.domain_materials.set_index("material_attribute")
+        assert material_rows.loc[10, "source_name"] == "D1_SUBSTRATE"
+        assert material_rows.loc[10, "material_name"] == "silicon"
+        assert material_rows.loc[10, "permittivity"] == pytest.approx(11.45)
+        assert material_rows.loc[99, "source_name"] == "Attribute 99"
         assert report.domain_energy.iloc[0]["source_name"] == "D1_SUBSTRATE"
         assert report.surface_q.iloc[0]["interface_type"] == "MA"
         assert (
@@ -567,6 +592,7 @@ class TestEigenmodeReport:
         ]
         assert report.missing_reports == ()
         assert bool(report.sources.set_index("name").loc["surface-Q.csv", "loaded"])
+        assert bool(report.sources.set_index("name").loc["config.json", "loaded"])
 
     def test_load_eigenmode_report_allows_missing_optional_epr(
         self,
@@ -575,18 +601,21 @@ class TestEigenmodeReport:
         report = load_eigenmode_report(eigenmode_dir)
 
         assert report.eigenmodes.n_modes == 2
+        assert report.domain_materials.empty
         assert report.domain_energy.empty
         assert report.surface_q.empty
         assert report.port_epr.empty
         assert report.index_map.empty
         assert report.missing_reports == (
             "palace_index_map.json",
+            "config.json",
             "domain-E.csv",
             "surface-Q.csv",
             "port-EPR.csv",
         )
         sources = report.sources.set_index("name")
         assert bool(sources.loc["eig.csv", "loaded"])
+        assert not bool(sources.loc["config.json", "loaded"])
         assert not bool(sources.loc["domain-E.csv", "loaded"])
 
     def test_load_eigenmode_report_requires_bulk_and_surface_epr(
@@ -661,6 +690,37 @@ class TestIndexedCsv:
 
 class TestIndexedReportSummaries:
     """Tests for high-level indexed Palace report summary frames."""
+
+    def test_load_domain_material_summary_joins_config_to_index_map(
+        self, indexed_report_dir: Path
+    ) -> None:
+        summary = load_domain_material_summary(indexed_report_dir)
+
+        by_attribute = summary.set_index("material_attribute")
+        assert by_attribute.loc[10, "domain_index"] == 1
+        assert by_attribute.loc[10, "section"] == "Domains.Postprocessing.Energy"
+        assert by_attribute.loc[10, "source_name"] == "D1_SUBSTRATE"
+        assert by_attribute.loc[10, "physical_name"] == "D1_SUBSTRATE"
+        assert by_attribute.loc[10, "entry_name"] == "substrate"
+        assert by_attribute.loc[10, "role"] == "dielectric_volume"
+        assert by_attribute.loc[10, "material_name"] == "silicon"
+        assert by_attribute.loc[10, "permittivity"] == pytest.approx(11.45)
+        assert by_attribute.loc[10, "loss_tangent"] == pytest.approx(1.0e-6)
+        assert by_attribute.loc[10, "conductivity"] == pytest.approx(2.0)
+
+    def test_load_domain_material_summary_keeps_unmapped_material_attributes(
+        self, indexed_report_dir: Path
+    ) -> None:
+        import pandas as pd
+
+        summary = load_domain_material_summary(indexed_report_dir)
+
+        by_attribute = summary.set_index("material_attribute")
+        assert pd.isna(by_attribute.loc[99, "domain_index"])
+        assert by_attribute.loc[99, "source_name"] == "Attribute 99"
+        assert pd.isna(by_attribute.loc[99, "physical_name"])
+        assert by_attribute.loc[99, "attributes"] == (99,)
+        assert by_attribute.loc[99, "permittivity"] == pytest.approx(4.2)
 
     def test_load_domain_energy_summary_keeps_unmapped_indices(
         self, indexed_report_dir: Path
