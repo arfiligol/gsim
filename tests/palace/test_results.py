@@ -11,11 +11,15 @@ import pytest
 from gsim.palace.results import (
     SParams,
     get_port_map,
+    load_domain_energy_summary,
     load_indexed_csv,
+    load_port_epr_summary,
     load_postprocessing_index_map,
     load_sparams,
+    load_surface_q_summary,
     load_terminal_matrix,
     load_terminal_matrix_history,
+    summarize_surface_q_by_interface,
     summarize_terminal_matrix_history,
 )
 
@@ -76,6 +80,17 @@ def indexed_report_dir(tmp_path: Path) -> Path:
                 "attributes": [20],
                 "physical_names": ["MA:D1_TOP_M1___D1_SUBSTRATE"],
                 "dimension": 2,
+                "Type": "MA",
+            },
+            {
+                "section": "Boundaries.Postprocessing.SurfaceFlux",
+                "index": 3,
+                "entry_name": "readout_port_surface",
+                "role": "port_surface",
+                "attributes": [30],
+                "physical_names": ["P1"],
+                "dimension": 2,
+                "Type": "Power",
             },
         ],
     }
@@ -86,6 +101,7 @@ def indexed_report_dir(tmp_path: Path) -> Path:
     (palace_dir / "surface-Q.csv").write_text(
         "m, p_surf[2], Q_surf[2]\n1, 1.0e-7, 2.0e6\n"
     )
+    (palace_dir / "port-EPR.csv").write_text("m, p[3]\n1, -2.5e-4\n")
     return tmp_path
 
 
@@ -369,6 +385,7 @@ class TestIndexedCsv:
         assert result.section == "Boundaries.Postprocessing.Dielectric"
         assert "p_surf[MA:D1_TOP_M1___D1_SUBSTRATE]" in result.dataframe.columns
         assert result.columns[0].attributes == (20,)
+        assert result.columns[0].extra["Type"] == "MA"
 
     def test_load_indexed_csv_accepts_results_dict(
         self, indexed_report_dir: Path
@@ -391,6 +408,74 @@ class TestIndexedCsv:
 
         with pytest.raises(ValueError, match="section"):
             load_indexed_csv(csv_path)
+
+
+class TestIndexedReportSummaries:
+    """Tests for high-level indexed Palace report summary frames."""
+
+    def test_load_domain_energy_summary_keeps_unmapped_indices(
+        self, indexed_report_dir: Path
+    ) -> None:
+        summary = load_domain_energy_summary(indexed_report_dir)
+
+        by_index = summary.set_index("domain_index")
+        assert by_index.loc[1, "mode_index"] == 1
+        assert by_index.loc[1, "source_name"] == "D1_SUBSTRATE"
+        assert by_index.loc[1, "physical_name"] == "D1_SUBSTRATE"
+        assert by_index.loc[1, "E_elec_j"] == pytest.approx(2.0)
+        assert by_index.loc[1, "p_elec"] == pytest.approx(0.5)
+        assert by_index.loc[99, "source_name"] == "Index 99"
+        assert by_index.loc[99, "E_elec_j"] == pytest.approx(0.0)
+
+    def test_load_surface_q_summary_and_interface_totals(
+        self, indexed_report_dir: Path
+    ) -> None:
+        summary = load_surface_q_summary(indexed_report_dir)
+
+        row = summary.iloc[0]
+        assert row["surface_index"] == 2
+        assert row["interface_type"] == "MA"
+        assert row["source_name"] == "MA:D1_TOP_M1___D1_SUBSTRATE"
+        assert row["p_surf"] == pytest.approx(1.0e-7)
+        assert row["q_surf"] == pytest.approx(2.0e6)
+        assert row["inverse_q"] == pytest.approx(5.0e-7)
+
+        by_interface = summarize_surface_q_by_interface(summary).set_index(
+            "interface_type"
+        )
+        assert by_interface.loc["MA", "surface_count"] == 1
+        assert by_interface.loc["MA", "p_surf_sum"] == pytest.approx(1.0e-7)
+        assert by_interface.loc["MA", "inverse_q_sum"] == pytest.approx(5.0e-7)
+        assert by_interface.loc["MA", "q_equivalent"] == pytest.approx(2.0e6)
+        assert by_interface.loc["MA", "p_surf_fraction"] == pytest.approx(1.0)
+        assert by_interface.loc["MS", "surface_count"] == 0
+        assert by_interface.loc["SA", "surface_count"] == 0
+
+    def test_load_port_epr_summary_tracks_signed_and_abs_participation(
+        self, indexed_report_dir: Path
+    ) -> None:
+        summary = load_port_epr_summary(indexed_report_dir)
+
+        row = summary.iloc[0]
+        assert row["port_index"] == 3
+        assert row["mode_index"] == 1
+        assert row["source_name"] == "P1"
+        assert row["postprocessing_type"] == "Power"
+        assert row["p_port"] == pytest.approx(-2.5e-4)
+        assert row["abs_p_port"] == pytest.approx(2.5e-4)
+        assert row["abs_p_port_fraction"] == pytest.approx(1.0)
+
+    def test_summary_helpers_accept_results_dict(
+        self, indexed_report_dir: Path
+    ) -> None:
+        results = {
+            "surface-Q.csv": indexed_report_dir / "output" / "palace" / "surface-Q.csv",
+            "palace_index_map.json": indexed_report_dir / "palace_index_map.json",
+        }
+
+        summary = load_surface_q_summary(results)
+
+        assert summary.iloc[0]["source_name"] == "MA:D1_TOP_M1___D1_SUBSTRATE"
 
 
 class TestTerminalMatrix:
