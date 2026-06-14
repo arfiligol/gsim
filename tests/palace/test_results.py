@@ -13,6 +13,7 @@ from gsim.palace.results import (
     Eigenmodes,
     SParams,
     get_port_map,
+    load_dielectric_interface_summary,
     load_domain_energy_summary,
     load_domain_material_summary,
     load_eigenmode_history,
@@ -118,7 +119,29 @@ def indexed_report_dir(tmp_path: Path) -> Path:
                     "LossTan": 0.0,
                 },
             ]
-        }
+        },
+        "Boundaries": {
+            "Postprocessing": {
+                "Dielectric": [
+                    {
+                        "Index": 2,
+                        "Attributes": [20],
+                        "Type": "MA",
+                        "Thickness": 0.002,
+                        "Permittivity": 10.0,
+                        "LossTan": 0.0033,
+                    },
+                    {
+                        "Index": 99,
+                        "Attributes": [199],
+                        "Type": "SA",
+                        "Thickness": 0.003,
+                        "Permittivity": 4.0,
+                        "LossTan": 0.0017,
+                    },
+                ]
+            }
+        },
     }
     (tmp_path / "config.json").write_text(json.dumps(config))
     (palace_dir / "domain-E.csv").write_text(
@@ -575,6 +598,10 @@ class TestEigenmodeReport:
         assert material_rows.loc[10, "material_name"] == "silicon"
         assert material_rows.loc[10, "permittivity"] == pytest.approx(11.45)
         assert material_rows.loc[99, "source_name"] == "Attribute 99"
+        interface_rows = report.dielectric_interfaces.set_index("surface_index")
+        assert interface_rows.loc[2, "source_name"] == "MA:D1_TOP_M1___D1_SUBSTRATE"
+        assert interface_rows.loc[2, "interface_type"] == "MA"
+        assert interface_rows.loc[2, "loss_tangent"] == pytest.approx(0.0033)
         assert report.domain_energy.iloc[0]["source_name"] == "D1_SUBSTRATE"
         assert report.surface_q.iloc[0]["interface_type"] == "MA"
         assert (
@@ -602,6 +629,7 @@ class TestEigenmodeReport:
 
         assert report.eigenmodes.n_modes == 2
         assert report.domain_materials.empty
+        assert report.dielectric_interfaces.empty
         assert report.domain_energy.empty
         assert report.surface_q.empty
         assert report.port_epr.empty
@@ -690,6 +718,37 @@ class TestIndexedCsv:
 
 class TestIndexedReportSummaries:
     """Tests for high-level indexed Palace report summary frames."""
+
+    def test_load_dielectric_interface_summary_joins_config_to_index_map(
+        self, indexed_report_dir: Path
+    ) -> None:
+        summary = load_dielectric_interface_summary(indexed_report_dir)
+
+        by_index = summary.set_index("surface_index")
+        assert by_index.loc[2, "section"] == "Boundaries.Postprocessing.Dielectric"
+        assert by_index.loc[2, "source_name"] == "MA:D1_TOP_M1___D1_SUBSTRATE"
+        assert by_index.loc[2, "physical_name"] == "MA:D1_TOP_M1___D1_SUBSTRATE"
+        assert by_index.loc[2, "entry_name"] == "ma_interface"
+        assert by_index.loc[2, "role"] == "boundary_surface"
+        assert by_index.loc[2, "interface_type"] == "MA"
+        assert by_index.loc[2, "thickness"] == pytest.approx(0.002)
+        assert by_index.loc[2, "permittivity"] == pytest.approx(10.0)
+        assert by_index.loc[2, "loss_tangent"] == pytest.approx(0.0033)
+
+    def test_load_dielectric_interface_summary_keeps_unmapped_interfaces(
+        self, indexed_report_dir: Path
+    ) -> None:
+        import pandas as pd
+
+        summary = load_dielectric_interface_summary(indexed_report_dir)
+
+        by_index = summary.set_index("surface_index")
+        assert by_index.loc[99, "source_name"] == "Surface 99"
+        assert pd.isna(by_index.loc[99, "physical_name"])
+        assert by_index.loc[99, "surface_attributes"] == (199,)
+        assert by_index.loc[99, "interface_type"] == "SA"
+        assert by_index.loc[99, "permittivity"] == pytest.approx(4.0)
+        assert by_index.loc[99, "loss_tangent"] == pytest.approx(0.0017)
 
     def test_load_domain_material_summary_joins_config_to_index_map(
         self, indexed_report_dir: Path

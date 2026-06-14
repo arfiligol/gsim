@@ -67,6 +67,24 @@ _DOMAIN_MATERIAL_COLUMNS = (
     "material_axes",
     "raw_material",
 )
+_DIELECTRIC_INTERFACE_COLUMNS = (
+    "interface_row_index",
+    "surface_index",
+    "surface_attribute",
+    "surface_attributes",
+    "section",
+    "source_name",
+    "physical_name",
+    "entry_name",
+    "role",
+    "attributes",
+    "metadata",
+    "interface_type",
+    "thickness",
+    "permittivity",
+    "loss_tangent",
+    "raw_interface",
+)
 _TERMINAL_MATRIX_SPECS = {
     "C": {
         "file_name": "terminal-C.csv",
@@ -554,6 +572,7 @@ class EigenmodeReport:
     mode_history: pd.DataFrame
     pass_summary: pd.DataFrame
     domain_materials: pd.DataFrame
+    dielectric_interfaces: pd.DataFrame
     domain_energy: pd.DataFrame
     surface_q: pd.DataFrame
     surface_interface_summary: pd.DataFrame
@@ -988,14 +1007,23 @@ def load_eigenmode_report(
             config_path=resolved_config_path,
             index_map_path=resolved_index_map_path if index_map_present else None,
         )
+        dielectric_interfaces = load_dielectric_interface_summary(
+            source,
+            config_path=resolved_config_path,
+            index_map_path=resolved_index_map_path if index_map_present else None,
+        )
         config_loaded = True
         config_message = (
-            "loaded domain material summary"
+            "loaded config material and interface summaries"
             if index_map_present
-            else "loaded domain material summary without palace_index_map.json"
+            else (
+                "loaded config material and interface summaries without "
+                "palace_index_map.json"
+            )
         )
     else:
         domain_materials = _empty_domain_material_summary()
+        dielectric_interfaces = _empty_dielectric_interface_summary()
         config_message = "not found"
     source_rows.append(
         _report_source_row(
@@ -1058,6 +1086,7 @@ def load_eigenmode_report(
         port_epr=port_epr,
         index_map=index_map_frame,
         domain_materials=domain_materials,
+        dielectric_interfaces=dielectric_interfaces,
         sources=pd.DataFrame.from_records(
             source_rows,
             columns=_REPORT_SOURCE_COLUMNS,
@@ -1591,6 +1620,73 @@ def load_domain_material_summary(
     return pd.DataFrame.from_records(rows, columns=_DOMAIN_MATERIAL_COLUMNS)
 
 
+def load_dielectric_interface_summary(
+    source: str | Path | dict,
+    *,
+    config_path: str | Path | None = None,
+    index_map_path: str | Path | None = None,
+) -> pd.DataFrame:
+    """Load Palace dielectric postprocessing interfaces with provenance.
+
+    The returned table interprets ``Boundaries.Postprocessing.Dielectric`` rows
+    from ``config.json`` and joins their Palace indices back to
+    ``palace_index_map.json`` physical names when that map is available.
+    """
+    import pandas as pd
+
+    resolved_config_path = _find_optional_config_path(
+        source,
+        config_path=config_path,
+    )
+    if resolved_config_path is None or not resolved_config_path.exists():
+        msg = "config.json not found"
+        raise FileNotFoundError(msg)
+
+    data = json.loads(resolved_config_path.read_text())
+    interfaces = _dielectric_interface_entries(data)
+    index_map = _load_optional_postprocessing_index_map(
+        source,
+        index_map_path=index_map_path,
+    )
+
+    rows: list[dict[str, Any]] = []
+    for interface_row_index, interface in enumerate(interfaces, start=1):
+        surface_index = _optional_int(_config_material_value(interface, "Index"))
+        attributes = _material_attributes(interface)
+        matches = _dielectric_interface_matches(
+            index_map,
+            surface_index=surface_index,
+            attributes=attributes,
+        )
+        if not matches:
+            rows.append(
+                _dielectric_interface_row(
+                    interface_row_index=interface_row_index,
+                    surface_index=surface_index,
+                    surface_attribute=attributes[0] if attributes else None,
+                    surface_attributes=attributes,
+                    interface=interface,
+                    index_entry=None,
+                )
+            )
+            continue
+        rows.extend(
+            _dielectric_interface_row(
+                interface_row_index=interface_row_index,
+                surface_index=surface_index,
+                surface_attribute=_matching_surface_attribute(index_entry, attributes),
+                surface_attributes=attributes,
+                interface=interface,
+                index_entry=index_entry,
+            )
+            for index_entry in matches
+        )
+
+    if not rows:
+        return _empty_dielectric_interface_summary()
+    return pd.DataFrame.from_records(rows, columns=_DIELECTRIC_INTERFACE_COLUMNS)
+
+
 def get_port_map(source: str | Path | dict) -> dict[int, str]:
     """Return the ``{port_number: port_name}`` mapping.
 
@@ -1636,7 +1732,22 @@ def _domain_material_entries(data: Any) -> tuple[dict[str, Any], ...]:
     return tuple(entry for entry in materials if isinstance(entry, dict))
 
 
-def _load_optional_domain_material_index_map(
+def _dielectric_interface_entries(data: Any) -> tuple[dict[str, Any], ...]:
+    if not isinstance(data, dict):
+        return ()
+    boundaries = data.get("Boundaries", {})
+    if not isinstance(boundaries, dict):
+        return ()
+    postprocessing = boundaries.get("Postprocessing", {})
+    if not isinstance(postprocessing, dict):
+        return ()
+    interfaces = postprocessing.get("Dielectric", ())
+    if not isinstance(interfaces, (list, tuple)):
+        return ()
+    return tuple(entry for entry in interfaces if isinstance(entry, dict))
+
+
+def _load_optional_postprocessing_index_map(
     source: str | Path | dict,
     *,
     index_map_path: str | Path | None,
@@ -1650,6 +1761,17 @@ def _load_optional_domain_material_index_map(
     return load_postprocessing_index_map(
         source,
         index_map_path=resolved_index_map_path,
+    )
+
+
+def _load_optional_domain_material_index_map(
+    source: str | Path | dict,
+    *,
+    index_map_path: str | Path | None,
+) -> PostprocessingIndexMap | None:
+    return _load_optional_postprocessing_index_map(
+        source,
+        index_map_path=index_map_path,
     )
 
 
@@ -1771,6 +1893,109 @@ def _optional_numeric(value: Any) -> Any:
         return float(value)
     except (TypeError, ValueError):
         return value
+
+
+def _dielectric_interface_matches(
+    index_map: PostprocessingIndexMap | None,
+    *,
+    surface_index: int | None,
+    attributes: tuple[int, ...],
+) -> tuple[Any, ...]:
+    if index_map is None:
+        return ()
+
+    section = "Boundaries.Postprocessing.Dielectric"
+    if surface_index is not None:
+        entry = index_map.entry_for_index(section, surface_index)
+        if entry is not None:
+            return (entry,)
+
+    matched_entries = []
+    seen: set[tuple[str, int]] = set()
+    for attribute in attributes:
+        for entry in index_map.entries_for_attribute(attribute, section=section):
+            key = (entry.section, entry.index)
+            if key in seen:
+                continue
+            seen.add(key)
+            matched_entries.append(entry)
+    return tuple(matched_entries)
+
+
+def _dielectric_interface_row(
+    *,
+    interface_row_index: int,
+    surface_index: int | None,
+    surface_attribute: int | None,
+    surface_attributes: tuple[int, ...],
+    interface: dict[str, Any],
+    index_entry: Any | None,
+) -> dict[str, Any]:
+    physical_name = None
+    entry_name = None
+    role = None
+    section = (
+        "Boundaries.Postprocessing.Dielectric" if surface_index is not None else None
+    )
+    attributes = surface_attributes
+    metadata: dict[str, Any] = {}
+    source_name = (
+        f"Surface {surface_index}"
+        if surface_index is not None
+        else f"Interface row {interface_row_index}"
+    )
+
+    if index_entry is not None:
+        surface_index = index_entry.index
+        section = index_entry.section
+        entry_name = index_entry.entry_name
+        role = index_entry.role
+        attributes = index_entry.attributes
+        physical_name = (
+            index_entry.physical_names[0] if index_entry.physical_names else None
+        )
+        source_name = index_entry.primary_physical_name
+        metadata = dict(index_entry.metadata)
+
+    return {
+        "interface_row_index": interface_row_index,
+        "surface_index": surface_index,
+        "surface_attribute": surface_attribute,
+        "surface_attributes": surface_attributes,
+        "section": section,
+        "source_name": source_name,
+        "physical_name": physical_name,
+        "entry_name": entry_name,
+        "role": role,
+        "attributes": attributes,
+        "metadata": metadata,
+        "interface_type": _config_material_value(interface, "Type", "interface_type"),
+        "thickness": _optional_numeric(
+            _config_material_value(interface, "Thickness", "thickness")
+        ),
+        "permittivity": _optional_numeric(
+            _config_material_value(interface, "Permittivity", "permittivity")
+        ),
+        "loss_tangent": _optional_numeric(
+            _config_material_value(
+                interface,
+                "LossTan",
+                "LossTangent",
+                "loss_tangent",
+                "tan_delta",
+            )
+        ),
+        "raw_interface": dict(interface),
+    }
+
+
+def _matching_surface_attribute(
+    index_entry: Any, attributes: tuple[int, ...]
+) -> int | None:
+    for attribute in attributes:
+        if attribute in index_entry.attributes:
+            return attribute
+    return attributes[0] if attributes else None
 
 
 def _load_eigenmode_history_for_report(
@@ -2010,6 +2235,12 @@ def _empty_domain_material_summary() -> pd.DataFrame:
     import pandas as pd
 
     return pd.DataFrame(columns=_DOMAIN_MATERIAL_COLUMNS)
+
+
+def _empty_dielectric_interface_summary() -> pd.DataFrame:
+    import pandas as pd
+
+    return pd.DataFrame(columns=_DIELECTRIC_INTERFACE_COLUMNS)
 
 
 def _empty_domain_energy_summary() -> pd.DataFrame:
