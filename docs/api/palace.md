@@ -258,26 +258,6 @@ overlay provenance should use the Palace materials owner module instead of the
     options:
       show_source: false
 
-::: gsim.palace.summarize_domain_loss
-    options:
-      show_source: false
-
-::: gsim.palace.summarize_surface_loss
-    options:
-      show_source: false
-
-::: gsim.palace.summarize_loss_budget
-    options:
-      show_source: false
-
-::: gsim.palace.load_domain_energy_summary
-    options:
-      show_source: false
-
-::: gsim.palace.load_surface_q_summary
-    options:
-      show_source: false
-
 ::: gsim.palace.load_domain_material_summary
     options:
       show_source: false
@@ -304,11 +284,37 @@ values should use the owner module, not the root `gsim.palace` import surface.
 
 ## Advanced Result Details
 
-These helpers expose lower-level Palace result tables, pass histories, and
-indexed CSV provenance. They are reusable result APIs, but they live in
-`gsim.palace.results` rather than the root notebook-facing simulation API.
+These helpers expose lower-level Palace result tables, pass histories, return
+models, and indexed CSV provenance. They are reusable result APIs, but they
+live in `gsim.palace.results` rather than the root notebook-facing simulation
+API.
+
+::: gsim.palace.results.TerminalMatrix
+    options:
+      show_source: false
+      inherited_members: false
 
 ::: gsim.palace.results.load_indexed_csv
+    options:
+      show_source: false
+
+::: gsim.palace.results.load_domain_energy_summary
+    options:
+      show_source: false
+
+::: gsim.palace.results.load_surface_q_summary
+    options:
+      show_source: false
+
+::: gsim.palace.results.summarize_domain_loss
+    options:
+      show_source: false
+
+::: gsim.palace.results.summarize_surface_loss
+    options:
+      show_source: false
+
+::: gsim.palace.results.summarize_loss_budget
     options:
       show_source: false
 

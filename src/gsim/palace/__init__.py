@@ -50,9 +50,7 @@ from gsim.palace.results import (
     EigenmodeReport,
     ElectrostaticReport,
     SParams,
-    TerminalMatrix,
     load_dielectric_interface_summary,
-    load_domain_energy_summary,
     load_domain_material_summary,
     load_driven_report,
     load_eigenmode_report,
@@ -60,11 +58,7 @@ from gsim.palace.results import (
     load_fields,
     load_postprocessing_index_map,
     load_sparams,
-    load_surface_q_summary,
     load_terminal_matrix,
-    summarize_domain_loss,
-    summarize_loss_budget,
-    summarize_surface_loss,
 )
 
 __all__ = [
@@ -77,10 +71,8 @@ __all__ = [
     "MagnetostaticSim",
     "MeshConfig",
     "SParams",
-    "TerminalMatrix",
     "generate_mesh",
     "load_dielectric_interface_summary",
-    "load_domain_energy_summary",
     "load_domain_material_summary",
     "load_driven_report",
     "load_eigenmode_report",
@@ -88,11 +80,7 @@ __all__ = [
     "load_fields",
     "load_postprocessing_index_map",
     "load_sparams",
-    "load_surface_q_summary",
     "load_terminal_matrix",
-    "summarize_domain_loss",
-    "summarize_loss_budget",
-    "summarize_surface_loss",
 ]
 
 
