@@ -999,6 +999,16 @@ class PalaceSweepSummary:
         return len(self.points)
 
     @property
+    def point_slugs(self) -> tuple[str, ...]:
+        """Point slugs in sweep order."""
+        return tuple(point.point_slug for point in self.points)
+
+    @property
+    def duplicate_point_slugs(self) -> tuple[str, ...]:
+        """Point slugs that appear more than once."""
+        return _duplicate_values(self.point_slugs)
+
+    @property
     def complete_point_count(self) -> int:
         """Points with all core handoff artifacts present."""
         return sum(not point.run_summary.missing_artifacts for point in self.points)
@@ -1058,6 +1068,8 @@ class PalaceSweepSummary:
             "source_path": str(self.source_path),
             "metadata": dict(self.metadata),
             "point_count": self.point_count,
+            "point_slugs": list(self.point_slugs),
+            "duplicate_point_slugs": list(self.duplicate_point_slugs),
             "complete_point_count": self.complete_point_count,
             "runtime_present_count": self.runtime_present_count,
             "problem_types": list(self.problem_types),
@@ -2024,7 +2036,9 @@ def write_palace_sweep_points(
             payload[str(key)] = _json_ready(value)
     if sweep_id is not None:
         payload["sweep_id"] = str(sweep_id)
-    payload["points"] = [_sweep_point_spec_row(point) for point in points]
+    point_rows = [_sweep_point_spec_row(point) for point in points]
+    _raise_for_duplicate_sweep_point_slugs(point_rows)
+    payload["points"] = point_rows
 
     points_path.parent.mkdir(parents=True, exist_ok=True)
     points_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
@@ -2079,11 +2093,17 @@ def load_palace_sweep_summary(
 
     points: list[PalaceSweepPointSummary] = []
     parse_warnings: list[str] = []
+    seen_point_slugs: set[str] = set()
     for index, raw_point in enumerate(point_specs):
         if not isinstance(raw_point, dict):
             parse_warnings.append(f"Skipping non-object sweep point at index {index}")
             continue
         point_slug = _sweep_point_slug(raw_point, index)
+        if point_slug in seen_point_slugs:
+            parse_warnings.append(
+                f"Duplicate sweep point_slug {point_slug!r} at index {index}"
+            )
+        seen_point_slugs.add(point_slug)
         parameters = _as_mapping(raw_point.get("parameters"))
         point_source = _palace_sweep_point_source(
             sweep_root,
@@ -5294,6 +5314,24 @@ def _sweep_point_spec_row(
             row[field_name] = _path_value(row[field_name])
 
     return row
+
+
+def _raise_for_duplicate_sweep_point_slugs(point_rows: list[dict[str, Any]]) -> None:
+    duplicates = _duplicate_values(str(row["point_slug"]) for row in point_rows)
+    if duplicates:
+        duplicate_text = ", ".join(repr(value) for value in duplicates)
+        msg = f"Sweep point slugs must be unique; duplicates: {duplicate_text}"
+        raise ValueError(msg)
+
+
+def _duplicate_values(values: Iterable[str]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for value in values:
+        if value in seen and value not in duplicates:
+            duplicates.append(value)
+        seen.add(value)
+    return tuple(duplicates)
 
 
 def _path_value(value: Any) -> str:

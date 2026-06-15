@@ -854,6 +854,8 @@ class TestPalaceSweepSummary:
         summary = load_palace_sweep_summary(sweep_root)
         assert summary.sweep_id == "gap_sweep"
         assert summary.metadata["campaign"] == "public_fixture"
+        assert summary.point_slugs == ("gap_6um",)
+        assert summary.duplicate_point_slugs == ()
         assert summary.points[0].point_slug == "gap_6um"
         assert summary.points[0].parameters["gap_um"] == 6.0
         assert summary.points[0].run_summary.missing_artifacts == ()
@@ -864,6 +866,19 @@ class TestPalaceSweepSummary:
     ) -> None:
         with pytest.raises(ValueError, match="point_slug"):
             write_palace_sweep_points(tmp_path, [{"parameters": {"gap_um": 6.0}}])
+
+    def test_write_palace_sweep_points_rejects_duplicate_point_slugs(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        with pytest.raises(ValueError, match="duplicates: 'gap_6um'"):
+            write_palace_sweep_points(
+                tmp_path,
+                [
+                    PalaceSweepPointSpec(point_slug="gap_6um"),
+                    PalaceSweepPointSpec(point_slug="gap_6um"),
+                ],
+            )
 
     def test_load_palace_sweep_summary_uses_points_json_run_dirs(
         self,
@@ -924,9 +939,40 @@ class TestPalaceSweepSummary:
 
         as_dict = summary.to_dict()
         assert as_dict["point_count"] == 1
+        assert as_dict["point_slugs"] == ["gap_6um"]
+        assert as_dict["duplicate_point_slugs"] == []
         assert as_dict["point_records"][0]["parameter_gap_um"] == 6.0
         assert as_dict["points"][0]["missing_artifacts"] == []
         assert as_dict["points"][0]["record"]["parameter_gap_um"] == 6.0
+
+    def test_load_palace_sweep_summary_reports_duplicate_point_slugs(
+        self,
+        indexed_report_dir: Path,
+    ) -> None:
+        sweep_root = indexed_report_dir / "duplicate_sweep"
+        point_root = sweep_root / "points" / "gap_6um"
+        _write_sweep_point_artifacts(indexed_report_dir, point_root)
+        (sweep_root / "points.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "sweep_id": "duplicate_sweep",
+                    "points": [
+                        {"point_slug": "gap_6um", "run_dir": "points/gap_6um"},
+                        {"point_slug": "gap_6um", "run_dir": "points/gap_6um"},
+                    ],
+                }
+            )
+        )
+
+        summary = load_palace_sweep_summary(sweep_root)
+
+        assert summary.point_slugs == ("gap_6um", "gap_6um")
+        assert summary.duplicate_point_slugs == ("gap_6um",)
+        assert summary.parse_warnings == (
+            "Duplicate sweep point_slug 'gap_6um' at index 1",
+        )
+        assert summary.to_dict()["duplicate_point_slugs"] == ["gap_6um"]
 
     def test_load_palace_sweep_summary_accepts_split_point_and_result_dirs(
         self,
