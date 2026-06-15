@@ -214,7 +214,12 @@ canonical API entries live on the Common API page.
 
 ## Materials
 
-::: gsim.palace.resolve_palace_materials_with_report
+Palace config generation resolves material overlays internally when writing
+solver inputs. Advanced callers that need to inspect material dispersion and
+overlay provenance should use the Palace materials owner module instead of the
+`gsim.palace` package root.
+
+::: gsim.palace.materials.resolve_palace_materials_with_report
     options:
       show_source: false
 

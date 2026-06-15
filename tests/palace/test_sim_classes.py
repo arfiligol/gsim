@@ -108,6 +108,7 @@ def test_common_stack_viz_cloud_helpers_stay_in_owner_modules() -> None:
     assert callable(gcloud.print_job_summary)
     assert callable(gcloud.run_simulation)
     assert callable(materials.resolve_palace_materials_at_frequency)
+    assert callable(materials.resolve_palace_materials_with_report)
 
     owner_only_names = (
         "MATERIALS_DB",
@@ -130,12 +131,10 @@ def test_common_stack_viz_cloud_helpers_stay_in_owner_modules() -> None:
         "print_stack",
         "print_stack_table",
         "resolve_palace_materials_at_frequency",
+        "resolve_palace_materials_with_report",
         "run_simulation",
     )
     assert all(not hasattr(palace, name) for name in owner_only_names)
-    assert palace.resolve_palace_materials_with_report is (
-        materials.resolve_palace_materials_with_report
-    )
 
 
 class TestDrivenSimValidation:

@@ -38,11 +38,6 @@ from gsim.palace.eigenmode import EigenmodeSim
 from gsim.palace.electrostatic import ElectrostaticSim
 from gsim.palace.magnetostatic import MagnetostaticSim
 
-# Material resolution with dispersion
-from gsim.palace.materials import (
-    resolve_palace_materials_with_report,
-)
-
 # Mesh utilities
 from gsim.palace.mesh import (
     MeshConfig,
@@ -95,7 +90,6 @@ __all__ = [
     "load_sparams",
     "load_surface_q_summary",
     "load_terminal_matrix",
-    "resolve_palace_materials_with_report",
     "summarize_domain_loss",
     "summarize_loss_budget",
     "summarize_surface_loss",
