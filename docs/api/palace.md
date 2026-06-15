@@ -116,6 +116,10 @@
     options:
       show_source: false
 
+::: gsim.palace.load_electrostatic_report
+    options:
+      show_source: false
+
 ::: gsim.palace.summarize_domain_loss
     options:
       show_source: false

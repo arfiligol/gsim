@@ -694,6 +694,77 @@ class EigenmodeReport:
 
 
 @dataclass(frozen=True)
+class ElectrostaticReport:
+    """Composed Palace Electrostatic report tables for notebook workflows."""
+
+    terminal_c: TerminalMatrix
+    terminal_cm: TerminalMatrix | None
+    terminal_cinv: TerminalMatrix | None
+    terminal_c_history: pd.DataFrame
+    terminal_cm_history: pd.DataFrame
+    terminal_cinv_history: pd.DataFrame
+    terminal_c_pass_summary: pd.DataFrame
+    terminal_cm_pass_summary: pd.DataFrame
+    terminal_cinv_pass_summary: pd.DataFrame
+    domain_materials: pd.DataFrame
+    dielectric_interfaces: pd.DataFrame
+    domain_energy: pd.DataFrame
+    domain_loss: pd.DataFrame
+    surface_q: pd.DataFrame
+    surface_loss: pd.DataFrame
+    surface_interface_summary: pd.DataFrame
+    loss_budget: pd.DataFrame
+    index_map: pd.DataFrame
+    sources: pd.DataFrame
+
+    @property
+    def capacitance(self) -> TerminalMatrix:
+        """Return the capacitance matrix report."""
+        return self.terminal_c
+
+    @property
+    def mutual_capacitance(self) -> TerminalMatrix | None:
+        """Return the mutual capacitance matrix report when present."""
+        return self.terminal_cm
+
+    @property
+    def inverse_capacitance(self) -> TerminalMatrix | None:
+        """Return the inverse capacitance matrix report when present."""
+        return self.terminal_cinv
+
+    @property
+    def matrix_history(self) -> dict[str, pd.DataFrame]:
+        """Return terminal matrix convergence tables by matrix kind."""
+        return {
+            "C": self.terminal_c_history,
+            "Cm": self.terminal_cm_history,
+            "Cinv": self.terminal_cinv_history,
+        }
+
+    @property
+    def matrix_pass_summary(self) -> dict[str, pd.DataFrame]:
+        """Return terminal matrix pass summaries by matrix kind."""
+        return {
+            "C": self.terminal_c_pass_summary,
+            "Cm": self.terminal_cm_pass_summary,
+            "Cinv": self.terminal_cinv_pass_summary,
+        }
+
+    @property
+    def missing_reports(self) -> tuple[str, ...]:
+        """Optional report names that were expected but absent."""
+        if self.sources.empty:
+            return ()
+        missing = self.sources.loc[
+            (~self.sources["required"])
+            & (~self.sources["present"])
+            & (~self.sources["name"].str.startswith("iteration*/")),
+            "name",
+        ]
+        return tuple(str(name) for name in missing)
+
+
+@dataclass(frozen=True)
 class TerminalMatrix:
     """Palace electrostatic terminal matrix with named terminals."""
 
@@ -1199,6 +1270,235 @@ def load_eigenmode_report(
         index_map=index_map_frame,
         domain_materials=domain_materials,
         dielectric_interfaces=dielectric_interfaces,
+        sources=pd.DataFrame.from_records(
+            source_rows,
+            columns=_REPORT_SOURCE_COLUMNS,
+        ),
+    )
+
+
+def load_electrostatic_report(
+    source: str | Path | dict,
+    *,
+    index_map_path: str | Path | None = None,
+    terminal_names: tuple[str, ...] | list[str] | None = None,
+    include_history: bool = True,
+    require_epr: bool = False,
+    frequency_ghz: float | None = None,
+) -> ElectrostaticReport:
+    """Load Electrostatic terminal matrices plus optional indexed EPR reports.
+
+    Electrostatic Palace outputs do not carry a resonant frequency. Loss-rate
+    and T1 columns are therefore derived only when ``frequency_ghz`` is passed
+    explicitly; otherwise the report keeps inverse-Q and equivalent-Q columns.
+    """
+    import pandas as pd
+
+    if frequency_ghz is not None:
+        _validate_positive_frequency_ghz(frequency_ghz)
+
+    source_rows: list[dict[str, Any]] = []
+    resolved_index_map_path = _find_optional_postprocessing_index_map_path(
+        source,
+        index_map_path=index_map_path,
+    )
+    index_map_present = (
+        resolved_index_map_path is not None and resolved_index_map_path.exists()
+    )
+    index_map_loaded = False
+    if index_map_present:
+        index_map = load_postprocessing_index_map(
+            source,
+            index_map_path=resolved_index_map_path,
+        )
+        index_map_frame = _postprocessing_index_map_to_dataframe(index_map)
+        index_map_loaded = True
+        index_message = "loaded postprocessing index map"
+    else:
+        index_map_frame = _empty_index_map_dataframe()
+        index_message = "not found"
+    source_rows.append(
+        _report_source_row(
+            "palace_index_map.json",
+            resolved_index_map_path,
+            required=False,
+            present=index_map_present,
+            loaded=index_map_loaded,
+            message=index_message,
+        )
+    )
+
+    terminal_c = _load_terminal_matrix_for_report(
+        source,
+        "C",
+        index_map_path=resolved_index_map_path if index_map_present else None,
+        terminal_names=terminal_names,
+        source_rows=source_rows,
+        required=True,
+    )
+    if terminal_c is None:
+        msg = "Required electrostatic terminal-C.csv not found"
+        raise FileNotFoundError(msg)
+    terminal_cm = _load_terminal_matrix_for_report(
+        source,
+        "Cm",
+        index_map_path=resolved_index_map_path if index_map_present else None,
+        terminal_names=terminal_names,
+        source_rows=source_rows,
+        required=False,
+    )
+    terminal_cinv = _load_terminal_matrix_for_report(
+        source,
+        "Cinv",
+        index_map_path=resolved_index_map_path if index_map_present else None,
+        terminal_names=terminal_names,
+        source_rows=source_rows,
+        required=False,
+    )
+
+    terminal_c_history = _load_terminal_matrix_history_for_report(
+        source,
+        terminal_c,
+        include_history=include_history,
+        index_map_path=resolved_index_map_path if index_map_present else None,
+        terminal_names=terminal_names,
+        source_rows=source_rows,
+    )
+    terminal_c_pass_summary = (
+        _empty_terminal_matrix_pass_summary()
+        if terminal_c_history.empty
+        else summarize_terminal_matrix_history(terminal_c_history)
+    )
+    terminal_cm_history = _load_terminal_matrix_history_for_report(
+        source,
+        terminal_cm,
+        include_history=include_history,
+        index_map_path=resolved_index_map_path if index_map_present else None,
+        terminal_names=terminal_names,
+        source_rows=source_rows,
+    )
+    terminal_cm_pass_summary = (
+        _empty_terminal_matrix_pass_summary()
+        if terminal_cm_history.empty
+        else summarize_terminal_matrix_history(terminal_cm_history)
+    )
+    terminal_cinv_history = _load_terminal_matrix_history_for_report(
+        source,
+        terminal_cinv,
+        include_history=include_history,
+        index_map_path=resolved_index_map_path if index_map_present else None,
+        terminal_names=terminal_names,
+        source_rows=source_rows,
+    )
+    terminal_cinv_pass_summary = (
+        _empty_terminal_matrix_pass_summary()
+        if terminal_cinv_history.empty
+        else summarize_terminal_matrix_history(terminal_cinv_history)
+    )
+
+    resolved_config_path = _find_optional_config_path(source, config_path=None)
+    config_present = resolved_config_path is not None and resolved_config_path.exists()
+    config_loaded = False
+    if config_present:
+        domain_materials = load_domain_material_summary(
+            source,
+            config_path=resolved_config_path,
+            index_map_path=resolved_index_map_path if index_map_present else None,
+        )
+        dielectric_interfaces = load_dielectric_interface_summary(
+            source,
+            config_path=resolved_config_path,
+            index_map_path=resolved_index_map_path if index_map_present else None,
+        )
+        config_loaded = True
+        config_message = (
+            "loaded config material and interface summaries"
+            if index_map_present
+            else (
+                "loaded config material and interface summaries without "
+                "palace_index_map.json"
+            )
+        )
+    else:
+        domain_materials = _empty_domain_material_summary()
+        dielectric_interfaces = _empty_dielectric_interface_summary()
+        config_message = "not found"
+    source_rows.append(
+        _report_source_row(
+            "config.json",
+            resolved_config_path,
+            required=False,
+            present=config_present,
+            loaded=config_loaded,
+            message=config_message,
+        )
+    )
+
+    domain_energy, domain_source = _load_optional_eigenmode_report_table(
+        source,
+        "domain-E.csv",
+        loader=load_domain_energy_summary,
+        empty_factory=_empty_domain_energy_summary,
+        index_map_path=resolved_index_map_path,
+        index_map_present=index_map_present,
+    )
+    source_rows.append(domain_source)
+    surface_q, surface_source = _load_optional_eigenmode_report_table(
+        source,
+        "surface-Q.csv",
+        loader=load_surface_q_summary,
+        empty_factory=_empty_surface_q_summary,
+        index_map_path=resolved_index_map_path,
+        index_map_present=index_map_present,
+    )
+    source_rows.append(surface_source)
+
+    if require_epr:
+        required_failures = [
+            row["name"]
+            for row in (domain_source, surface_source)
+            if not bool(row["loaded"])
+        ]
+        if required_failures:
+            failure_names = ", ".join(str(name) for name in required_failures)
+            msg = f"Missing required electrostatic EPR reports: {failure_names}"
+            raise FileNotFoundError(msg)
+
+    domain_loss = summarize_domain_loss(
+        domain_energy,
+        domain_materials,
+        frequency_ghz=frequency_ghz,
+    )
+    surface_loss = summarize_surface_loss(
+        surface_q,
+        dielectric_interfaces,
+        frequency_ghz=frequency_ghz,
+    )
+    surface_interface_summary = summarize_surface_q_by_interface(surface_loss)
+    loss_budget = _summarize_electrostatic_loss_budget(
+        domain_loss,
+        surface_loss,
+        frequency_ghz=frequency_ghz,
+    )
+    return ElectrostaticReport(
+        terminal_c=terminal_c,
+        terminal_cm=terminal_cm,
+        terminal_cinv=terminal_cinv,
+        terminal_c_history=terminal_c_history,
+        terminal_cm_history=terminal_cm_history,
+        terminal_cinv_history=terminal_cinv_history,
+        terminal_c_pass_summary=terminal_c_pass_summary,
+        terminal_cm_pass_summary=terminal_cm_pass_summary,
+        terminal_cinv_pass_summary=terminal_cinv_pass_summary,
+        domain_materials=domain_materials,
+        dielectric_interfaces=dielectric_interfaces,
+        domain_energy=domain_energy,
+        domain_loss=domain_loss,
+        surface_q=surface_q,
+        surface_loss=surface_loss,
+        surface_interface_summary=surface_interface_summary,
+        loss_budget=loss_budget,
+        index_map=index_map_frame,
         sources=pd.DataFrame.from_records(
             source_rows,
             columns=_REPORT_SOURCE_COLUMNS,
@@ -1837,6 +2137,152 @@ def summarize_loss_budget(
     return _ordered_dataframe(pd.DataFrame.from_records(rows), _LOSS_BUDGET_COLUMNS)
 
 
+def _summarize_electrostatic_loss_budget(
+    domain_loss: pd.DataFrame,
+    surface_loss: pd.DataFrame,
+    *,
+    frequency_ghz: float | None = None,
+) -> pd.DataFrame:
+    """Build an Electrostatic aggregate when Palace rows have no mode index."""
+    import pandas as pd
+
+    group_columns = _electrostatic_loss_group_columns(domain_loss, surface_loss)
+    if group_columns:
+        group_values = _electrostatic_loss_group_values(
+            domain_loss,
+            surface_loss,
+            group_columns,
+        )
+        rows = [
+            _electrostatic_loss_budget_row(
+                _rows_for_electrostatic_loss_group(domain_loss, values),
+                _rows_for_electrostatic_loss_group(surface_loss, values),
+                values,
+                frequency_ghz=frequency_ghz,
+            )
+            for values in group_values
+        ]
+        return _ordered_dataframe(
+            pd.DataFrame.from_records(rows),
+            _LOSS_BUDGET_COLUMNS,
+        )
+
+    budget = summarize_loss_budget(
+        domain_loss,
+        surface_loss,
+        frequency_ghz=frequency_ghz,
+    )
+    if not budget.empty or (domain_loss.empty and surface_loss.empty):
+        return budget
+
+    rows = [
+        _electrostatic_loss_budget_row(
+            domain_loss,
+            surface_loss,
+            {},
+            frequency_ghz=frequency_ghz,
+        )
+    ]
+    return _ordered_dataframe(pd.DataFrame.from_records(rows), _LOSS_BUDGET_COLUMNS)
+
+
+def _electrostatic_loss_budget_row(
+    domain_loss: pd.DataFrame,
+    surface_loss: pd.DataFrame,
+    group_values: dict[str, Any],
+    *,
+    frequency_ghz: float | None,
+) -> dict[str, Any]:
+    domain_inverse_q = _sum_numeric_column(domain_loss, "inverse_q")
+    surface_inverse_q = _sum_numeric_column(surface_loss, "inverse_q")
+    total_inverse_q = domain_inverse_q + surface_inverse_q
+    return {
+        **group_values,
+        "mode_index": None,
+        "frequency_ghz": frequency_ghz,
+        "q_eig": float("nan"),
+        "inverse_q_eig": float("nan"),
+        "domain_inverse_q_sum": domain_inverse_q,
+        "surface_inverse_q_sum": surface_inverse_q,
+        "total_inverse_q_sum": total_inverse_q,
+        "eig_with_surface_inverse_q_sum": float("nan"),
+        "q_total": _q_from_inverse_q(total_inverse_q),
+        "q_eig_with_surface": float("nan"),
+        "domain_vs_eig_relative_error": float("nan"),
+        **_rate_columns_for_frequency(
+            frequency_ghz=frequency_ghz,
+            inverse_q=total_inverse_q,
+        ),
+    }
+
+
+def _electrostatic_loss_group_columns(
+    domain_loss: pd.DataFrame,
+    surface_loss: pd.DataFrame,
+) -> tuple[str, ...]:
+    frames = [frame for frame in (domain_loss, surface_loss) if not frame.empty]
+    if not frames:
+        return ()
+    common_columns = set(frames[0].columns)
+    for frame in frames[1:]:
+        common_columns &= set(frame.columns)
+
+    if "source_index" in common_columns:
+        columns = ["source_index"]
+        columns.extend(
+            column
+            for column in ("sample_column", "sample_value")
+            if column in common_columns
+        )
+        return tuple(columns)
+
+    if {"sample_column", "sample_value"} <= common_columns:
+        return ("sample_column", "sample_value")
+    return ()
+
+
+def _electrostatic_loss_group_values(
+    domain_loss: pd.DataFrame,
+    surface_loss: pd.DataFrame,
+    group_columns: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    if not group_columns:
+        return []
+
+    import pandas as pd
+
+    frames = [
+        frame.loc[:, list(group_columns)]
+        for frame in (domain_loss, surface_loss)
+        if not frame.empty
+    ]
+    if not frames:
+        return []
+    groups = pd.concat(frames, ignore_index=True).drop_duplicates()
+    groups = groups.sort_values(list(group_columns)).reset_index(drop=True)
+    return [dict(row) for row in groups.to_dict(orient="records")]
+
+
+def _rows_for_electrostatic_loss_group(
+    frame: pd.DataFrame,
+    group_values: dict[str, Any],
+) -> pd.DataFrame:
+    if frame.empty or not group_values:
+        return frame
+
+    import pandas as pd
+
+    mask = pd.Series(True, index=frame.index)
+    for column, value in group_values.items():
+        if column not in frame.columns:
+            continue
+        if pd.isna(value):
+            mask &= frame[column].isna()
+        else:
+            mask &= frame[column] == value
+    return cast("pd.DataFrame", frame.loc[mask])
+
+
 def load_port_epr_summary(
     source: str | Path | dict,
     *,
@@ -2471,6 +2917,149 @@ def _load_eigenmode_history_for_report(
         )
 
 
+def _load_terminal_matrix_for_report(
+    source: str | Path | dict,
+    matrix_kind: str,
+    *,
+    index_map_path: Path | None,
+    terminal_names: tuple[str, ...] | list[str] | None,
+    source_rows: list[dict[str, Any]],
+    required: bool,
+) -> TerminalMatrix | None:
+    kind = _normalize_terminal_matrix_kind(matrix_kind)
+    csv_name = str(_TERMINAL_MATRIX_SPECS[kind]["file_name"])
+    csv_path = _find_optional_terminal_matrix_csv(source, kind)
+    if csv_path is None or not csv_path.exists():
+        source_rows.append(
+            _report_source_row(
+                csv_name,
+                csv_path,
+                required=required,
+                present=False,
+                loaded=False,
+                message="not found",
+            )
+        )
+        if required:
+            msg = f"Required electrostatic {csv_name} not found"
+            raise FileNotFoundError(msg)
+        return None
+
+    resolved_terminal_names = terminal_names
+    if resolved_terminal_names is None and index_map_path is None:
+        terminal_count = len(_read_terminal_matrix_csv(csv_path))
+        resolved_terminal_names = tuple(
+            f"T{index}" for index in range(1, terminal_count + 1)
+        )
+
+    matrix = load_terminal_matrix(
+        {csv_name: csv_path, "palace_index_map.json": index_map_path}
+        if index_map_path is not None
+        else csv_path,
+        kind,
+        index_map_path=index_map_path,
+        terminal_names=resolved_terminal_names,
+    )
+    source_rows.append(
+        _report_source_row(
+            csv_name,
+            csv_path,
+            required=required,
+            present=True,
+            loaded=True,
+            message="loaded",
+        )
+    )
+    return matrix
+
+
+def _load_terminal_matrix_history_for_report(
+    source: str | Path | dict,
+    matrix: TerminalMatrix | None,
+    *,
+    include_history: bool,
+    index_map_path: Path | None,
+    terminal_names: tuple[str, ...] | list[str] | None,
+    source_rows: list[dict[str, Any]],
+) -> pd.DataFrame:
+    import pandas as pd
+
+    if matrix is None:
+        return _empty_terminal_matrix_history()
+
+    csv_name = str(_TERMINAL_MATRIX_SPECS[matrix.matrix_kind]["file_name"])
+    history_source = _terminal_matrix_history_source(source, matrix.source_path)
+    iteration_paths = _find_terminal_matrix_iteration_csvs(
+        history_source,
+        matrix.matrix_kind,
+    )
+    source_rows.append(
+        _report_source_row(
+            f"iteration*/{csv_name}",
+            None,
+            required=False,
+            present=bool(iteration_paths),
+            loaded=include_history and bool(iteration_paths),
+            message=(
+                f"loaded {len(iteration_paths)} AMR iteration files"
+                if include_history and iteration_paths
+                else "history disabled"
+                if not include_history
+                else f"no AMR iteration {csv_name} files found"
+            ),
+        )
+    )
+    if not include_history:
+        return _empty_terminal_matrix_history()
+
+    try:
+        return load_terminal_matrix_history(
+            history_source,
+            matrix.matrix_kind,
+            index_map_path=index_map_path,
+            terminal_names=terminal_names or matrix.terminal_names,
+            include_final=True,
+        )
+    except (FileNotFoundError, ValueError):
+        final_history = _terminal_matrix_to_history_frame(
+            matrix,
+            pass_index=1,
+            label="Final",
+            is_final=True,
+        )
+        return cast(
+            "pd.DataFrame",
+            _add_terminal_matrix_convergence_columns(pd.DataFrame(final_history)),
+        )
+
+
+def _terminal_matrix_history_source(source: str | Path | dict, csv_path: Path) -> Path:
+    if isinstance(source, dict):
+        return csv_path.parent
+
+    path = Path(source)
+    return path.parent if path.is_file() else path
+
+
+def _find_terminal_matrix_iteration_csvs(
+    source: str | Path,
+    matrix_kind: str,
+) -> tuple[Path, ...]:
+    path = Path(source)
+    if path.is_file() or not path.exists():
+        return ()
+    try:
+        output_dir = _resolve_palace_output_dir(path)
+    except FileNotFoundError:
+        return ()
+    csv_name = str(_TERMINAL_MATRIX_SPECS[matrix_kind]["file_name"])
+    return tuple(
+        iteration_dir / csv_name
+        for iteration_dir, _ in _iteration_dirs(output_dir)
+        if (iteration_dir / csv_name).exists()
+    )
+
+
 def _eigenmode_history_source(source: str | Path | dict, eig_csv_path: Path) -> Path:
     if isinstance(source, dict):
         return eig_csv_path.parent
@@ -2605,6 +3194,35 @@ def _find_optional_report_csv(source: str | Path | dict, csv_name: str) -> Path 
     return _find_file(root, csv_name)
 
 
+def _find_optional_terminal_matrix_csv(
+    source: str | Path | dict,
+    matrix_kind: str,
+) -> Path | None:
+    csv_name = str(_TERMINAL_MATRIX_SPECS[matrix_kind]["file_name"])
+    if isinstance(source, dict):
+        explicit = source.get(csv_name)
+        if explicit is not None:
+            return Path(explicit)
+        for value in source.values():
+            path = Path(value)
+            root = path.parent if path.suffix else path
+            found = _find_file(root, csv_name) if root.exists() else None
+            if found is not None:
+                return found
+        return None
+
+    path = Path(source)
+    if path.is_file():
+        if path.name == csv_name:
+            return path
+        root = path.parent
+    else:
+        root = path
+    if not root.exists():
+        return None
+    return _find_file(root, csv_name)
+
+
 def _empty_eigenmode_history() -> pd.DataFrame:
     import pandas as pd
 
@@ -2641,6 +3259,68 @@ def _empty_eigenmode_pass_summary() -> pd.DataFrame:
             "max_abs_relative_delta_to_final_percent",
             "max_abs_imaginary_relative_delta_to_previous_percent",
             "hfss_max_delta_freq_percent",
+        ]
+    )
+
+
+def _empty_terminal_matrix_history() -> pd.DataFrame:
+    import pandas as pd
+
+    return pd.DataFrame(
+        columns=[
+            "pass_index",
+            "label",
+            "is_final",
+            "matrix_kind",
+            "matrix_csv_path",
+            "row_index",
+            "column_index",
+            "row_terminal",
+            "column_terminal",
+            "element",
+            "is_diagonal",
+            "value_si",
+            "source_unit",
+            "display_value",
+            "display_unit",
+            "display_scale",
+            "delta_to_previous_si",
+            "abs_delta_to_previous_si",
+            "relative_delta_to_previous_percent",
+            "abs_relative_delta_to_previous_percent",
+            "delta_to_final_si",
+            "abs_delta_to_final_si",
+            "relative_delta_to_final_percent",
+            "abs_relative_delta_to_final_percent",
+            "display_delta_to_previous",
+            "abs_display_delta_to_previous",
+            "display_delta_to_final",
+            "abs_display_delta_to_final",
+        ]
+    )
+
+
+def _empty_terminal_matrix_pass_summary() -> pd.DataFrame:
+    import pandas as pd
+
+    return pd.DataFrame(
+        columns=[
+            "matrix_kind",
+            "pass_index",
+            "label",
+            "is_final",
+            "display_unit",
+            "n_elements",
+            "n_diagonal_elements",
+            "max_abs_value",
+            "max_abs_display_value",
+            "max_abs_delta_to_previous",
+            "max_abs_display_delta_to_previous",
+            "max_abs_relative_delta_to_previous_percent",
+            "max_abs_delta_to_final",
+            "max_abs_display_delta_to_final",
+            "max_abs_relative_delta_to_final_percent",
+            "n_off_diagonal_elements",
         ]
     )
 
@@ -3145,6 +3825,13 @@ def _rate_columns_for_frequency(
         "gamma_mhz": gamma_hz / 1.0e6,
         "t1_us": float("inf") if gamma_rad_per_s <= 0.0 else 1.0e6 / gamma_rad_per_s,
     }
+
+
+def _validate_positive_frequency_ghz(frequency_ghz: float) -> None:
+    frequency = float(frequency_ghz)
+    if frequency <= 0.0 or not np.isfinite(frequency):
+        msg = f"frequency_ghz must be a positive finite value, got {frequency_ghz!r}"
+        raise ValueError(msg)
 
 
 def _numeric_or_default(value: Any, *, default: float) -> float:

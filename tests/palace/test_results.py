@@ -11,6 +11,7 @@ import pytest
 from gsim.palace.results import (
     EigenmodeReport,
     Eigenmodes,
+    ElectrostaticReport,
     SParams,
     get_port_map,
     load_dielectric_interface_summary,
@@ -19,6 +20,7 @@ from gsim.palace.results import (
     load_eigenmode_history,
     load_eigenmode_report,
     load_eigenmodes,
+    load_electrostatic_report,
     load_indexed_csv,
     load_port_epr_summary,
     load_postprocessing_index_map,
@@ -291,6 +293,73 @@ def terminal_matrix_dir(tmp_path: Path) -> Path:
         ],
     )
     return tmp_path
+
+
+@pytest.fixture
+def electrostatic_report_dir(terminal_matrix_dir: Path) -> Path:
+    """Create a Palace electrostatic matrix output with EPR report tables."""
+    palace_dir = terminal_matrix_dir / "output" / "palace"
+    index_map_path = terminal_matrix_dir / "palace_index_map.json"
+    index_map = json.loads(index_map_path.read_text())
+    index_map["entries"].extend(
+        [
+            {
+                "section": "Domains.Postprocessing.Energy",
+                "index": 1,
+                "entry_name": "substrate",
+                "role": "dielectric_volume",
+                "attributes": [10],
+                "physical_names": ["substrate"],
+                "dimension": 3,
+                "metadata": {"material": "silicon"},
+            },
+            {
+                "section": "Boundaries.Postprocessing.Dielectric",
+                "index": 2,
+                "entry_name": "ma_interface",
+                "role": "boundary_surface",
+                "attributes": [20],
+                "physical_names": ["MA:top_metal__substrate"],
+                "dimension": 2,
+                "Type": "MA",
+            },
+        ]
+    )
+    index_map_path.write_text(json.dumps(index_map))
+    config = {
+        "Domains": {
+            "Materials": [
+                {
+                    "Attributes": [10],
+                    "Name": "silicon",
+                    "Permittivity": 11.45,
+                    "LossTan": 1.0e-6,
+                },
+            ]
+        },
+        "Boundaries": {
+            "Postprocessing": {
+                "Dielectric": [
+                    {
+                        "Index": 2,
+                        "Attributes": [20],
+                        "Type": "MA",
+                        "Thickness": 0.002,
+                        "Permittivity": 10.0,
+                        "LossTan": 0.0033,
+                    },
+                ]
+            }
+        },
+    }
+    (terminal_matrix_dir / "config.json").write_text(json.dumps(config))
+    (palace_dir / "domain-E.csv").write_text(
+        "i, E_elec[1] (J), p_elec[1]\n1, 2.0, 0.5\n2, 3.0, 0.25\n"
+    )
+    (palace_dir / "surface-Q.csv").write_text(
+        "i, p_surf[2], Q_surf[2]\n1, 1.0e-7, 2.0e6\n2, 2.0e-7, 4.0e6\n"
+    )
+    return terminal_matrix_dir
 
 
 @pytest.fixture
@@ -1066,6 +1135,117 @@ class TestIndexedReportSummaries:
         summary = load_surface_q_summary(results)
 
         assert summary.iloc[0]["source_name"] == "MA:D1_TOP_M1___D1_SUBSTRATE"
+
+
+class TestElectrostaticReport:
+    """Tests for composed Palace electrostatic report bundles."""
+
+    def test_load_electrostatic_report_composes_loss_without_t1(
+        self,
+        electrostatic_report_dir: Path,
+    ) -> None:
+        report = load_electrostatic_report(electrostatic_report_dir)
+
+        assert isinstance(report, ElectrostaticReport)
+        assert report.capacitance.terminal_names == ("left", "right")
+        assert report.mutual_capacitance is not None
+        assert report.inverse_capacitance is not None
+        assert report.terminal_c_pass_summary.iloc[0]["n_elements"] == 4
+        material_rows = report.domain_materials.set_index("material_attribute")
+        assert material_rows.loc[10, "source_name"] == "substrate"
+        assert material_rows.loc[10, "loss_tangent"] == pytest.approx(1.0e-6)
+        interface_rows = report.dielectric_interfaces.set_index("surface_index")
+        assert interface_rows.loc[2, "source_name"] == "MA:top_metal__substrate"
+        assert interface_rows.loc[2, "loss_tangent"] == pytest.approx(0.0033)
+
+        domain_loss = report.domain_loss.set_index("source_index")
+        assert domain_loss.loc[1, "source_name"] == "substrate"
+        assert domain_loss.loc[1, "inverse_q"] == pytest.approx(5.0e-7)
+        assert domain_loss.loc[2, "inverse_q"] == pytest.approx(2.5e-7)
+        assert "t1_us" not in report.domain_loss.columns
+
+        surface_loss = report.surface_loss.set_index("source_index")
+        assert surface_loss.loc[1, "source_name"] == "MA:top_metal__substrate"
+        assert surface_loss.loc[1, "inverse_q"] == pytest.approx(5.0e-7)
+        assert surface_loss.loc[2, "inverse_q"] == pytest.approx(2.5e-7)
+        assert "t1_us" not in report.surface_loss.columns
+
+        budget = report.loss_budget.set_index("source_index")
+        assert budget.loc[1, "domain_inverse_q_sum"] == pytest.approx(5.0e-7)
+        assert budget.loc[1, "surface_inverse_q_sum"] == pytest.approx(5.0e-7)
+        assert budget.loc[1, "total_inverse_q_sum"] == pytest.approx(1.0e-6)
+        assert budget.loc[2, "total_inverse_q_sum"] == pytest.approx(5.0e-7)
+        assert "t1_us" not in report.loss_budget.columns
+
+        by_interface = report.surface_interface_summary.set_index("interface_type")
+        assert by_interface.loc["MA", "surface_count"] == 2
+        assert by_interface.loc["MA", "inverse_q_sum"] == pytest.approx(7.5e-7)
+        assert report.missing_reports == ()
+        assert bool(report.sources.set_index("name").loc["config.json", "loaded"])
+
+    def test_load_electrostatic_report_adds_t1_for_explicit_frequency(
+        self,
+        electrostatic_report_dir: Path,
+    ) -> None:
+        report = load_electrostatic_report(electrostatic_report_dir, frequency_ghz=5.0)
+
+        domain_row = report.domain_loss.set_index("source_index").loc[1]
+        assert domain_row["gamma_hz"] == pytest.approx(5.0e9 * 5.0e-7)
+        assert domain_row["gamma_rad_per_s"] == pytest.approx(
+            2.0 * np.pi * 5.0e9 * 5.0e-7
+        )
+        assert domain_row["t1_us"] == pytest.approx(
+            1.0e6 / domain_row["gamma_rad_per_s"]
+        )
+
+        budget_row = report.loss_budget.set_index("source_index").loc[1]
+        assert budget_row["gamma_hz"] == pytest.approx(5.0e9 * 1.0e-6)
+        assert budget_row["t1_us"] == pytest.approx(
+            1.0e6 / (2.0 * np.pi * 5.0e9 * 1.0e-6)
+        )
+
+    def test_load_electrostatic_report_allows_missing_optional_epr(
+        self,
+        terminal_matrix_dir: Path,
+    ) -> None:
+        report = load_electrostatic_report(terminal_matrix_dir)
+
+        assert report.capacitance.terminal_names == ("left", "right")
+        assert report.domain_materials.empty
+        assert report.dielectric_interfaces.empty
+        assert report.domain_energy.empty
+        assert report.domain_loss.empty
+        assert report.surface_q.empty
+        assert report.surface_loss.empty
+        assert report.loss_budget.empty
+        assert report.missing_reports == (
+            "config.json",
+            "domain-E.csv",
+            "surface-Q.csv",
+        )
+
+    def test_load_electrostatic_report_requires_bulk_and_surface_epr(
+        self,
+        terminal_matrix_dir: Path,
+    ) -> None:
+        with pytest.raises(
+            FileNotFoundError,
+            match=r"domain-E\.csv, surface-Q\.csv",
+        ):
+            load_electrostatic_report(terminal_matrix_dir, require_epr=True)
+
+    def test_load_electrostatic_report_rejects_invalid_frequency(
+        self,
+        electrostatic_report_dir: Path,
+    ) -> None:
+        with pytest.raises(ValueError, match="frequency_ghz"):
+            load_electrostatic_report(electrostatic_report_dir, frequency_ghz=0.0)
+
+    def test_electrostatic_report_is_publicly_exported(self) -> None:
+        import gsim.palace as palace
+
+        assert palace.ElectrostaticReport is ElectrostaticReport
+        assert palace.load_electrostatic_report is load_electrostatic_report
 
 
 class TestTerminalMatrix:
