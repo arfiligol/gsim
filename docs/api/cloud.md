@@ -2,8 +2,8 @@
 
 Downloaded cloud results include a solver-specific runtime metadata sidecar when
 the solver is known. Palace jobs write `palace_run_metadata.json`, so the same
-`gsim.palace.load_palace_run_summary()` runtime surface can report local and
-cloud execution metadata.
+`gsim.palace.results.load_palace_run_summary()` runtime surface can report
+local and cloud execution metadata.
 
 ::: gsim.gcloud.run_simulation
     options:
