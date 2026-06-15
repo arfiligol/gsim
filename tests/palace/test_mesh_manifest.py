@@ -1203,6 +1203,35 @@ def test_material_kind_interface_specs_stay_in_mesh_owner_module() -> None:
     assert not hasattr(palace, "build_dielectric_interface_specs_from_material_kinds")
 
 
+def test_manifest_row_builders_and_type_aliases_stay_in_owner_modules() -> None:
+    import gsim.palace.mesh as mesh
+    from gsim.palace.mesh import manifest, postprocessing
+
+    assert mesh.MeshManifest is manifest.MeshManifest
+    assert mesh.SurfaceFluxSpec is postprocessing.SurfaceFluxSpec
+    assert mesh.DielectricInterfaceSpec is postprocessing.DielectricInterfaceSpec
+    assert (
+        mesh.build_postprocessing_config_from_manifest
+        is postprocessing.build_postprocessing_config_from_manifest
+    )
+    assert (
+        mesh.build_dielectric_interface_specs_from_assignments
+        is postprocessing.build_dielectric_interface_specs_from_assignments
+    )
+    assert (
+        mesh.build_dielectric_interface_specs_from_material_kinds
+        is postprocessing.build_dielectric_interface_specs_from_material_kinds
+    )
+
+    assert not hasattr(mesh, "MeshPhysicalGroup")
+    assert not hasattr(mesh, "MeshRole")
+    assert not hasattr(mesh, "build_mesh_manifest")
+    assert not hasattr(mesh, "SurfaceFluxType")
+    assert not hasattr(mesh, "DielectricInterfaceSelector")
+    assert not hasattr(mesh, "DielectricInterfaceType")
+    assert not hasattr(mesh, "DielectricMaterialKind")
+
+
 def test_postprocessing_index_map_supports_bidirectional_lookup() -> None:
     manifest = build_mesh_manifest(_minimal_groups())
 
