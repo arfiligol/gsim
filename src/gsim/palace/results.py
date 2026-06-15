@@ -58,9 +58,11 @@ _CORE_RUN_ARTIFACT_NAMES = (
 _NON_RESULT_ARTIFACT_NAMES = (
     *_CORE_RUN_ARTIFACT_NAMES,
     "palace_handoff_metadata.json",
+    "palace_sweep_handoff_metadata.json",
     "palace_run_metadata.json",
     "port_information.json",
     "run_palace.sbatch",
+    "run_sweep_array.sbatch",
 )
 _SWEEP_POINT_PATH_FIELDS = (
     "run_dir",
@@ -1003,6 +1005,7 @@ class PalaceSweepSummary:
     sweep_id: str | None
     source_path: Path
     points: tuple[PalaceSweepPointSummary, ...]
+    handoff: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     parse_warnings: tuple[str, ...] = ()
 
@@ -1080,6 +1083,7 @@ class PalaceSweepSummary:
             "sweep_id": self.sweep_id,
             "source_path": str(self.source_path),
             "metadata": dict(self.metadata),
+            "handoff": dict(self.handoff),
             "point_count": self.point_count,
             "point_slugs": list(self.point_slugs),
             "duplicate_point_slugs": list(self.duplicate_point_slugs),
@@ -2208,6 +2212,9 @@ def load_palace_sweep_summary(
         sweep_id=sweep_id,
         source_path=points_path,
         points=tuple(points),
+        handoff=_summarize_handoff_metadata_json(
+            _find_sweep_handoff_metadata_json(points_path)
+        ),
         metadata=metadata,
         parse_warnings=tuple(parse_warnings),
     )
@@ -5819,6 +5826,11 @@ def _find_runtime_metadata_json(source: str | Path | dict) -> Path | None:
 def _find_handoff_metadata_json(source: str | Path | dict) -> Path | None:
     """Search common local/cloud locations for handoff metadata."""
     return _find_sidecar_artifact(source, "palace_handoff_metadata.json")
+
+
+def _find_sweep_handoff_metadata_json(source: str | Path | dict) -> Path | None:
+    """Search common sweep locations for handoff metadata."""
+    return _find_sidecar_artifact(source, "palace_sweep_handoff_metadata.json")
 
 
 def _find_sidecar_artifact(source: str | Path | dict, name: str) -> Path | None:

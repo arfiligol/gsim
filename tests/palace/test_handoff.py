@@ -9,8 +9,13 @@ import pytest
 from gsim.palace import (
     PalaceSlurmResourceSpec,
     PalaceSlurmSbatchSpec,
+    PalaceSlurmSweepArraySpec,
+    PalaceSweepPointSpec,
     load_palace_run_summary,
+    load_palace_sweep_summary,
     write_palace_slurm_sbatch_handoff,
+    write_palace_slurm_sweep_array_handoff,
+    write_palace_sweep_points,
 )
 
 
@@ -128,6 +133,114 @@ def test_write_palace_slurm_sbatch_handoff_validates_inputs(
 
     with pytest.raises(FileNotFoundError, match="Palace config"):
         write_palace_slurm_sbatch_handoff(tmp_path, spec)
+
+
+def test_write_palace_slurm_sweep_array_handoff_round_trips_summary(
+    tmp_path: Path,
+) -> None:
+    sweep_root = tmp_path / "sweep"
+    _write_minimal_palace_run(sweep_root / "points" / "gap_6um")
+    _write_minimal_palace_run(sweep_root / "points" / "gap_8um")
+    write_palace_sweep_points(
+        sweep_root,
+        [
+            PalaceSweepPointSpec(
+                point_slug="gap_6um",
+                parameters={"gap_um": 6.0},
+                run_dir="points/gap_6um",
+            ),
+            PalaceSweepPointSpec(
+                point_slug="gap_8um",
+                parameters={"gap_um": 8.0},
+                run_dir="points/gap_8um",
+            ),
+        ],
+        sweep_id="gap_sweep",
+    )
+    spec = PalaceSlurmSweepArraySpec(
+        job_name="palace_gap_sweep",
+        resources=PalaceSlurmResourceSpec(
+            account="public_alloc",
+            partition="cpu",
+            wall_time="00:30:00",
+            nodes=1,
+            ntasks_per_node=2,
+            cpus_per_task=2,
+        ),
+        max_parallel=8,
+        petsc_options=(),
+        srun_args=("--mpi=pmix",),
+    )
+
+    result = write_palace_slurm_sweep_array_handoff(
+        sweep_root,
+        spec,
+        profile={"name": "public-slurm:sweep", "source": "caller-supplied"},
+        metadata={"campaign": "public"},
+    )
+
+    script = result.script_path.read_text(encoding="utf-8")
+    assert result.script_path.name == "run_sweep_array.sbatch"
+    assert result.script_path.stat().st_mode & stat.S_IXUSR
+    assert "#SBATCH --array=0-1%2" in script
+    assert "#SBATCH --account=public_alloc" in script
+    assert "POINTS_CSV=points.csv" in script
+    assert 'srun --mpi=pmix "$PALACE_EXECUTABLE" "$CONFIG_PATH"' in script
+    assert "sbatch" not in script
+
+    csv_text = result.points_csv_path.read_text(encoding="utf-8")
+    assert (
+        "array_index,point_slug,run_dir,config_path,mesh_path,log_dir,result_dir"
+        in csv_text
+    )
+    assert "0,gap_6um,points/gap_6um,points/gap_6um/config.json" in csv_text
+    payload = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "scripted"
+    assert payload["launcher"] == {
+        "array": True,
+        "dry_run": True,
+        "kind": "slurm",
+        "submission": "manual",
+    }
+    assert payload["resources"]["array"] == {"point_count": 2, "max_parallel": 2}
+    assert payload["script"]["path"] == "run_sweep_array.sbatch"
+    assert payload["command"] == {
+        "argv": ["sbatch", "run_sweep_array.sbatch"],
+        "redacted": True,
+    }
+
+    summary = load_palace_sweep_summary(sweep_root)
+
+    assert summary.handoff["present"] is True
+    assert summary.handoff["status"] == "scripted"
+    assert summary.handoff["profile"]["name"] == "public-slurm:sweep"
+    assert summary.handoff["script_present"] is True
+    assert summary.handoff["archive_present"] is False
+    assert summary.handoff["resources"]["array"]["point_count"] == 2
+    assert summary.handoff["resources"]["array"]["max_parallel"] == 2
+    assert summary.point_slugs == ("gap_6um", "gap_8um")
+    assert summary.to_dict()["handoff"]["present"] is True
+
+
+def test_write_palace_slurm_sweep_array_handoff_validates_point_artifacts(
+    tmp_path: Path,
+) -> None:
+    sweep_root = tmp_path / "sweep"
+    write_palace_sweep_points(
+        sweep_root,
+        [PalaceSweepPointSpec(point_slug="missing", run_dir="points/missing")],
+    )
+    spec = PalaceSlurmSweepArraySpec(
+        job_name="palace_missing",
+        resources=PalaceSlurmResourceSpec(
+            account="public_alloc",
+            partition="cpu",
+            wall_time="00:30:00",
+        ),
+    )
+
+    with pytest.raises(FileNotFoundError, match="Palace config"):
+        write_palace_slurm_sweep_array_handoff(sweep_root, spec)
 
 
 @pytest.mark.parametrize(

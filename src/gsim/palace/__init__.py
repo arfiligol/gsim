@@ -62,7 +62,10 @@ from gsim.palace.handoff import (
     PalaceSlurmHandoffResult,
     PalaceSlurmResourceSpec,
     PalaceSlurmSbatchSpec,
+    PalaceSlurmSweepArraySpec,
+    PalaceSlurmSweepHandoffResult,
     write_palace_slurm_sbatch_handoff,
+    write_palace_slurm_sweep_array_handoff,
 )
 
 # Material resolution with dispersion
@@ -199,6 +202,8 @@ __all__ = [
     "PalaceSlurmHandoffResult",
     "PalaceSlurmResourceSpec",
     "PalaceSlurmSbatchSpec",
+    "PalaceSlurmSweepArraySpec",
+    "PalaceSlurmSweepHandoffResult",
     "PalaceSweepPointSpec",
     "PalaceSweepPointSummary",
     "PalaceSweepSummary",
@@ -264,6 +269,7 @@ __all__ = [
     "summarize_terminal_matrix_history",
     "write_palace_handoff_metadata",
     "write_palace_slurm_sbatch_handoff",
+    "write_palace_slurm_sweep_array_handoff",
     "write_palace_sweep_points",
 ]
 
