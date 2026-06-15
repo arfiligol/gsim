@@ -17,9 +17,11 @@ from gsim.palace.ports.config import PortType
 if TYPE_CHECKING:
     from gsim.common.stack import LayerStack
     from gsim.palace.models import (
+        CurrentSourceConfig,
         DrivenConfig,
         EigenmodeConfig,
         ElectrostaticConfig,
+        MagnetostaticConfig,
         NumericalConfig,
     )
     from gsim.palace.models.ports import TerminalConfig
@@ -43,6 +45,8 @@ def generate_palace_config(
     hints: dict[str, Any] | None = None,
     electrostatic_config: ElectrostaticConfig | None = None,
     terminals: list[TerminalConfig] | None = None,
+    magnetostatic_config: MagnetostaticConfig | None = None,
+    current_sources: list[CurrentSourceConfig] | None = None,
     postprocessing_config: dict[str, Any] | None = None,
     boundary_postprocessing_config: dict[str, Any] | None = None,
     material_overlay: Any | None = None,
@@ -83,6 +87,7 @@ def generate_palace_config(
         "eigenmode",
         "electrostatic",
         "electrostatics",
+        "magnetostatic",
     ):
         raise ValueError(f"Unsupported simulation type: {simulation_type}")
 
@@ -143,6 +148,11 @@ def generate_palace_config(
             solver_conf["Electrostatic"] = electrostatic_config.to_palace_config()
         else:
             solver_conf["Electrostatic"] = {"Save": 0}
+    elif simulation_type == "magnetostatic":
+        if magnetostatic_config is not None:
+            solver_conf["Magnetostatic"] = magnetostatic_config.to_palace_config()
+        else:
+            solver_conf["Magnetostatic"] = {"Save": 0}
 
     config: dict[str, object] = {
         "Problem": {
@@ -295,87 +305,32 @@ def generate_palace_config(
     ]
 
     is_electrostatic = simulation_type in ("electrostatic", "electrostatics")
+    is_magnetostatic = simulation_type == "magnetostatic"
 
     if is_electrostatic and terminals:
         terminal_layer_names: set[str] = {t.layer for t in terminals}
         via_boundary = groups.get("via_boundary_surfaces", {})
-
-        def _pec_matches_terminal(
-            pec_name: str,
-            pec_info: dict[str, object],
-            terminal,
-        ) -> bool:
-            pec_layer = pec_info.get("layer", pec_name)
-            if pec_layer != terminal.layer and pec_name != terminal.layer:
-                return False
-            if terminal.center is None:
-                return True
-            bbox = pec_info.get("bbox")
-            if (
-                not isinstance(bbox, (list, tuple))
-                or len(bbox) != 6
-                or not all(isinstance(value, (int, float)) for value in bbox)
-            ):
-                return False
-            x, y = terminal.center
-            tol = 1e-6
-            return (
-                float(bbox[0]) - tol <= x <= float(bbox[3]) + tol
-                and float(bbox[1]) - tol <= y <= float(bbox[4]) + tol
-            )
-
-        def _via_touches(via_name: str, conductor_layer_name: str) -> bool:
-            """Z-range overlap (or touching) between a via and a conductor."""
-            via = stack.layers.get(via_name)
-            cond = stack.layers.get(conductor_layer_name)
-            if via is None or cond is None:
-                return False
-            return via.zmin <= cond.zmax and via.zmax >= cond.zmin
-
-        terminal_entries: list[dict[str, object]] = []
-        assigned_pgs: set[int] = set()
-
-        # Track which vias were attached to a terminal so we don't also
-        # send their surfaces to ground.
-        vias_on_terminal: set[str] = set()
-
-        pec_surfaces = groups.get("pec_surfaces", {})
-
-        for idx, terminal in enumerate(terminals, start=1):
-            attrs: list[int] = []
-            # Thick conductor shells (named "<layer>_xy" / "<layer>_z")
-            for surf_name, surf_info in groups["conductor_surfaces"].items():
-                surf_layer = surf_name.rsplit("_", 1)[0]
-                if surf_layer == terminal.layer:
-                    attrs.append(surf_info["phys_group"])
-            # Planar (thin) conductor surfaces (keyed by layer name)
-            for pec_name, pec_info in pec_surfaces.items():
-                if _pec_matches_terminal(pec_name, pec_info, terminal):
-                    attrs.append(pec_info["phys_group"])
-            # Vias touching this terminal's layer
-            for via_name, via_pgs in via_boundary.items():
-                if _via_touches(via_name, terminal.layer):
-                    attrs.extend(via_pgs)
-                    vias_on_terminal.add(via_name)
-
-            assigned_pgs.update(attrs)
-            terminal_entries.append(
-                {
-                    "Index": idx,
-                    "Attributes": sorted(attrs),
-                }
-            )
+        terminal_entries, assigned_pgs, vias_on_terminal = _selector_entries(
+            groups=groups,
+            stack=stack,
+            selectors=terminals,
+        )
 
         # Anything that wasn't assigned to a terminal becomes Ground.
         ground_attrs: list[int] = []
-        for surf_info in groups["conductor_surfaces"].values():
-            pg = surf_info["phys_group"]
-            if pg not in assigned_pgs:
-                ground_attrs.append(pg)
+        for surf_info in groups.get("conductor_surfaces", {}).values():
+            ground_attrs.extend(
+                pg
+                for pg in _physical_group_values(surf_info.get("phys_group"))
+                if pg not in assigned_pgs
+            )
+        pec_surfaces = groups.get("pec_surfaces", {})
         for surf_info in pec_surfaces.values():
-            pg = surf_info["phys_group"]
-            if pg not in assigned_pgs:
-                ground_attrs.append(pg)
+            ground_attrs.extend(
+                pg
+                for pg in _physical_group_values(surf_info.get("phys_group"))
+                if pg not in assigned_pgs
+            )
 
         # Vias that touch a non-terminal conductor -> tie to ground so they
         # don't float (Palace's solver has no current-flow through volumes).
@@ -388,7 +343,7 @@ def generate_palace_config(
                 cond = stack.layers.get(cond_name)
                 if cond is None or cond.layer_type != "conductor":
                     continue
-                if _via_touches(via_name, cond_name):
+                if _via_touches_layer(stack, via_name, cond_name):
                     ground_attrs.extend(via_pgs)
                     break
 
@@ -397,6 +352,47 @@ def generate_palace_config(
         }
         if ground_attrs:
             boundaries["Ground"] = {"Attributes": sorted(set(ground_attrs))}
+
+    elif is_magnetostatic and current_sources:
+        source_entries, _, _ = _selector_entries(
+            groups=groups,
+            stack=stack,
+            selectors=current_sources,
+        )
+        surface_currents: list[dict[str, object]] = []
+        magnetic_fluxes: list[dict[str, object]] = []
+        for entry, source in zip(source_entries, current_sources, strict=True):
+            attrs = entry.get("Attributes", [])
+            if not attrs:
+                raise ValueError(
+                    f"Current source {source.name!r} on layer {source.layer!r} "
+                    "did not match any conductor surface attributes."
+                )
+            surface_current = dict(entry)
+            surface_current["Direction"] = source.direction
+            surface_currents.append(surface_current)
+            magnetic_fluxes.append(
+                {
+                    "Index": entry["Index"],
+                    "Attributes": attrs,
+                    "Type": "Magnetic",
+                    "TwoSided": False,
+                }
+            )
+
+        boundaries = {
+            "SurfaceCurrent": surface_currents,
+        }
+        pmc_attrs = _outer_boundary_attributes(groups)
+        if pmc_attrs:
+            boundaries["PMC"] = {"Attributes": pmc_attrs}
+        if magnetic_fluxes:
+            boundaries["Postprocessing"] = {"SurfaceFlux": magnetic_fluxes}
+
+    elif is_magnetostatic:
+        raise ValueError(
+            "Magnetostatic config generation requires at least one current source."
+        )
 
     else:
         lumped_ports: list[dict[str, object]] = []
@@ -658,6 +654,102 @@ def _material_resolution_config_row(
     return row
 
 
+def _selector_entries(
+    *,
+    groups: dict[str, Any],
+    stack: LayerStack,
+    selectors: list[Any],
+) -> tuple[list[dict[str, object]], set[int], set[str]]:
+    entries: list[dict[str, object]] = []
+    assigned_pgs: set[int] = set()
+    selected_vias: set[str] = set()
+    pec_surfaces = groups.get("pec_surfaces", {})
+    via_boundary = groups.get("via_boundary_surfaces", {})
+
+    for idx, selector in enumerate(selectors, start=1):
+        attrs: list[int] = []
+
+        for surf_name, surf_info in groups.get("conductor_surfaces", {}).items():
+            surf_layer = surf_name.rsplit("_", 1)[0]
+            if surf_layer == selector.layer:
+                attrs.extend(_physical_group_values(surf_info.get("phys_group")))
+
+        for pec_name, pec_info in pec_surfaces.items():
+            if _pec_matches_selector(pec_name, pec_info, selector):
+                attrs.extend(_physical_group_values(pec_info.get("phys_group")))
+
+        for via_name, via_pgs in via_boundary.items():
+            if _via_touches_layer(stack, via_name, selector.layer):
+                attrs.extend(_physical_group_values(via_pgs))
+                selected_vias.add(via_name)
+
+        unique_attrs = sorted(set(attrs))
+        assigned_pgs.update(unique_attrs)
+        entries.append(
+            {
+                "Index": idx,
+                "Attributes": unique_attrs,
+            }
+        )
+
+    return entries, assigned_pgs, selected_vias
+
+
+def _pec_matches_selector(
+    pec_name: str,
+    pec_info: dict[str, object],
+    selector: Any,
+) -> bool:
+    pec_layer = pec_info.get("layer", pec_name)
+    if pec_layer != selector.layer and pec_name != selector.layer:
+        return False
+    if selector.center is None:
+        return True
+    bbox = pec_info.get("bbox")
+    if (
+        not isinstance(bbox, (list, tuple))
+        or len(bbox) != 6
+        or not all(isinstance(value, (int, float)) for value in bbox)
+    ):
+        return False
+    x, y = selector.center
+    tol = 1e-6
+    return (
+        float(bbox[0]) - tol <= x <= float(bbox[3]) + tol
+        and float(bbox[1]) - tol <= y <= float(bbox[4]) + tol
+    )
+
+
+def _via_touches_layer(
+    stack: LayerStack, via_name: str, conductor_layer_name: str
+) -> bool:
+    """Return whether a via z-range overlaps or touches a conductor layer."""
+    via = stack.layers.get(via_name)
+    cond = stack.layers.get(conductor_layer_name)
+    if via is None or cond is None:
+        return False
+    return via.zmin <= cond.zmax and via.zmax >= cond.zmin
+
+
+def _physical_group_values(value: Any) -> list[int]:
+    if isinstance(value, bool) or value is None:
+        return []
+    if isinstance(value, int):
+        return [value]
+    if isinstance(value, (str, bytes)):
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [int(item) for item in value if isinstance(item, int)]
+    return []
+
+
+def _outer_boundary_attributes(groups: dict[str, Any]) -> list[int]:
+    boundary_info = groups.get("boundary_surfaces", {}).get("absorbing")
+    if not isinstance(boundary_info, dict):
+        return []
+    return sorted(set(_physical_group_values(boundary_info.get("phys_group"))))
+
+
 def _resolve_boundary_dielectric_interfaces(
     boundary_postprocessing: dict[str, Any],
     *,
@@ -903,6 +995,8 @@ def write_config(
     hints: dict[str, Any] | None = None,
     electrostatic_config: ElectrostaticConfig | None = None,
     terminals: list[TerminalConfig] | None = None,
+    magnetostatic_config: MagnetostaticConfig | None = None,
+    current_sources: list[CurrentSourceConfig] | None = None,
     postprocessing_config: dict[str, Any] | None = None,
     boundary_postprocessing_config: dict[str, Any] | None = None,
     material_overlay: Any | None = None,
@@ -962,6 +1056,8 @@ def write_config(
         hints=hints,
         electrostatic_config=electrostatic_config,
         terminals=terminals,
+        magnetostatic_config=magnetostatic_config,
+        current_sources=current_sources,
         postprocessing_config=postprocessing_config,
         boundary_postprocessing_config=boundary_postprocessing_config,
         material_overlay=material_overlay,

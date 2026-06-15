@@ -490,6 +490,70 @@ def build_terminal_index_map_from_manifest(
     return PostprocessingIndexMap(entries=tuple(index_entries))
 
 
+def build_surface_current_index_map_from_manifest(
+    manifest: MeshManifest,
+    surface_current_entries: Iterable[Mapping[str, Any]],
+    *,
+    current_source_names: tuple[str, ...] = (),
+) -> PostprocessingIndexMap:
+    """Build an index map for magnetostatic surface-current boundaries."""
+    manifest_entries = {
+        attribute: entry
+        for entry in manifest.entries
+        if entry.role
+        in {
+            "conductor_surface",
+            "pec_surface",
+            "via_boundary_surface",
+        }
+        for attribute in entry.attributes
+    }
+    index_entries: list[PostprocessingIndexEntry] = []
+
+    for current_entry in surface_current_entries:
+        index = current_entry.get("Index")
+        if not isinstance(index, int):
+            continue
+        source_name = (
+            current_source_names[index - 1]
+            if 0 <= index - 1 < len(current_source_names)
+            else f"I{index}"
+        )
+        attributes = _as_int_tuple(current_entry.get("Attributes", ()))
+        direction = current_entry.get("Direction")
+        extra: dict[str, Any] = {
+            "current_source_name": source_name,
+            "current_source_attributes": list(attributes),
+        }
+        if isinstance(direction, str):
+            extra["Direction"] = direction
+        for attribute in attributes:
+            entry = manifest_entries.get(attribute)
+            if entry is None:
+                continue
+            index_entries.append(
+                _index_entry(
+                    section="Boundaries.SurfaceCurrent",
+                    index=index,
+                    entry=entry,
+                    extra=extra,
+                )
+            )
+            index_entries.append(
+                _index_entry(
+                    section="Boundaries.Postprocessing.SurfaceFlux",
+                    index=index,
+                    entry=entry,
+                    extra={
+                        **extra,
+                        "Type": "Magnetic",
+                    },
+                )
+            )
+
+    return PostprocessingIndexMap(entries=tuple(index_entries))
+
+
 def _selected_entries(
     *,
     manifest: MeshManifest,
@@ -807,5 +871,6 @@ __all__ = [
     "build_dielectric_interface_specs_from_assignments",
     "build_dielectric_interface_specs_from_material_kinds",
     "build_postprocessing_config_from_manifest",
+    "build_surface_current_index_map_from_manifest",
     "build_terminal_index_map_from_manifest",
 ]

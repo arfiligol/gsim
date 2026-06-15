@@ -33,10 +33,12 @@ from gsim.palace.models.problems import (
     TransientConfig,
 )
 from gsim.palace.models.results import SimulationResult, ValidationResult
+from gsim.palace.models.sources import CurrentSourceConfig
 from gsim.palace.models.stack import MaterialConfig
 
 __all__ = [
     "CPWPortConfig",
+    "CurrentSourceConfig",
     "DrivenConfig",
     "EigenmodeConfig",
     "ElectrostaticConfig",

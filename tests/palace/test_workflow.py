@@ -13,7 +13,7 @@ from pathlib import Path
 import gdsfactory as gf
 import pytest
 
-from gsim.palace import DrivenSim, EigenmodeSim, ElectrostaticSim
+from gsim.palace import DrivenSim, EigenmodeSim, ElectrostaticSim, MagnetostaticSim
 from gsim.palace.mesh import (
     SurfaceFluxSpec,
     build_postprocessing_config_from_manifest,
@@ -711,6 +711,98 @@ class TestElectrostaticSimWorkflow:
         ]
         assert {row["terminal_name"] for row in terminal_rows} == {"left", "right"}
         assert {row["role"] for row in terminal_rows} == {"pec_surface"}
+
+
+# ---------------------------------------------------------------------------
+# MagnetostaticSim workflow
+# ---------------------------------------------------------------------------
+
+
+class TestMagnetostaticSimWorkflow:
+    """End-to-end MagnetostaticSim: configure -> mesh -> write_config."""
+
+    @pytest.fixture(scope="class")
+    def magnetostatic_sim(self, tmp_path_factory, cpw_component):
+        """Create and mesh a MagnetostaticSim with current sources."""
+        tmp_path = tmp_path_factory.mktemp("magnetostatic")
+        sim = MagnetostaticSim()
+        sim.set_output_dir(str(tmp_path / "palace-sim"))
+        sim.set_geometry(cpw_component)
+        sim.set_stack(substrate_thickness=2.0)
+        sim.set_airbox(margin_x=50.0, margin_y=50.0, z_above=100.0, z_below=20.0)
+        sim.add_current_source(
+            "signal",
+            layer="metal1",
+            center=(0, 0),
+            direction="+X",
+        )
+        sim.add_current_source(
+            "return",
+            layer="metal1",
+            center=(0, 31),
+            direction="-X",
+        )
+        sim.set_magnetostatic(save_fields=1)
+        sim.mesh(preset="coarse", planar_conductors=True)
+        return sim
+
+    def test_write_config_generates_magnetostatic_boundaries(self, magnetostatic_sim):
+        """Magnetostatic config emits Palace sources and magnetic flux rows."""
+        magnetostatic_sim.write_config()
+        config_path = Path(magnetostatic_sim._output_dir) / "config.json"
+        assert config_path.exists()
+        config = json.loads(config_path.read_text())
+        assert config["Problem"]["Type"] == "Magnetostatic"
+        assert config["Solver"]["Magnetostatic"]["Save"] == 1
+
+        boundaries = config["Boundaries"]
+        assert "SurfaceCurrent" in boundaries
+        assert len(boundaries["SurfaceCurrent"]) == 2
+        assert {entry["Direction"] for entry in boundaries["SurfaceCurrent"]} == {
+            "+X",
+            "-X",
+        }
+        for entry in boundaries["SurfaceCurrent"]:
+            assert entry["Attributes"], "SurfaceCurrent source has no attributes"
+        assert set(boundaries["SurfaceCurrent"][0]["Attributes"]).isdisjoint(
+            boundaries["SurfaceCurrent"][1]["Attributes"]
+        )
+        assert "PMC" in boundaries
+        assert boundaries["PMC"]["Attributes"]
+
+        flux_entries = boundaries["Postprocessing"]["SurfaceFlux"]
+        assert len(flux_entries) == 2
+        assert {entry["Type"] for entry in flux_entries} == {"Magnetic"}
+        assert {entry["TwoSided"] for entry in flux_entries} == {False}
+
+        assert "LumpedPort" not in boundaries
+        assert "WavePort" not in boundaries
+        assert "Terminal" not in boundaries
+
+    def test_write_config_generates_source_index_map(self, magnetostatic_sim):
+        """Magnetostatic source indices map back to manifest physical names."""
+        magnetostatic_sim.write_config()
+        index_map_path = Path(magnetostatic_sim._output_dir) / "palace_index_map.json"
+        assert index_map_path.exists()
+        index_map = json.loads(index_map_path.read_text())
+        source_rows = [
+            row
+            for row in index_map["entries"]
+            if row["section"] == "Boundaries.SurfaceCurrent"
+        ]
+        flux_rows = [
+            row
+            for row in index_map["entries"]
+            if row["section"] == "Boundaries.Postprocessing.SurfaceFlux"
+        ]
+        assert {row["index"] for row in source_rows} == {1, 2}
+        assert {row["current_source_name"] for row in source_rows} == {
+            "signal",
+            "return",
+        }
+        assert {row["role"] for row in source_rows} == {"pec_surface"}
+        assert {row["index"] for row in flux_rows} == {1, 2}
+        assert {row["Type"] for row in flux_rows} == {"Magnetic"}
 
 
 # ---------------------------------------------------------------------------

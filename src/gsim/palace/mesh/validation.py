@@ -409,9 +409,14 @@ def validate_mesh(sim, *, material_overlay=None) -> ValidationResult:
                     or boundaries.get("PEC")
                     or boundaries.get("Terminal")
                     or boundaries.get("Ground")
+                    or boundaries.get("SurfaceCurrent")
                 )
                 if not has_conductor_bounds and not has_shaped_dielectrics:
-                    errors.append("config.json has no Conductivity or PEC boundaries.")
+                    errors.append("config.json has no conductor/source boundaries.")
+                if sim.simulation_type == "magnetostatic" and not boundaries.get(
+                    "SurfaceCurrent"
+                ):
+                    errors.append("config.json has no SurfaceCurrent entries.")
                 if (
                     not boundaries.get("LumpedPort")
                     and not boundaries.get("WavePort")

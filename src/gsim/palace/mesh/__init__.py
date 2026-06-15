@@ -57,6 +57,7 @@ from gsim.palace.mesh.postprocessing import (
     build_dielectric_interface_specs_from_assignments,
     build_dielectric_interface_specs_from_material_kinds,
     build_postprocessing_config_from_manifest,
+    build_surface_current_index_map_from_manifest,
     build_terminal_index_map_from_manifest,
 )
 from gsim.palace.models.mesh import MeshConfig
@@ -83,6 +84,7 @@ __all__ = [
     "build_dielectric_interface_specs_from_material_kinds",
     "build_mesh_manifest",
     "build_postprocessing_config_from_manifest",
+    "build_surface_current_index_map_from_manifest",
     "build_terminal_index_map_from_manifest",
     "generate_mesh",
     "gmsh_utils",

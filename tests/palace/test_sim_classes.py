@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from gsim.palace import DrivenSim, EigenmodeSim, ElectrostaticSim
+from gsim.palace import DrivenSim, EigenmodeSim, ElectrostaticSim, MagnetostaticSim
 from gsim.palace.models import MeshConfig
 
 
@@ -129,12 +129,50 @@ class TestElectrostaticSimValidation:
         assert not any("at least 2 terminals" in e for e in result.errors)
 
 
+class TestMagnetostaticSimValidation:
+    """Test MagnetostaticSim validation logic."""
+
+    def test_missing_geometry(self):
+        """Test validation catches missing geometry."""
+        sim = MagnetostaticSim()
+        result = sim.validate_config()
+        assert not result.valid
+        assert any("No component set" in e for e in result.errors)
+
+    def test_requires_current_source(self):
+        """Test validation requires at least one current source."""
+        sim = MagnetostaticSim()
+        result = sim.validate_config()
+        assert not result.valid
+        assert any("at least 1 current source" in e for e in result.errors)
+
+    def test_current_source_valid(self):
+        """Current source validation passes when a source is present."""
+        sim = MagnetostaticSim()
+        sim.add_current_source("signal", layer="metal1")
+        result = sim.validate_config()
+        assert any("No component set" in e for e in result.errors)
+        assert not any("at least 1 current source" in e for e in result.errors)
+
+    def test_current_source_direction_is_normalized(self):
+        """Direction shorthand is normalized at the source model boundary."""
+        sim = MagnetostaticSim()
+        sim.add_current_source("signal", layer="metal1", direction="x")
+        assert sim.current_sources[0].direction == "+X"
+
+    def test_invalid_current_source_direction_raises(self):
+        """Invalid source directions are rejected before config generation."""
+        sim = MagnetostaticSim()
+        with pytest.raises(ValueError, match="Current source direction"):
+            sim.add_current_source("signal", layer="metal1", direction="diagonal")
+
+
 class TestMixinMethods:
     """Test mixin methods work on all simulation classes."""
 
     def test_set_output_dir(self, tmp_path):
         """Test set_output_dir works on all sim classes."""
-        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim]:
+        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim, MagnetostaticSim]:
             sim = cls()
             sim.set_output_dir(tmp_path / "test")
             assert sim.output_dir == tmp_path / "test"
@@ -143,7 +181,7 @@ class TestMixinMethods:
 
     def test_set_stack(self):
         """Test set_stack no longer stores airbox parameters."""
-        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim]:
+        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim, MagnetostaticSim]:
             sim = cls()
             sim.set_stack(air_above=500.0, air_below=25.0)
             assert "air_above" not in sim._stack_kwargs
@@ -158,7 +196,7 @@ class TestMixinMethods:
 
     def test_set_airbox(self):
         """Test set_airbox stores explicit airbox margins and z extents."""
-        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim]:
+        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim, MagnetostaticSim]:
             sim = cls()
             sim.set_airbox(margin_x=50.0, margin_y=30.0, z_above=100.0, z_below=80.0)
             assert sim._airbox_config == {
@@ -170,7 +208,7 @@ class TestMixinMethods:
 
     def test_set_airbox_defaults_to_zero(self):
         """Unassigned set_airbox arguments should default to 0.0."""
-        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim]:
+        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim, MagnetostaticSim]:
             sim = cls()
             sim.set_airbox()
             assert sim._airbox_config == {
@@ -361,7 +399,7 @@ class TestMixinMethods:
 
     def test_set_material(self):
         """Test set_material works on all sim classes."""
-        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim]:
+        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim, MagnetostaticSim]:
             sim = cls()
             sim.set_material(
                 "custom_metal", material_type="conductor", conductivity=1e7
@@ -371,7 +409,7 @@ class TestMixinMethods:
 
     def test_set_numerical(self):
         """Test set_numerical works on all sim classes."""
-        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim]:
+        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim, MagnetostaticSim]:
             sim = cls()
             sim.set_numerical(
                 order=3,
@@ -390,7 +428,7 @@ class TestMixinMethods:
 
     def test_mesh_requires_output_dir(self):
         """Test mesh() raises if output_dir not set."""
-        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim]:
+        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim, MagnetostaticSim]:
             sim = cls()
             with pytest.raises(ValueError, match="Output directory not set"):
                 sim.mesh()
@@ -401,7 +439,7 @@ class TestAddPec:
 
     def test_add_pec_stores_config(self):
         """add_pec() stores PECBlockConfig on all 3 sim classes."""
-        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim]:
+        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim, MagnetostaticSim]:
             sim = cls()
             sim.add_pec(gds_layer=(65000, 0), from_layer="metal1", to_layer="topmetal2")
             assert len(sim._pec_blocks) == 1

@@ -33,7 +33,15 @@ from .manifest import MeshManifest, build_mesh_manifest
 
 if TYPE_CHECKING:
     from gsim.common.stack import LayerStack
-    from gsim.palace.models import DrivenConfig, EigenmodeConfig, NumericalConfig
+    from gsim.palace.models import (
+        CurrentSourceConfig,
+        DrivenConfig,
+        EigenmodeConfig,
+        ElectrostaticConfig,
+        MagnetostaticConfig,
+        NumericalConfig,
+        TerminalConfig,
+    )
     from gsim.palace.models.pec import PECBlockConfig
     from gsim.palace.ports.config import PalacePort
 
@@ -402,7 +410,11 @@ def generate_mesh(
     simulation_type: str = "driven",
     driven_config: DrivenConfig | None = None,
     eigenmode_config: EigenmodeConfig | None = None,
+    electrostatic_config: ElectrostaticConfig | None = None,
+    magnetostatic_config: MagnetostaticConfig | None = None,
     numerical_config: NumericalConfig | None = None,
+    terminals: list[TerminalConfig] | None = None,
+    current_sources: list[CurrentSourceConfig] | None = None,
     write_config: bool = True,
     planar_conductors: bool = False,
     pec_blocks: list[PECBlockConfig] | None = None,
@@ -728,6 +740,10 @@ def generate_mesh(
                 numerical_config,
                 absorbing_boundary,
                 periodic_axis,
+                electrostatic_config=electrostatic_config,
+                terminals=terminals,
+                magnetostatic_config=magnetostatic_config,
+                current_sources=current_sources,
                 material_overlay=material_overlay,
             )
 

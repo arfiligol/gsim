@@ -82,7 +82,7 @@ class PalaceSimMixin:
     cpw_ports: list[CPWPortConfig]
     wave_ports: list[WavePortConfig]
     terminals: list[TerminalConfig]
-    simulation_type: Literal["driven", "eigenmode", "electrostatic"]
+    simulation_type: Literal["driven", "eigenmode", "electrostatic", "magnetostatic"]
     _output_dir: Path | None
     _stack_kwargs: dict[str, Any]
     _pec_blocks: list
@@ -809,6 +809,19 @@ class PalaceSimMixin:
                 if not terminal.layer
             )
 
+        if self.simulation_type == "magnetostatic":
+            current_sources = getattr(self, "current_sources", []) or []
+            if not current_sources:
+                errors.append(
+                    "Magnetostatic simulation requires at least 1 current source. "
+                    "Call add_current_source() to add a source."
+                )
+            errors.extend(
+                f"Current source '{source.name}': 'layer' is required"
+                for source in current_sources
+                if not source.layer
+            )
+
         valid = len(errors) == 0
         return ValidationResult(valid=valid, errors=errors, warnings=warnings_list)
 
@@ -994,11 +1007,13 @@ class PalaceSimMixin:
             simulation_type=self.simulation_type,
             driven_config=driven_config,
             eigenmode_config=self.eigenmode,
+            magnetostatic_config=getattr(self, "magnetostatic", None),
             numerical_config=self.numerical,
             write_config=write_config,
             planar_conductors=mesh_config.planar_conductors,
             pec_blocks=self._pec_blocks or None,
             absorbing_boundary=self.absorbing_boundary,
+            current_sources=getattr(self, "current_sources", None) or [],
             periodic_axis=periodic_axis,
             merge_via_distance=mesh_config.merge_via_distance,
             curve_fit_mode=mesh_config.curve_fit_mode,
@@ -1174,7 +1189,11 @@ class PalaceSimMixin:
                 simulation_type=self.simulation_type,
                 driven_config=self.driven,
                 eigenmode_config=self.eigenmode,
+                electrostatic_config=getattr(self, "electrostatic", None),
+                magnetostatic_config=getattr(self, "magnetostatic", None),
                 numerical_config=self.numerical,
+                terminals=getattr(self, "terminals", None) or [],
+                current_sources=getattr(self, "current_sources", None) or [],
                 planar_conductors=mesh_config.planar_conductors,
                 pec_blocks=self._pec_blocks or None,
                 absorbing_boundary=self.absorbing_boundary,
@@ -1425,6 +1444,7 @@ class PalaceSimMixin:
         from gsim.palace.mesh.generator import write_config as gen_write_config
         from gsim.palace.mesh.postprocessing import (
             PostprocessingIndexMap,
+            build_surface_current_index_map_from_manifest,
             build_terminal_index_map_from_manifest,
         )
 
@@ -1457,7 +1477,9 @@ class PalaceSimMixin:
 
         stack = self._resolve_stack()
         electrostatic_config = getattr(self, "electrostatic", None)
+        magnetostatic_config = getattr(self, "magnetostatic", None)
         terminals = getattr(self, "terminals", None)
+        current_sources = getattr(self, "current_sources", None)
         config_hints = dict(self._hints)
         if hints:
             config_hints.update(hints)
@@ -1475,7 +1497,9 @@ class PalaceSimMixin:
                 absorbing_boundary=self.absorbing_boundary,
                 hints=self._hints,
                 electrostatic_config=electrostatic_config,
+                magnetostatic_config=magnetostatic_config,
                 terminals=terminals or [],
+                current_sources=current_sources or [],
                 postprocessing_config=domain_postprocessing_config,
                 boundary_postprocessing_config=boundary_postprocessing_config,
                 material_overlay=material_overlay,
@@ -1502,6 +1526,21 @@ class PalaceSimMixin:
                             terminal_names=terminal_names,
                         )
                         index_map_entries.extend(terminal_map.entries)
+                elif self.simulation_type == "magnetostatic":
+                    config = json.loads(config_path.read_text())
+                    current_entries = config.get("Boundaries", {}).get(
+                        "SurfaceCurrent", []
+                    )
+                    if isinstance(current_entries, list):
+                        current_source_names = tuple(
+                            source.name for source in current_sources or []
+                        )
+                        current_map = build_surface_current_index_map_from_manifest(
+                            self._last_mesh_result.manifest,
+                            current_entries,
+                            current_source_names=current_source_names,
+                        )
+                        index_map_entries.extend(current_map.entries)
 
                 if index_map_entries:
                     PostprocessingIndexMap(entries=tuple(index_map_entries)).write_json(

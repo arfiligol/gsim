@@ -4,7 +4,8 @@ This module provides a comprehensive API for setting up and running
 electromagnetic simulations using the Palace solver with gdsfactory components.
 
 Features:
-    - Problem-specific simulation classes (DrivenSim, EigenmodeSim, ElectrostaticSim)
+    - Problem-specific simulation classes
+      (DrivenSim, EigenmodeSim, ElectrostaticSim, MagnetostaticSim)
     - Layer stack extraction from PDK
     - Port configuration (inplane, via, CPW)
     - Mesh generation with quality presets
@@ -76,6 +77,7 @@ from gsim.palace.handoff import (
     write_palace_slurm_sweep_array_handoff,
     write_palace_sweep_handoff_archive_manifest,
 )
+from gsim.palace.magnetostatic import MagnetostaticSim
 
 # Material resolution with dispersion
 from gsim.palace.materials import (
@@ -99,6 +101,7 @@ from gsim.palace.mesh import (
 # Models (new submodule)
 from gsim.palace.models import (
     CPWPortConfig,
+    CurrentSourceConfig,
     DrivenConfig,
     EigenmodeConfig,
     ElectrostaticConfig,
@@ -184,6 +187,7 @@ __all__ = [
     "DEFAULT_PALACE_PETSC_OPTIONS",
     "MATERIALS_DB",
     "CPWPortConfig",
+    "CurrentSourceConfig",
     "DielectricInterfaceSelector",
     "DielectricInterfaceSpec",
     "DielectricInterfaceType",
@@ -205,6 +209,7 @@ __all__ = [
     "Layer",
     "LayerStack",
     "MagnetostaticConfig",
+    "MagnetostaticSim",
     "MaterialConfig",
     "MaterialProperties",
     "MeshConfig",
