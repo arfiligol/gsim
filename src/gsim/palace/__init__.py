@@ -68,14 +68,7 @@ from gsim.palace.materials import (
 
 # Mesh utilities
 from gsim.palace.mesh import (
-    DielectricInterfaceSelector,
-    DielectricInterfaceSpec,
-    DielectricInterfaceType,
-    DielectricMaterialKind,
     MeshConfig,
-    MeshResult,
-    build_dielectric_interface_specs_from_assignments,
-    build_dielectric_interface_specs_from_material_kinds,
     generate_mesh,
 )
 
@@ -122,10 +115,6 @@ from gsim.viz import plot_cross_section, plot_mesh
 
 __all__ = [
     "MATERIALS_DB",
-    "DielectricInterfaceSelector",
-    "DielectricInterfaceSpec",
-    "DielectricInterfaceType",
-    "DielectricMaterialKind",
     "DrivenConfig",
     "DrivenReport",
     "DrivenSim",
@@ -144,7 +133,6 @@ __all__ = [
     "MaterialConfig",
     "MaterialProperties",
     "MeshConfig",
-    "MeshResult",
     "NumericalConfig",
     "PECBlockConfig",
     "SParams",
@@ -154,8 +142,6 @@ __all__ = [
     "TerminalMatrix",
     "TransientConfig",
     "ValidationResult",
-    "build_dielectric_interface_specs_from_assignments",
-    "build_dielectric_interface_specs_from_material_kinds",
     "extract_from_pdk",
     "extract_layer_stack",
     "generate_mesh",

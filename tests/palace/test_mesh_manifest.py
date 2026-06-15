@@ -1187,15 +1187,20 @@ def test_material_kind_interface_specs_reject_preset_type_mismatch() -> None:
         )
 
 
-def test_material_kind_interface_specs_are_public_exports() -> None:
-    from gsim.palace import (
-        build_dielectric_interface_specs_from_material_kinds as palace_helper,
-    )
+def test_material_kind_interface_specs_stay_in_mesh_owner_module() -> None:
+    import gsim.palace as palace
     from gsim.palace.mesh import (
         build_dielectric_interface_specs_from_material_kinds as mesh_helper,
     )
 
-    assert palace_helper is mesh_helper
+    assert mesh_helper is build_dielectric_interface_specs_from_material_kinds
+    assert not hasattr(palace, "DielectricInterfaceSelector")
+    assert not hasattr(palace, "DielectricInterfaceSpec")
+    assert not hasattr(palace, "DielectricInterfaceType")
+    assert not hasattr(palace, "DielectricMaterialKind")
+    assert not hasattr(palace, "MeshResult")
+    assert not hasattr(palace, "build_dielectric_interface_specs_from_assignments")
+    assert not hasattr(palace, "build_dielectric_interface_specs_from_material_kinds")
 
 
 def test_postprocessing_index_map_supports_bidirectional_lookup() -> None:
