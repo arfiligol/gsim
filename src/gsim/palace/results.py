@@ -16,6 +16,7 @@ Usage::
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -46,6 +47,13 @@ _CSV_INDEX_SECTIONS = {
     "surface-Q.csv": "Boundaries.Postprocessing.Dielectric",
     "port-EPR.csv": "Boundaries.Postprocessing.SurfaceFlux",
 }
+_CORE_RUN_ARTIFACT_NAMES = (
+    "palace.msh",
+    "config.json",
+    "mesh_manifest.json",
+    "palace_index_map.json",
+    "palace_material_resolution.json",
+)
 _REPORT_SOURCE_COLUMNS = ("name", "path", "required", "present", "loaded", "message")
 _DOMAIN_MATERIAL_COLUMNS = (
     "material_row_index",
@@ -803,6 +811,64 @@ class ElectrostaticReport:
             "name",
         ]
         return tuple(str(name) for name in missing)
+
+
+@dataclass(frozen=True)
+class PalaceArtifactStatus:
+    """Presence, size, and optional checksum for one Palace artifact."""
+
+    name: str
+    path: Path | None
+    present: bool
+    bytes: int = 0
+    sha256: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-friendly artifact row."""
+        return {
+            "name": self.name,
+            "path": None if self.path is None else str(self.path),
+            "present": self.present,
+            "bytes": self.bytes,
+            "sha256": self.sha256,
+        }
+
+
+@dataclass(frozen=True)
+class PalaceRunSummary:
+    """Reusable summary of Palace input, handoff, and output artifacts."""
+
+    problem_type: str | None
+    artifacts: dict[str, PalaceArtifactStatus]
+    results: dict[str, PalaceArtifactStatus]
+    config: dict[str, Any]
+    mesh_manifest: dict[str, Any]
+    index_map: dict[str, Any]
+    material_resolution: dict[str, Any]
+
+    @property
+    def missing_artifacts(self) -> tuple[str, ...]:
+        """Core handoff artifacts that were expected but absent."""
+        return tuple(
+            name for name, artifact in self.artifacts.items() if not artifact.present
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-friendly run summary."""
+        return {
+            "problem_type": self.problem_type,
+            "artifacts": {
+                name: artifact.to_dict() for name, artifact in self.artifacts.items()
+            },
+            "results": {
+                name: artifact.to_dict() for name, artifact in self.results.items()
+            },
+            "config": dict(self.config),
+            "mesh_manifest": dict(self.mesh_manifest),
+            "index_map": dict(self.index_map),
+            "material_resolution": dict(self.material_resolution),
+            "missing_artifacts": list(self.missing_artifacts),
+        }
 
 
 @dataclass(frozen=True)
@@ -1667,6 +1733,60 @@ def load_electrostatic_report(
         sources=pd.DataFrame.from_records(
             source_rows,
             columns=_REPORT_SOURCE_COLUMNS,
+        ),
+    )
+
+
+def load_palace_run_summary(
+    source: str | Path | dict,
+    *,
+    include_hashes: bool = False,
+) -> PalaceRunSummary:
+    """Load a compact Palace run artifact summary.
+
+    This helper inspects existing generated files only. It does not run Palace
+    and does not fabricate runtime timings when no timing artifact is present.
+
+    Args:
+        source: Simulation directory, Palace output directory, or results dict.
+        include_hashes: Include SHA-256 checksums for present files.
+
+    Returns:
+        :class:`PalaceRunSummary` with core handoff artifacts, result files,
+        and compact summaries of Palace config, mesh manifest, index-map, and
+        material-resolution sidecars.
+    """
+    config_path = _find_config_json(source)
+    manifest_path = _find_mesh_manifest_json(source)
+    index_map_path = _find_postprocessing_index_map(source)
+    material_resolution_path = _find_material_resolution_json(source)
+    mesh_path = _find_mesh_file(source)
+
+    artifact_paths = {
+        "palace.msh": mesh_path,
+        "config.json": config_path,
+        "mesh_manifest.json": manifest_path,
+        "palace_index_map.json": index_map_path,
+        "palace_material_resolution.json": material_resolution_path,
+    }
+    artifacts = {
+        name: _artifact_status(name, path, include_hashes=include_hashes)
+        for name, path in artifact_paths.items()
+    }
+    results = {
+        name: _artifact_status(name, path, include_hashes=include_hashes)
+        for name, path in _palace_result_files(source).items()
+    }
+    config = _summarize_config_json(config_path)
+    return PalaceRunSummary(
+        problem_type=cast("str | None", config.get("problem_type")),
+        artifacts=artifacts,
+        results=results,
+        config=config,
+        mesh_manifest=_summarize_mesh_manifest_json(manifest_path),
+        index_map=_summarize_index_map_json(index_map_path),
+        material_resolution=_summarize_material_resolution_json(
+            material_resolution_path
         ),
     )
 
@@ -4890,6 +5010,235 @@ def _find_material_resolution_json(source: str | Path | dict) -> Path | None:
             if found is not None:
                 return found
     return None
+
+
+def _find_mesh_manifest_json(source: str | Path | dict) -> Path | None:
+    """Search common local/cloud locations for ``mesh_manifest.json``."""
+    return _find_sidecar_artifact(source, "mesh_manifest.json")
+
+
+def _find_mesh_file(source: str | Path | dict) -> Path | None:
+    """Search common local/cloud locations for ``palace.msh``."""
+    return _find_sidecar_artifact(source, "palace.msh")
+
+
+def _find_sidecar_artifact(source: str | Path | dict, name: str) -> Path | None:
+    if isinstance(source, dict):
+        explicit = source.get(name)
+        if explicit is not None:
+            return Path(explicit)
+        candidate_roots = [Path(value).parent for value in source.values()]
+    else:
+        path = Path(source)
+        candidate_roots = [path if path.is_dir() else path.parent]
+
+    for root in candidate_roots:
+        candidates = [
+            root / name,
+            root.parent / name,
+            root.parent.parent / name,
+            root / "input" / name,
+            root.parent / "input" / name,
+            root.parent.parent / "input" / name,
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        if root.exists():
+            found = _find_file(root, name)
+            if found is not None:
+                return found
+    return None
+
+
+def _palace_result_files(source: str | Path | dict) -> dict[str, Path]:
+    if isinstance(source, dict):
+        return {
+            str(name): Path(value)
+            for name, value in sorted(source.items())
+            if str(name) not in _CORE_RUN_ARTIFACT_NAMES and Path(value).is_file()
+        }
+
+    path = Path(source)
+    root = path if path.is_dir() else path.parent
+    candidate_dirs = []
+    if root.name == "palace":
+        candidate_dirs.append(root)
+    candidate_dirs.extend(
+        [
+            root / "output" / "palace",
+            root / "palace",
+            root,
+        ]
+    )
+    for candidate in candidate_dirs:
+        if candidate.exists() and candidate.is_dir():
+            files = {
+                child.name: child
+                for child in sorted(candidate.iterdir())
+                if child.is_file()
+                and not child.name.startswith(".")
+                and child.name not in _CORE_RUN_ARTIFACT_NAMES
+            }
+            if files:
+                return files
+    return {}
+
+
+def _artifact_status(
+    name: str,
+    path: Path | None,
+    *,
+    include_hashes: bool,
+) -> PalaceArtifactStatus:
+    if path is None or not path.exists() or not path.is_file():
+        return PalaceArtifactStatus(name=name, path=path, present=False)
+    return PalaceArtifactStatus(
+        name=name,
+        path=path,
+        present=True,
+        bytes=int(path.stat().st_size),
+        sha256=_sha256_file(path) if include_hashes else None,
+    )
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _summarize_config_json(path: Path | None) -> dict[str, Any]:
+    if path is None or not path.exists():
+        return {"present": False}
+    data = json.loads(path.read_text())
+    domains = _as_mapping(data.get("Domains"))
+    boundaries = _as_mapping(data.get("Boundaries"))
+    domain_postprocessing = _as_mapping(domains.get("Postprocessing"))
+    boundary_postprocessing = _as_mapping(boundaries.get("Postprocessing"))
+    materials = domains.get("Materials", [])
+    return {
+        "present": True,
+        "problem_type": _as_mapping(data.get("Problem")).get("Type"),
+        "material_count": len(materials) if isinstance(materials, list) else 0,
+        "material_names": sorted(
+            str(row.get("Name"))
+            for row in materials
+            if isinstance(row, dict) and row.get("Name") is not None
+        ),
+        "domain_postprocessing_keys": sorted(domain_postprocessing.keys()),
+        "boundary_postprocessing_keys": sorted(boundary_postprocessing.keys()),
+        "lumped_port_count": _len_list(boundaries.get("LumpedPort")),
+        "terminal_count": _len_list(boundaries.get("Terminal")),
+        "pec_count": _len_list(boundaries.get("PEC")),
+    }
+
+
+def _summarize_mesh_manifest_json(path: Path | None) -> dict[str, Any]:
+    if path is None or not path.exists():
+        return {"present": False}
+    data = json.loads(path.read_text())
+    entries = _list_of_mappings(data.get("entries"))
+    interface_entries = [
+        entry
+        for entry in entries
+        if entry.get("interface_of") or "___" in str(entry.get("name", ""))
+    ]
+    return {
+        "present": True,
+        "schema_version": data.get("schema_version"),
+        "entry_count": len(entries),
+        "roles": _count_mapping_values(entries, "role"),
+        "dimensions": _count_mapping_values(entries, "dimension"),
+        "physical_name_count": sum(
+            _len_list(entry.get("physical_names")) for entry in entries
+        ),
+        "interface_entry_count": len(interface_entries),
+    }
+
+
+def _summarize_index_map_json(path: Path | None) -> dict[str, Any]:
+    if path is None or not path.exists():
+        return {"present": False}
+    data = json.loads(path.read_text())
+    entries = _list_of_mappings(data.get("entries"))
+    return {
+        "present": True,
+        "schema_version": data.get("schema_version"),
+        "entry_count": len(entries),
+        "sections": _count_mapping_values(entries, "section"),
+        "roles": _count_mapping_values(entries, "role"),
+        "terminal_names": sorted(
+            {
+                str(entry["terminal_name"])
+                for entry in entries
+                if entry.get("terminal_name") is not None
+            }
+        ),
+        "port_names": sorted(
+            {
+                str(_as_mapping(entry.get("metadata")).get("port"))
+                for entry in entries
+                if _as_mapping(entry.get("metadata")).get("port") is not None
+            }
+        ),
+    }
+
+
+def _summarize_material_resolution_json(path: Path | None) -> dict[str, Any]:
+    if path is None or not path.exists():
+        return {"present": False}
+    data = json.loads(path.read_text())
+    materials = _list_of_mappings(data.get("materials"))
+    interfaces = _list_of_mappings(data.get("interfaces"))
+    return {
+        "present": True,
+        "schema_version": data.get("schema_version"),
+        "material_count": len(materials),
+        "interface_count": len(interfaces),
+        "material_model_sources": sorted(
+            {
+                str(row["model_source"])
+                for row in materials
+                if row.get("model_source") is not None
+            }
+        ),
+        "interface_model_sources": sorted(
+            {
+                str(row["model_source"])
+                for row in interfaces
+                if row.get("model_source") is not None
+            }
+        ),
+        "material_validity": _count_mapping_values(materials, "within_validity"),
+        "interface_validity": _count_mapping_values(interfaces, "within_validity"),
+    }
+
+
+def _list_of_mappings(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _len_list(value: Any) -> int:
+    return len(value) if isinstance(value, list) else 0
+
+
+def _count_mapping_values(
+    rows: list[dict[str, Any]],
+    key: str,
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        value = row.get(key)
+        if value is None:
+            continue
+        value_key = str(value)
+        counts[value_key] = counts.get(value_key, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def _optional_int(value: Any) -> int | None:

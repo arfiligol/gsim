@@ -13,6 +13,7 @@ from gsim.palace.results import (
     EigenmodeReport,
     Eigenmodes,
     ElectrostaticReport,
+    PalaceRunSummary,
     SParams,
     get_port_map,
     load_dielectric_interface_summary,
@@ -24,6 +25,7 @@ from gsim.palace.results import (
     load_eigenmodes,
     load_electrostatic_report,
     load_indexed_csv,
+    load_palace_run_summary,
     load_port_epr_summary,
     load_postprocessing_index_map,
     load_sparams,
@@ -612,6 +614,98 @@ class TestGetPortMap:
     def test_legacy_numeric_fallback(self, sim_dir_no_names: Path) -> None:
         pm = get_port_map(sim_dir_no_names)
         assert pm == {1: "p1", 2: "p2"}
+
+
+class TestPalaceRunSummary:
+    """Tests for reusable Palace run artifact summaries."""
+
+    def test_load_palace_run_summary_records_handoff_and_results(
+        self,
+        indexed_report_dir: Path,
+    ) -> None:
+        config_path = indexed_report_dir / "config.json"
+        config = json.loads(config_path.read_text())
+        config["Problem"] = {"Type": "Eigenmode"}
+        config_path.write_text(json.dumps(config))
+
+        (indexed_report_dir / "palace.msh").write_text("$MeshFormat\n")
+        (indexed_report_dir / "mesh_manifest.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "entries": [
+                        {
+                            "name": "substrate",
+                            "role": "dielectric_volume",
+                            "dimension": 3,
+                            "attributes": [10],
+                            "physical_names": ["D1_SUBSTRATE"],
+                        },
+                        {
+                            "name": "air___silicon",
+                            "role": "boundary_surface",
+                            "dimension": 2,
+                            "attributes": [20],
+                            "physical_names": ["air___silicon"],
+                            "interface_of": ["air", "silicon"],
+                        },
+                    ],
+                }
+            )
+        )
+
+        summary = load_palace_run_summary(indexed_report_dir, include_hashes=True)
+
+        assert isinstance(summary, PalaceRunSummary)
+        assert summary.problem_type == "Eigenmode"
+        assert summary.missing_artifacts == ()
+        assert summary.artifacts["palace.msh"].present
+        assert summary.artifacts["palace.msh"].bytes > 0
+        assert summary.artifacts["palace.msh"].sha256
+        assert summary.config["material_count"] == 2
+        assert summary.config["problem_type"] == "Eigenmode"
+        assert summary.mesh_manifest["roles"] == {
+            "boundary_surface": 1,
+            "dielectric_volume": 1,
+        }
+        assert summary.mesh_manifest["interface_entry_count"] == 1
+        assert summary.index_map["sections"]["Domains.Postprocessing.Energy"] == 1
+        assert summary.material_resolution["material_count"] == 2
+        assert summary.material_resolution["interface_count"] == 1
+        assert summary.results["domain-E.csv"].present
+        assert summary.results["surface-Q.csv"].present
+        assert summary.results["port-EPR.csv"].present
+
+        as_dict = summary.to_dict()
+        assert as_dict["problem_type"] == "Eigenmode"
+        assert as_dict["missing_artifacts"] == []
+        assert as_dict["artifacts"]["config.json"]["present"] is True
+        assert as_dict["results"]["domain-E.csv"]["bytes"] > 0
+
+    def test_load_palace_run_summary_accepts_results_dict(
+        self,
+        indexed_report_dir: Path,
+    ) -> None:
+        config_path = indexed_report_dir / "config.json"
+        config = json.loads(config_path.read_text())
+        config["Problem"] = {"Type": "Eigenmode"}
+        config_path.write_text(json.dumps(config))
+        results = {
+            "domain-E.csv": indexed_report_dir / "output" / "palace" / "domain-E.csv",
+            "config.json": config_path,
+            "palace_index_map.json": indexed_report_dir / "palace_index_map.json",
+            "palace_material_resolution.json": indexed_report_dir
+            / "palace_material_resolution.json",
+        }
+
+        summary = load_palace_run_summary(results)
+
+        assert summary.problem_type == "Eigenmode"
+        assert summary.artifacts["config.json"].present
+        assert summary.artifacts["palace_index_map.json"].present
+        assert summary.artifacts["palace.msh"].present is False
+        assert summary.results["domain-E.csv"].present
+        assert "palace.msh" in summary.missing_artifacts
 
 
 class TestDrivenReport:
