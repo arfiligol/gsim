@@ -53,6 +53,35 @@ from gsim.palace.results import (
     write_palace_sweep_resource_index,
 )
 
+
+def test_palace_root_results_api_keeps_notebook_surface_narrow() -> None:
+    import gsim.palace as palace
+    import gsim.palace.results as results
+
+    assert palace.SParams is SParams
+    assert palace.load_sparams is load_sparams
+    assert palace.load_fields is results.load_fields
+
+    detail_names = (
+        "Eigenmodes",
+        "IndexedCsv",
+        "IndexedCsvColumn",
+        "SParam",
+        "get_port_map",
+        "load_eigenmode_history",
+        "load_eigenmodes",
+        "load_indexed_csv",
+        "load_port_epr_summary",
+        "load_terminal_matrix_history",
+        "summarize_eigenmode_history",
+        "summarize_surface_q_by_interface",
+        "summarize_terminal_matrix_history",
+    )
+    for name in detail_names:
+        assert not hasattr(palace, name)
+        assert hasattr(results, name)
+
+
 SLURM_SCONTROL = """
 JobId=12345 JobName=private_layout_run
    UserId=private-user(1000) GroupId=private-group(1000)

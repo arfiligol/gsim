@@ -186,6 +186,10 @@ provenance sidecars without adding new mesh-generation knobs.
     options:
       show_source: false
 
+::: gsim.palace.load_fields
+    options:
+      show_source: false
+
 ::: gsim.palace.load_driven_report
     options:
       show_source: false
@@ -231,6 +235,44 @@ provenance sidecars without adding new mesh-generation knobs.
       show_source: false
 
 ::: gsim.palace.load_dielectric_interface_summary
+    options:
+      show_source: false
+
+## Advanced Result Details
+
+These helpers expose lower-level Palace result tables, pass histories, and
+indexed CSV provenance. They are reusable result APIs, but they live in
+`gsim.palace.results` rather than the root notebook-facing simulation API.
+
+::: gsim.palace.results.load_indexed_csv
+    options:
+      show_source: false
+
+::: gsim.palace.results.load_eigenmodes
+    options:
+      show_source: false
+
+::: gsim.palace.results.load_eigenmode_history
+    options:
+      show_source: false
+
+::: gsim.palace.results.summarize_eigenmode_history
+    options:
+      show_source: false
+
+::: gsim.palace.results.load_terminal_matrix_history
+    options:
+      show_source: false
+
+::: gsim.palace.results.summarize_terminal_matrix_history
+    options:
+      show_source: false
+
+::: gsim.palace.results.load_port_epr_summary
+    options:
+      show_source: false
+
+::: gsim.palace.results.summarize_surface_q_by_interface
     options:
       show_source: false
 
