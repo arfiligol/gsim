@@ -81,7 +81,6 @@ from gsim.palace.mesh import (
 
 # Models (new submodule)
 from gsim.palace.models import (
-    CPWPortConfig,
     DrivenConfig,
     EigenmodeConfig,
     ElectrostaticConfig,
@@ -90,23 +89,9 @@ from gsim.palace.models import (
     MaterialConfig,
     NumericalConfig,
     PECBlockConfig,
-    PortConfig,
     SimulationResult,
-    TerminalConfig,
     TransientConfig,
     ValidationResult,
-    WavePortConfig,
-)
-
-# Port utilities
-from gsim.palace.ports import (
-    PalacePort,
-    PortGeometry,
-    PortType,
-    configure_cpw_port,
-    configure_inplane_port,
-    configure_via_port,
-    extract_ports,
 )
 
 # Results utilities
@@ -137,7 +122,6 @@ from gsim.viz import plot_cross_section, plot_mesh
 
 __all__ = [
     "MATERIALS_DB",
-    "CPWPortConfig",
     "DielectricInterfaceSelector",
     "DielectricInterfaceSpec",
     "DielectricInterfaceType",
@@ -163,27 +147,17 @@ __all__ = [
     "MeshResult",
     "NumericalConfig",
     "PECBlockConfig",
-    "PalacePort",
-    "PortConfig",
-    "PortGeometry",
-    "PortType",
     "SParams",
     "SimulationResult",
     "Stack",
     "StackLayer",
-    "TerminalConfig",
     "TerminalMatrix",
     "TransientConfig",
     "ValidationResult",
-    "WavePortConfig",
     "build_dielectric_interface_specs_from_assignments",
     "build_dielectric_interface_specs_from_material_kinds",
-    "configure_cpw_port",
-    "configure_inplane_port",
-    "configure_via_port",
     "extract_from_pdk",
     "extract_layer_stack",
-    "extract_ports",
     "generate_mesh",
     "get_material_properties",
     "get_stack",

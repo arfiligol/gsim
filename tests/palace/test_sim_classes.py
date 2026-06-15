@@ -24,6 +24,41 @@ def test_current_source_models_stay_in_models_owner_module() -> None:
     assert not hasattr(palace, "CurrentSourceElementConfig")
 
 
+def test_port_lowering_api_stays_in_owner_modules() -> None:
+    import gsim.palace as palace
+    import gsim.palace.models as models
+    import gsim.palace.ports as ports
+
+    assert models.CPWPortConfig.__name__ == "CPWPortConfig"
+    assert models.PortConfig.__name__ == "PortConfig"
+    assert models.TerminalConfig.__name__ == "TerminalConfig"
+    assert models.WavePortConfig.__name__ == "WavePortConfig"
+    assert ports.PalacePort.__name__ == "PalacePort"
+    assert ports.PortGeometry.__name__ == "PortGeometry"
+    assert ports.PortType.__name__ == "PortType"
+    assert callable(ports.configure_cpw_port)
+    assert callable(ports.configure_inplane_port)
+    assert callable(ports.configure_via_port)
+    assert callable(ports.configure_wave_port)
+    assert callable(ports.extract_ports)
+
+    root_only_names = (
+        "CPWPortConfig",
+        "PalacePort",
+        "PortConfig",
+        "PortGeometry",
+        "PortType",
+        "TerminalConfig",
+        "WavePortConfig",
+        "configure_cpw_port",
+        "configure_inplane_port",
+        "configure_via_port",
+        "configure_wave_port",
+        "extract_ports",
+    )
+    assert all(not hasattr(palace, name) for name in root_only_names)
+
+
 class TestDrivenSimValidation:
     """Test DrivenSim validation logic."""
 

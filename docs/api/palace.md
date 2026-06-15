@@ -104,6 +104,41 @@ packages. Helper-only lowering details should stay in their owning modules.
         - write_config
         - run
 
+## Advanced Port Authoring
+
+Notebook workflows should usually configure ports through the problem-specific
+simulation methods such as `add_port()`, `add_cpw_port()`, `add_wave_port()`,
+and `add_terminal()`. Lower-level port geometry, extraction, and CPW/wave-port
+helpers live in `gsim.palace.ports` or the port config models instead of the
+root `gsim.palace` import surface.
+
+::: gsim.palace.ports.extract_ports
+    options:
+      show_source: false
+
+::: gsim.palace.ports.configure_cpw_port
+    options:
+      show_source: false
+
+::: gsim.palace.ports.configure_wave_port
+    options:
+      show_source: false
+
+::: gsim.palace.ports.PalacePort
+    options:
+      show_source: false
+      inherited_members: false
+
+::: gsim.palace.models.CPWPortConfig
+    options:
+      show_source: false
+      inherited_members: false
+
+::: gsim.palace.models.WavePortConfig
+    options:
+      show_source: false
+      inherited_members: false
+
 ## Mesh Generation
 
 These APIs control mesh construction. They should change generated geometry or
