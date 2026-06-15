@@ -8,7 +8,7 @@ import json
 import re
 import shlex
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -82,6 +82,55 @@ class PalaceSlurmResourceSpec:
             "num_processes": self.num_processes,
             "num_threads": self.num_threads,
         }
+
+
+@dataclass(frozen=True)
+class PalaceSlurmProfileSpec:
+    """Caller-supplied Slurm profile with explicit Palace resources."""
+
+    name: str
+    resources: PalaceSlurmResourceSpec
+    source: str = "caller-supplied"
+    description: str | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _validate_sbatch_token("profile name", self.name)
+        if not isinstance(self.resources, PalaceSlurmResourceSpec):
+            raise TypeError("resources must be a PalaceSlurmResourceSpec")
+        _validate_single_line_text("profile source", self.source)
+        if self.description is not None:
+            _validate_single_line_text("profile description", self.description)
+        if not isinstance(self.metadata, Mapping):
+            raise TypeError("metadata must be a mapping")
+
+    def to_profile_metadata(
+        self,
+        *,
+        resource_overrides: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return JSON-ready profile metadata for handoff sidecars."""
+        payload: dict[str, Any] = {
+            "name": self.name,
+            "source": self.source,
+        }
+        if self.description is not None:
+            payload["description"] = self.description
+        if self.metadata:
+            payload["metadata"] = dict(self.metadata)
+        if resource_overrides:
+            payload["resource_overrides"] = dict(resource_overrides)
+        return payload
+
+
+@dataclass(frozen=True)
+class PalaceSlurmProfileResolution:
+    """Resolved Slurm resources and profile metadata for a handoff."""
+
+    name: str
+    resources: PalaceSlurmResourceSpec
+    profile: Mapping[str, Any]
+    resource_overrides: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -309,6 +358,40 @@ class PalaceHandoffArchiveManifestResult:
     file_count: int
     total_bytes: int
     messages: tuple[str, ...] = field(default_factory=tuple)
+
+
+def resolve_palace_slurm_profile(
+    profiles: Mapping[str, PalaceSlurmProfileSpec | Mapping[str, Any]],
+    name: str,
+    *,
+    resource_overrides: Mapping[str, Any] | None = None,
+) -> PalaceSlurmProfileResolution:
+    """Resolve a caller-supplied Slurm profile into Palace handoff resources.
+
+    ``gsim`` intentionally does not ship private site catalogs or submit jobs.
+    Callers provide a named profile mapping, and this helper validates that the
+    selected profile can be converted to ``PalaceSlurmResourceSpec``.
+    """
+    _validate_sbatch_token("profile name", name)
+    if name not in profiles:
+        raise KeyError(f"Unknown Slurm profile: {name}")
+
+    profile = _normalize_slurm_profile_spec(name, profiles[name])
+    overrides = dict(resource_overrides or {})
+    if overrides:
+        allowed_fields = {field.name for field in fields(PalaceSlurmResourceSpec)}
+        unknown_fields = sorted(set(overrides) - allowed_fields)
+        if unknown_fields:
+            msg = "Unknown Slurm resource override field(s): "
+            msg += ", ".join(unknown_fields)
+            raise ValueError(msg)
+    resources = replace(profile.resources, **overrides)
+    return PalaceSlurmProfileResolution(
+        name=profile.name,
+        resources=resources,
+        profile=profile.to_profile_metadata(resource_overrides=overrides),
+        resource_overrides=overrides,
+    )
 
 
 def write_palace_slurm_sbatch_handoff(
@@ -743,6 +826,62 @@ def _render_sweep_palace_command(spec: PalaceSlurmSweepArraySpec) -> str:
     return f"{' '.join(command)} 2>&1 | tee {log_path}"
 
 
+def _normalize_slurm_profile_spec(
+    name: str,
+    profile: PalaceSlurmProfileSpec | Mapping[str, Any],
+) -> PalaceSlurmProfileSpec:
+    if isinstance(profile, PalaceSlurmProfileSpec):
+        if profile.name != name:
+            raise ValueError("profile mapping key must match profile.name")
+        return profile
+    if not isinstance(profile, Mapping):
+        raise TypeError("profile must be a PalaceSlurmProfileSpec or mapping")
+
+    allowed_fields = {"description", "metadata", "name", "resources", "source"}
+    unknown_fields = sorted(set(profile) - allowed_fields)
+    if unknown_fields:
+        msg = "Unknown Slurm profile field(s): "
+        msg += ", ".join(str(field) for field in unknown_fields)
+        raise ValueError(msg)
+
+    profile_name = str(profile.get("name", name))
+    if profile_name != name:
+        raise ValueError("profile mapping key must match profile name")
+    if "resources" not in profile:
+        raise ValueError("profile must include resources")
+    resources = _normalize_slurm_profile_resources(profile["resources"])
+    metadata = profile.get("metadata", {})
+    if not isinstance(metadata, Mapping):
+        raise TypeError("profile metadata must be a mapping")
+    description = profile.get("description")
+    source = str(profile.get("source", "caller-supplied"))
+    return PalaceSlurmProfileSpec(
+        name=profile_name,
+        resources=resources,
+        source=source,
+        description=None if description is None else str(description),
+        metadata=metadata,
+    )
+
+
+def _normalize_slurm_profile_resources(
+    resources: PalaceSlurmResourceSpec | Mapping[str, Any],
+) -> PalaceSlurmResourceSpec:
+    if isinstance(resources, PalaceSlurmResourceSpec):
+        return resources
+    if not isinstance(resources, Mapping):
+        raise TypeError(
+            "profile resources must be a PalaceSlurmResourceSpec or mapping"
+        )
+    allowed_fields = {field.name for field in fields(PalaceSlurmResourceSpec)}
+    unknown_fields = sorted(set(resources) - allowed_fields)
+    if unknown_fields:
+        msg = "Unknown Slurm resource field(s): "
+        msg += ", ".join(str(field) for field in unknown_fields)
+        raise ValueError(msg)
+    return PalaceSlurmResourceSpec(**dict(resources))
+
+
 def _sweep_point_specs(payload: Any) -> list[Mapping[str, Any]]:
     if isinstance(payload, list):
         points = payload
@@ -859,6 +998,13 @@ def _validate_job_name(value: str) -> None:
         raise ValueError("job_name must not be empty")
     if any(char in _SBATCH_JOB_NAME_FORBIDDEN for char in value):
         raise ValueError("job_name must be a Slurm-safe token")
+
+
+def _validate_single_line_text(label: str, value: str) -> None:
+    if not value:
+        raise ValueError(f"{label} must not be empty")
+    if "\n" in value or "\r" in value:
+        raise ValueError(f"{label} must be single-line text")
 
 
 def _validate_shell_tokens(label: str, values: Sequence[str]) -> None:

@@ -7,12 +7,14 @@ from pathlib import Path
 import pytest
 
 from gsim.palace import (
+    PalaceSlurmProfileSpec,
     PalaceSlurmResourceSpec,
     PalaceSlurmSbatchSpec,
     PalaceSlurmSweepArraySpec,
     PalaceSweepPointSpec,
     load_palace_run_summary,
     load_palace_sweep_summary,
+    resolve_palace_slurm_profile,
     write_palace_run_handoff_archive_manifest,
     write_palace_slurm_sbatch_handoff,
     write_palace_slurm_sweep_array_handoff,
@@ -30,21 +32,127 @@ def _write_minimal_palace_run(run_dir: Path) -> None:
     (run_dir / "palace.msh").write_text("$MeshFormat\n", encoding="utf-8")
 
 
+def test_resolve_palace_slurm_profile_accepts_mapping_and_overrides() -> None:
+    resolution = resolve_palace_slurm_profile(
+        {
+            "public-slurm:cpu": {
+                "source": "caller-supplied test fixture",
+                "description": "Public CPU dry-run profile",
+                "metadata": {"cluster": "public"},
+                "resources": {
+                    "account": "public_alloc",
+                    "partition": "cpu",
+                    "wall_time": "00:30:00",
+                    "nodes": 1,
+                    "ntasks_per_node": 2,
+                    "cpus_per_task": 4,
+                },
+            }
+        },
+        "public-slurm:cpu",
+        resource_overrides={"memory_mb": 64000, "wall_time": "01:00:00"},
+    )
+
+    assert resolution.name == "public-slurm:cpu"
+    assert resolution.resources.num_processes == 2
+    assert resolution.resources.num_threads == 4
+    assert resolution.resources.memory_mb == 64000
+    assert resolution.resources.wall_time == "01:00:00"
+    assert resolution.profile == {
+        "name": "public-slurm:cpu",
+        "source": "caller-supplied test fixture",
+        "description": "Public CPU dry-run profile",
+        "metadata": {"cluster": "public"},
+        "resource_overrides": {
+            "memory_mb": 64000,
+            "wall_time": "01:00:00",
+        },
+    }
+
+
+def test_resolve_palace_slurm_profile_accepts_spec_objects() -> None:
+    resolution = resolve_palace_slurm_profile(
+        {
+            "public-slurm:cpu": PalaceSlurmProfileSpec(
+                name="public-slurm:cpu",
+                resources=PalaceSlurmResourceSpec(
+                    account="public_alloc",
+                    partition="cpu",
+                    wall_time="00:30:00",
+                ),
+            )
+        },
+        "public-slurm:cpu",
+    )
+
+    assert resolution.resources.account == "public_alloc"
+    assert resolution.profile == {
+        "name": "public-slurm:cpu",
+        "source": "caller-supplied",
+    }
+
+
+def test_resolve_palace_slurm_profile_validates_inputs() -> None:
+    profiles = {
+        "public-slurm:cpu": {
+            "resources": {
+                "account": "public_alloc",
+                "partition": "cpu",
+                "wall_time": "00:30:00",
+            }
+        }
+    }
+
+    with pytest.raises(KeyError, match="Unknown Slurm profile"):
+        resolve_palace_slurm_profile(profiles, "missing-profile")
+
+    with pytest.raises(ValueError, match="Unknown Slurm resource override"):
+        resolve_palace_slurm_profile(
+            profiles,
+            "public-slurm:cpu",
+            resource_overrides={"queue": "cpu"},
+        )
+
+    with pytest.raises(ValueError, match="Unknown Slurm profile field"):
+        resolve_palace_slurm_profile(
+            {
+                "public-slurm:cpu": {
+                    "resources": {
+                        "account": "public_alloc",
+                        "partition": "cpu",
+                        "wall_time": "00:30:00",
+                    },
+                    "private_site_default": True,
+                }
+            },
+            "public-slurm:cpu",
+        )
+
+
 def test_write_palace_slurm_sbatch_handoff_round_trips_summary(
     tmp_path: Path,
 ) -> None:
     _write_minimal_palace_run(tmp_path)
+    resolution = resolve_palace_slurm_profile(
+        {
+            "public-slurm:cpu": {
+                "source": "caller-supplied test fixture",
+                "resources": {
+                    "account": "public_alloc",
+                    "partition": "cpu",
+                    "wall_time": "2-00:00:00",
+                    "nodes": 2,
+                    "ntasks_per_node": 4,
+                    "cpus_per_task": 3,
+                },
+            }
+        },
+        "public-slurm:cpu",
+        resource_overrides={"memory_mb": 64000},
+    )
     spec = PalaceSlurmSbatchSpec(
         job_name="palace_public",
-        resources=PalaceSlurmResourceSpec(
-            account="public_alloc",
-            partition="cpu",
-            wall_time="2-00:00:00",
-            nodes=2,
-            ntasks_per_node=4,
-            cpus_per_task=3,
-            memory_mb=64000,
-        ),
+        resources=resolution.resources,
         setup_commands=("module load palace",),
         petsc_options=("-log_view",),
         srun_args=("--mpi=pmix",),
@@ -54,7 +162,7 @@ def test_write_palace_slurm_sbatch_handoff_round_trips_summary(
     result = write_palace_slurm_sbatch_handoff(
         tmp_path,
         spec,
-        profile={"name": "public-slurm:cpu", "source": "caller-supplied"},
+        profile=resolution.profile,
         metadata={"fixture": "public"},
     )
 
@@ -90,6 +198,7 @@ def test_write_palace_slurm_sbatch_handoff_round_trips_summary(
     assert summary.handoff["present"] is True
     assert summary.handoff["status"] == "scripted"
     assert summary.handoff["profile"]["name"] == "public-slurm:cpu"
+    assert summary.handoff["profile"]["resource_overrides"] == {"memory_mb": 64000}
     assert summary.handoff["script_present"] is True
     assert summary.handoff["archive_present"] is False
     assert summary.handoff["resources"]["requested"]["nodes"] == 2
