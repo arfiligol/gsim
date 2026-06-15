@@ -147,6 +147,60 @@ def indexed_report_dir(tmp_path: Path) -> Path:
         },
     }
     (tmp_path / "config.json").write_text(json.dumps(config))
+    material_resolution = {
+        "schema_version": 1,
+        "materials": [
+            {
+                "material_row_index": 1,
+                "material_attribute": 10,
+                "material_attributes": [10],
+                "volume_name": "substrate",
+                "stack_material_name": "Si",
+                "matched_material_name": "Si",
+                "evaluation_frequency_hz": 5.0e9,
+                "evaluation_frequency_ghz": 5.0,
+                "model_type": "constant",
+                "model_source": "test PDK material overlay",
+                "within_validity": True,
+                "validity_note": None,
+                "effective_material": {
+                    "permittivity": 11.45,
+                    "loss_tangent": 1.0e-6,
+                    "conductivity": 2.0,
+                },
+                "palace_material": {
+                    "Attributes": [10],
+                    "Name": "silicon",
+                    "Permittivity": 11.45,
+                    "LossTan": 1.0e-6,
+                    "Conductivity": 2.0,
+                },
+            },
+            {
+                "material_row_index": 2,
+                "material_attribute": 99,
+                "material_attributes": [99],
+                "volume_name": "unmapped",
+                "stack_material_name": "custom",
+                "matched_material_name": None,
+                "evaluation_frequency_hz": 5.0e9,
+                "evaluation_frequency_ghz": 5.0,
+                "model_type": None,
+                "model_source": None,
+                "within_validity": None,
+                "validity_note": "material not found in gsim material database",
+                "effective_material": {"permittivity": 4.2, "loss_tangent": 0.0},
+                "palace_material": {
+                    "Attributes": [99],
+                    "Permittivity": 4.2,
+                    "LossTan": 0.0,
+                },
+            },
+        ],
+    }
+    (tmp_path / "palace_material_resolution.json").write_text(
+        json.dumps(material_resolution)
+    )
     (palace_dir / "domain-E.csv").write_text(
         "m, E_elec[1] (J), p_elec[1], E_elec[99] (J)\n1, 2.0, 0.5, 0.0\n"
     )
@@ -600,6 +654,10 @@ class TestEigenmodeReport:
         assert material_rows.loc[10, "source_name"] == "D1_SUBSTRATE"
         assert material_rows.loc[10, "material_name"] == "silicon"
         assert material_rows.loc[10, "permittivity"] == pytest.approx(11.45)
+        assert material_rows.loc[10, "stack_material_name"] == "Si"
+        assert material_rows.loc[10, "material_model_source"] == (
+            "test PDK material overlay"
+        )
         assert material_rows.loc[99, "source_name"] == "Attribute 99"
         interface_rows = report.dielectric_interfaces.set_index("surface_index")
         assert interface_rows.loc[2, "source_name"] == "MA:D1_TOP_M1___D1_SUBSTRATE"
@@ -788,6 +846,15 @@ class TestIndexedReportSummaries:
         assert by_attribute.loc[10, "permittivity"] == pytest.approx(11.45)
         assert by_attribute.loc[10, "loss_tangent"] == pytest.approx(1.0e-6)
         assert by_attribute.loc[10, "conductivity"] == pytest.approx(2.0)
+        assert by_attribute.loc[10, "volume_name"] == "substrate"
+        assert by_attribute.loc[10, "stack_material_name"] == "Si"
+        assert by_attribute.loc[10, "matched_material_name"] == "Si"
+        assert by_attribute.loc[10, "material_model_type"] == "constant"
+        assert by_attribute.loc[10, "material_model_source"] == (
+            "test PDK material overlay"
+        )
+        assert bool(by_attribute.loc[10, "material_within_validity"])
+        assert by_attribute.loc[10, "material_frequency_ghz"] == pytest.approx(5.0)
 
     def test_load_domain_material_summary_keeps_unmapped_material_attributes(
         self, indexed_report_dir: Path
@@ -802,6 +869,9 @@ class TestIndexedReportSummaries:
         assert pd.isna(by_attribute.loc[99, "physical_name"])
         assert by_attribute.loc[99, "attributes"] == (99,)
         assert by_attribute.loc[99, "permittivity"] == pytest.approx(4.2)
+        assert by_attribute.loc[99, "stack_material_name"] == "custom"
+        assert pd.isna(by_attribute.loc[99, "matched_material_name"])
+        assert "not found" in by_attribute.loc[99, "material_validity_note"]
 
     def test_load_domain_energy_summary_keeps_unmapped_indices(
         self, indexed_report_dir: Path

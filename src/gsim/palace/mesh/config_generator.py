@@ -165,17 +165,26 @@ def generate_palace_config(
     # Build domains section
     # Evaluate dispersion models at the center frequency of the sweep band
     stack_materials = stack.materials
+    material_resolution_by_name: dict[str, dict[str, Any]] = {}
+    material_resolution_rows: list[dict[str, Any]] = []
     if driven_config is not None or material_overlay is not None:
-        from gsim.palace.materials import resolve_palace_materials_at_frequency
+        from gsim.palace.materials import resolve_palace_materials_with_report
 
         material_frequency = (
             driven_config.center_frequency if driven_config is not None else fmax
         )
-        stack_materials = resolve_palace_materials_at_frequency(
-            stack.materials,
-            material_frequency,
-            material_overlay=material_overlay,
+        stack_materials, material_resolution_report = (
+            resolve_palace_materials_with_report(
+                stack.materials,
+                material_frequency,
+                material_overlay=material_overlay,
+            )
         )
+        material_resolution_by_name = {
+            str(row["stack_material_name"]): row
+            for row in material_resolution_report.get("materials", ())
+            if isinstance(row, dict) and row.get("stack_material_name") is not None
+        }
 
     materials: list[dict[str, object]] = []
     for volume_name, info in groups["volumes"].items():
@@ -187,9 +196,11 @@ def generate_palace_config(
             layer = stack.layers.get(material_name)
             if layer is None:
                 continue
-            mat_props = stack_materials.get(layer.material, {})
+            stack_material_name = layer.material
+            mat_props = stack_materials.get(stack_material_name, {})
         else:
-            mat_props = stack_materials.get(material_name, {})
+            stack_material_name = material_name
+            mat_props = stack_materials.get(stack_material_name, {})
 
         mat_entry: dict[str, object] = {"Attributes": [info["phys_group"]]}
 
@@ -238,6 +249,19 @@ def generate_palace_config(
                 mat_entry["MaterialAxes"] = mat_props["material_axes"]
 
         materials.append(mat_entry)
+        material_resolution = material_resolution_by_name.get(stack_material_name)
+        if material_resolution is not None:
+            material_resolution_rows.append(
+                _material_resolution_config_row(
+                    material_row_index=len(materials),
+                    material_attribute=info["phys_group"],
+                    material_attributes=[info["phys_group"]],
+                    volume_name=volume_name,
+                    stack_material_name=stack_material_name,
+                    palace_material=mat_entry,
+                    resolution=material_resolution,
+                )
+            )
 
     postprocessing: dict[str, object] = {"Energy": [], "Probe": []}
     if postprocessing_config:
@@ -583,6 +607,18 @@ def generate_palace_config(
     with config_path.open("w") as f:
         json.dump(config, f, indent=4)
 
+    if material_resolution_rows:
+        material_resolution_path = output_path / "palace_material_resolution.json"
+        with material_resolution_path.open("w") as f:
+            json.dump(
+                {
+                    "schema_version": 1,
+                    "materials": material_resolution_rows,
+                },
+                f,
+                indent=4,
+            )
+
     # Write port information file
     port_info_path = output_path / "port_information.json"
     port_info_struct = {"ports": port_info, "unit": 1e-6, "name": model_name}
@@ -590,6 +626,28 @@ def generate_palace_config(
         json.dump(port_info_struct, f, indent=4)
 
     return config_path
+
+
+def _material_resolution_config_row(
+    *,
+    material_row_index: int,
+    material_attribute: int,
+    material_attributes: list[int],
+    volume_name: str,
+    stack_material_name: str,
+    palace_material: dict[str, object],
+    resolution: dict[str, Any],
+) -> dict[str, Any]:
+    row = {
+        "material_row_index": material_row_index,
+        "material_attribute": material_attribute,
+        "material_attributes": material_attributes,
+        "volume_name": volume_name,
+        "stack_material_name": stack_material_name,
+        "palace_material": dict(palace_material),
+    }
+    row.update(dict(resolution))
+    return row
 
 
 def collect_mesh_stats() -> dict:

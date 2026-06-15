@@ -6,7 +6,10 @@ import pytest
 from scipy.constants import c as C0  # noqa: N812
 
 from gsim.common.stack.materials import MATERIALS_DB
-from gsim.palace.materials import resolve_palace_materials_at_frequency
+from gsim.palace.materials import (
+    resolve_palace_materials_at_frequency,
+    resolve_palace_materials_with_report,
+)
 from gsim.palace.models import DrivenConfig
 
 
@@ -112,6 +115,41 @@ class TestResolvePalaceMaterialsAtFrequency:
         assert resolved["Si"]["conductivity"] == pytest.approx(2.0)
         assert materials["Si"]["permittivity"] == pytest.approx(11.9)
         assert materials["Si"]["conductivity"] == pytest.approx(2.0)
+
+    def test_material_overlay_report_records_model_source_and_validity(self):
+        materials = {"Si": {"permittivity": 11.9, "conductivity": 2.0}}
+        overlay = {
+            "materials": {
+                "Si": {
+                    "relative_permittivity": 11.45,
+                    "loss_tangent": 1.0e-6,
+                    "dispersion_models": [
+                        {
+                            "type": "constant",
+                            "permittivity": 11.45,
+                            "validity_frequency": [0, 10e9],
+                            "source": "test PDK",
+                        }
+                    ],
+                }
+            }
+        }
+
+        resolved, report = resolve_palace_materials_with_report(
+            materials,
+            5e9,
+            material_overlay=overlay,
+        )
+
+        row = report["materials"][0]
+        assert resolved["Si"]["permittivity"] == pytest.approx(11.45)
+        assert row["stack_material_name"] == "Si"
+        assert row["matched_material_name"] == "Si"
+        assert row["evaluation_frequency_hz"] == pytest.approx(5e9)
+        assert row["model_type"] == "constant"
+        assert row["model_source"] == "test PDK"
+        assert row["within_validity"] is True
+        assert row["effective_material"]["loss_tangent"] == pytest.approx(1.0e-6)
 
     def test_material_overlay_preserves_unknown_materials(self):
         materials = {"custom_mat": {"permittivity": 5.0}}

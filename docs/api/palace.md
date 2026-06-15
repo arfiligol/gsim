@@ -104,6 +104,12 @@
       inherited_members: false
       members: false
 
+## Materials
+
+::: gsim.palace.resolve_palace_materials_with_report
+    options:
+      show_source: false
+
 ## Results
 
 ::: gsim.palace.load_eigenmode_report

@@ -65,6 +65,16 @@ _DOMAIN_MATERIAL_COLUMNS = (
     "conductivity",
     "permeability",
     "material_axes",
+    "volume_name",
+    "stack_material_name",
+    "matched_material_name",
+    "material_model_type",
+    "material_model_source",
+    "material_within_validity",
+    "material_validity_note",
+    "material_frequency_hz",
+    "material_frequency_ghz",
+    "raw_material_resolution",
     "raw_material",
 )
 _DIELECTRIC_INTERFACE_COLUMNS = (
@@ -1861,12 +1871,16 @@ def load_domain_material_summary(
     *,
     config_path: str | Path | None = None,
     index_map_path: str | Path | None = None,
+    material_resolution_path: str | Path | None = None,
 ) -> pd.DataFrame:
     """Load Palace ``Domains.Materials`` with physical-name provenance.
 
     The returned table interprets the effective material rows from
     ``config.json`` and, when available, joins each material attribute back to
-    the domain postprocessing entries in ``palace_index_map.json``.
+    the domain postprocessing entries in ``palace_index_map.json``. When
+    available, ``palace_material_resolution.json`` is joined by material
+    attribute so reports can explain which material overlay/model source was
+    applied during config generation.
     """
     import pandas as pd
 
@@ -1884,6 +1898,10 @@ def load_domain_material_summary(
         source,
         index_map_path=index_map_path,
     )
+    material_resolution_rows = _load_optional_material_resolution_rows(
+        source,
+        material_resolution_path=material_resolution_path,
+    )
 
     rows: list[dict[str, Any]] = []
     for material_row_index, material in enumerate(materials, start=1):
@@ -1896,11 +1914,21 @@ def load_domain_material_summary(
                     material_attributes=attributes,
                     material=material,
                     index_entry=None,
+                    material_resolution=_matching_material_resolution_row(
+                        material_resolution_rows,
+                        material_row_index=material_row_index,
+                        material_attribute=None,
+                    ),
                 )
             )
             continue
 
         for attribute in attributes:
+            material_resolution = _matching_material_resolution_row(
+                material_resolution_rows,
+                material_row_index=material_row_index,
+                material_attribute=attribute,
+            )
             matches = (
                 index_map.entries_for_attribute(
                     attribute,
@@ -1917,6 +1945,7 @@ def load_domain_material_summary(
                         material_attributes=attributes,
                         material=material,
                         index_entry=None,
+                        material_resolution=material_resolution,
                     )
                 )
                 continue
@@ -1927,6 +1956,7 @@ def load_domain_material_summary(
                     material_attributes=attributes,
                     material=material,
                     index_entry=index_entry,
+                    material_resolution=material_resolution,
                 )
                 for index_entry in matches
             )
@@ -2091,6 +2121,24 @@ def _load_optional_domain_material_index_map(
     )
 
 
+def _load_optional_material_resolution_rows(
+    source: str | Path | dict,
+    *,
+    material_resolution_path: str | Path | None,
+) -> tuple[dict[str, Any], ...]:
+    resolved_path = _find_optional_material_resolution_path(
+        source,
+        material_resolution_path=material_resolution_path,
+    )
+    if resolved_path is None or not resolved_path.exists():
+        return ()
+    data = json.loads(resolved_path.read_text())
+    rows = data.get("materials", ()) if isinstance(data, dict) else ()
+    if not isinstance(rows, (list, tuple)):
+        return ()
+    return tuple(dict(row) for row in rows if isinstance(row, dict))
+
+
 def _domain_material_row(
     *,
     material_row_index: int,
@@ -2098,6 +2146,7 @@ def _domain_material_row(
     material_attributes: tuple[int, ...],
     material: dict[str, Any],
     index_entry: Any | None,
+    material_resolution: dict[str, Any] | None,
 ) -> dict[str, Any]:
     physical_name = None
     entry_name = None
@@ -2175,8 +2224,68 @@ def _domain_material_row(
             "MaterialAxes",
             "Axes",
         ),
+        "volume_name": _material_resolution_value(material_resolution, "volume_name"),
+        "stack_material_name": _material_resolution_value(
+            material_resolution,
+            "stack_material_name",
+        ),
+        "matched_material_name": _material_resolution_value(
+            material_resolution,
+            "matched_material_name",
+        ),
+        "material_model_type": _material_resolution_value(
+            material_resolution,
+            "model_type",
+        ),
+        "material_model_source": _material_resolution_value(
+            material_resolution,
+            "model_source",
+        ),
+        "material_within_validity": _material_resolution_value(
+            material_resolution,
+            "within_validity",
+        ),
+        "material_validity_note": _material_resolution_value(
+            material_resolution,
+            "validity_note",
+        ),
+        "material_frequency_hz": _optional_numeric(
+            _material_resolution_value(material_resolution, "evaluation_frequency_hz")
+        ),
+        "material_frequency_ghz": _optional_numeric(
+            _material_resolution_value(material_resolution, "evaluation_frequency_ghz")
+        ),
+        "raw_material_resolution": (
+            {} if material_resolution is None else dict(material_resolution)
+        ),
         "raw_material": dict(material),
     }
+
+
+def _matching_material_resolution_row(
+    rows: tuple[dict[str, Any], ...],
+    *,
+    material_row_index: int,
+    material_attribute: int | None,
+) -> dict[str, Any] | None:
+    if material_attribute is not None:
+        for row in rows:
+            if _optional_int(row.get("material_attribute")) == material_attribute:
+                return row
+
+    for row in rows:
+        if _optional_int(row.get("material_row_index")) == material_row_index:
+            return row
+    return None
+
+
+def _material_resolution_value(
+    material_resolution: dict[str, Any] | None,
+    key: str,
+) -> Any:
+    if material_resolution is None:
+        return None
+    return material_resolution.get(key)
 
 
 def _material_attributes(material: dict[str, Any]) -> tuple[int, ...]:
@@ -2403,6 +2512,16 @@ def _find_optional_config_path(
     if config_path is not None:
         return Path(config_path)
     return _find_config_json(source)
+
+
+def _find_optional_material_resolution_path(
+    source: str | Path | dict,
+    *,
+    material_resolution_path: str | Path | None,
+) -> Path | None:
+    if material_resolution_path is not None:
+        return Path(material_resolution_path)
+    return _find_material_resolution_json(source)
 
 
 def _postprocessing_index_map_to_dataframe(
@@ -3767,6 +3886,37 @@ def _find_postprocessing_index_map(source: str | Path | dict) -> Path | None:
 def _find_config_json(source: str | Path | dict) -> Path | None:
     """Search common local/cloud locations for Palace ``config.json``."""
     name = "config.json"
+    if isinstance(source, dict):
+        explicit = source.get(name)
+        if explicit is not None:
+            return Path(explicit)
+        candidate_roots = [Path(value).parent for value in source.values()]
+    else:
+        path = Path(source)
+        candidate_roots = [path if path.is_dir() else path.parent]
+
+    for root in candidate_roots:
+        candidates = [
+            root / name,
+            root.parent / name,
+            root.parent.parent / name,
+            root / "input" / name,
+            root.parent / "input" / name,
+            root.parent.parent / "input" / name,
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        if root.exists():
+            found = _find_file(root, name)
+            if found is not None:
+                return found
+    return None
+
+
+def _find_material_resolution_json(source: str | Path | dict) -> Path | None:
+    """Search common local/cloud locations for material-resolution sidecars."""
+    name = "palace_material_resolution.json"
     if isinstance(source, dict):
         explicit = source.get(name)
         if explicit is not None:

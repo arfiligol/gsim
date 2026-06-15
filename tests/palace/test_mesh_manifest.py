@@ -210,7 +210,21 @@ def test_write_config_applies_material_overlay_without_mutating_stack(
         stack=stack,
         ports=[],
         absorbing_boundary=False,
-        material_overlay={"materials": {"Si": {"relative_permittivity": 11.45}}},
+        material_overlay={
+            "materials": {
+                "Si": {
+                    "relative_permittivity": 11.45,
+                    "dispersion_models": [
+                        {
+                            "type": "constant",
+                            "permittivity": 11.45,
+                            "validity_frequency": [0, 20e9],
+                            "source": "test PDK",
+                        }
+                    ],
+                }
+            }
+        },
     )
 
     material = json.loads(config_path.read_text())["Domains"]["Materials"][0]
@@ -218,6 +232,18 @@ def test_write_config_applies_material_overlay_without_mutating_stack(
     assert material["Conductivity"] == 2.0
     assert stack.materials["Si"]["permittivity"] == 11.9
     assert stack.materials["Si"]["conductivity"] == 2.0
+
+    material_resolution = json.loads(
+        (tmp_path / "palace_material_resolution.json").read_text()
+    )
+    row = material_resolution["materials"][0]
+    assert row["material_attribute"] == 1
+    assert row["volume_name"] == "Si"
+    assert row["stack_material_name"] == "Si"
+    assert row["matched_material_name"] == "Si"
+    assert row["palace_material"]["Permittivity"] == 11.45
+    assert row["model_type"] == "constant"
+    assert row["model_source"] == "test PDK"
 
 
 def test_build_postprocessing_config_from_manifest_has_stable_indices(
