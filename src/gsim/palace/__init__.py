@@ -69,9 +69,11 @@ from gsim.palace.mesh import (
     DielectricInterfaceSelector,
     DielectricInterfaceSpec,
     DielectricInterfaceType,
+    DielectricMaterialKind,
     MeshConfig,
     MeshResult,
     build_dielectric_interface_specs_from_assignments,
+    build_dielectric_interface_specs_from_material_kinds,
     generate_mesh,
 )
 
@@ -148,6 +150,7 @@ __all__ = [
     "DielectricInterfaceSelector",
     "DielectricInterfaceSpec",
     "DielectricInterfaceType",
+    "DielectricMaterialKind",
     "DrivenConfig",
     "DrivenSim",
     "EigenmodeConfig",
@@ -185,6 +188,7 @@ __all__ = [
     "ValidationResult",
     "WavePortConfig",
     "build_dielectric_interface_specs_from_assignments",
+    "build_dielectric_interface_specs_from_material_kinds",
     "configure_cpw_port",
     "configure_inplane_port",
     "configure_via_port",

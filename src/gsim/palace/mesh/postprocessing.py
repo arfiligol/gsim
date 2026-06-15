@@ -14,7 +14,28 @@ from .manifest import MeshManifest, MeshPhysicalGroup, MeshRole
 SurfaceFluxType = Literal["Electric", "Magnetic", "Power"]
 DielectricInterfaceType = Literal["Default", "MA", "MS", "SA"]
 DielectricInterfaceSelector = str | tuple[str, str]
+DielectricMaterialKind = Literal[
+    "conductor",
+    "dielectric",
+    "vacuum",
+    "superconductor",
+    "mixed",
+    "conductive",
+]
 _DIELECTRIC_INTERFACE_TYPES = {"Default", "MA", "MS", "SA"}
+_DIELECTRIC_MATERIAL_KIND_ALIASES = {
+    "conductor": "conductor",
+    "superconductor": "conductor",
+    "mixed": "conductor",
+    "conductive": "conductor",
+    "dielectric": "dielectric",
+    "vacuum": "vacuum",
+}
+_DEFAULT_INTERFACE_TYPES_BY_KIND_PAIR: dict[frozenset[str], tuple[str, ...]] = {
+    frozenset(("conductor", "vacuum")): ("MA",),
+    frozenset(("conductor", "dielectric")): ("MS",),
+    frozenset(("dielectric", "vacuum")): ("SA",),
+}
 
 
 @dataclass(frozen=True)
@@ -340,6 +361,62 @@ def build_dielectric_interface_specs_from_assignments(
     return tuple(specs)
 
 
+def build_dielectric_interface_specs_from_material_kinds(
+    manifest: MeshManifest,
+    *,
+    material_kind_by_name: Mapping[str, DielectricMaterialKind | str],
+    presets: Mapping[str, Mapping[str, Any]],
+    preset_by_interface_type: Mapping[str, str | Iterable[str]],
+    role: MeshRole | str = "boundary_surface",
+    interface_types_by_kind_pair: Mapping[tuple[str, str], str | Iterable[str]]
+    | None = None,
+) -> tuple[DielectricInterfaceSpec, ...]:
+    """Build interface specs by classifying manifest material-kind pairs.
+
+    Callers own material naming, material-kind assignment, and preset records.
+    ``gsim`` only classifies parsed manifest ``interface_of`` pairs into
+    interface types, skips non-loss kind pairs, and emits ordered Palace
+    postprocessing specs.
+    """
+    kind_map = {
+        str(name): _normalized_material_kind(kind=kind, material_name=str(name))
+        for name, kind in material_kind_by_name.items()
+    }
+    interface_type_map = _interface_type_map(interface_types_by_kind_pair)
+    specs: list[DielectricInterfaceSpec] = []
+
+    for entry in manifest.entries_for_role(role):
+        if entry.interface_of is None:
+            continue
+        left, right = entry.interface_of
+        left_kind = _kind_for_interface_part(kind_map=kind_map, material_name=left)
+        right_kind = _kind_for_interface_part(kind_map=kind_map, material_name=right)
+        interface_types = interface_type_map.get(frozenset((left_kind, right_kind)), ())
+        for interface_type in interface_types:
+            preset_names = _preset_names_for_interface_type(
+                preset_by_interface_type=preset_by_interface_type,
+                interface_type=interface_type,
+            )
+            for preset_name in preset_names:
+                spec = _dielectric_interface_spec_from_preset(
+                    preset_name=preset_name,
+                    preset=_preset_record(presets=presets, preset_name=preset_name),
+                    role=role,
+                    entry_name=entry.name,
+                )
+                if spec.interface_type != interface_type:
+                    msg = (
+                        f"Dielectric interface preset {preset_name!r} has "
+                        f"interface_type {spec.interface_type!r}, but "
+                        f"classified interface {entry.name!r} requires "
+                        f"{interface_type!r}."
+                    )
+                    raise ValueError(msg)
+                specs.append(spec)
+
+    return tuple(specs)
+
+
 def build_terminal_index_map_from_manifest(
     manifest: MeshManifest,
     terminal_entries: Iterable[Mapping[str, Any]],
@@ -474,6 +551,78 @@ def _preset_record(
         raise KeyError(msg) from error
 
 
+def _normalized_material_kind(
+    *,
+    kind: DielectricMaterialKind | str,
+    material_name: str,
+) -> str:
+    normalized = str(kind).lower()
+    normalized_kind = _DIELECTRIC_MATERIAL_KIND_ALIASES.get(normalized)
+    if normalized_kind is None:
+        msg = (
+            f"Material {material_name!r} has unsupported dielectric material "
+            f"kind {kind!r}."
+        )
+        raise ValueError(msg)
+    return normalized_kind
+
+
+def _kind_for_interface_part(
+    *,
+    kind_map: Mapping[str, str],
+    material_name: str,
+) -> str:
+    try:
+        return kind_map[material_name]
+    except KeyError as error:
+        msg = (
+            "Missing dielectric material kind for interface material "
+            f"{material_name!r}."
+        )
+        raise KeyError(msg) from error
+
+
+def _interface_type_map(
+    interface_types_by_kind_pair: Mapping[tuple[str, str], str | Iterable[str]] | None,
+) -> dict[frozenset[str], tuple[str, ...]]:
+    if interface_types_by_kind_pair is None:
+        return dict(_DEFAULT_INTERFACE_TYPES_BY_KIND_PAIR)
+    return {
+        frozenset(
+            (
+                _normalized_material_kind(kind=left, material_name="kind-pair"),
+                _normalized_material_kind(kind=right, material_name="kind-pair"),
+            )
+        ): _interface_types(interface_types)
+        for (left, right), interface_types in interface_types_by_kind_pair.items()
+    }
+
+
+def _interface_types(value: str | Iterable[str]) -> tuple[str, ...]:
+    interface_types = _preset_names(value)
+    unsupported = [
+        interface_type
+        for interface_type in interface_types
+        if interface_type not in _DIELECTRIC_INTERFACE_TYPES
+    ]
+    if unsupported:
+        msg = f"Unsupported dielectric interface types: {unsupported}."
+        raise ValueError(msg)
+    return interface_types
+
+
+def _preset_names_for_interface_type(
+    *,
+    preset_by_interface_type: Mapping[str, str | Iterable[str]],
+    interface_type: str,
+) -> tuple[str, ...]:
+    try:
+        return _preset_names(preset_by_interface_type[interface_type])
+    except KeyError as error:
+        msg = f"Missing preset assignment for interface type {interface_type!r}."
+        raise KeyError(msg) from error
+
+
 def _dielectric_interface_spec_from_preset(
     *,
     preset_name: str,
@@ -598,12 +747,14 @@ __all__ = [
     "DielectricInterfaceSelector",
     "DielectricInterfaceSpec",
     "DielectricInterfaceType",
+    "DielectricMaterialKind",
     "PostprocessingConfig",
     "PostprocessingIndexEntry",
     "PostprocessingIndexMap",
     "SurfaceFluxSpec",
     "SurfaceFluxType",
     "build_dielectric_interface_specs_from_assignments",
+    "build_dielectric_interface_specs_from_material_kinds",
     "build_postprocessing_config_from_manifest",
     "build_terminal_index_map_from_manifest",
 ]

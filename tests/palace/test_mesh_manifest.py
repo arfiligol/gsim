@@ -15,6 +15,7 @@ from gsim.palace.mesh.postprocessing import (
     DielectricInterfaceSpec,
     SurfaceFluxSpec,
     build_dielectric_interface_specs_from_assignments,
+    build_dielectric_interface_specs_from_material_kinds,
     build_postprocessing_config_from_manifest,
     build_terminal_index_map_from_manifest,
 )
@@ -53,6 +54,7 @@ def _minimal_groups() -> dict:
             "metal___substrate": {"phys_group": 43, "tags": [403], "dim": 2},
             "metal___None": {"phys_group": 44, "tags": [404], "dim": 2},
             "legacy__substrate": {"phys_group": 45, "tags": [405], "dim": 2},
+            "metal___boundary": {"phys_group": 48, "tags": [408], "dim": 2},
         },
         "refinement_lines": {
             "ground_edge": {"phys_group": 51, "tags": [501], "dim": 1},
@@ -101,6 +103,8 @@ def test_build_mesh_manifest_classifies_roles_and_preserves_ids() -> None:
     assert entries["metal___substrate"].dimension == 2
     assert entries["metal___substrate"].source == "gsim_gmsh"
     assert entries["metal___None"].exterior_of == "metal"
+    assert entries["metal___boundary"].interface_of is None
+    assert entries["metal___boundary"].exterior_of == "metal"
     assert entries["legacy__substrate"].interface_of == ("legacy", "substrate")
     assert entries["ground_edge"].role == "refinement_line"
     assert entries["ground_edge"].metadata["dim"] == 1
@@ -702,6 +706,353 @@ def test_interface_assignment_specs_reject_invalid_preset_numbers() -> None:
             },
             assignments={"metal___substrate": "invalid"},
         )
+
+
+def test_material_kind_interface_specs_classify_default_pairs() -> None:
+    groups = _minimal_groups()
+    groups["boundary_surfaces"] = {
+        **groups["boundary_surfaces"],
+        "metal___vacuum": {"phys_group": 46, "tags": [406], "dim": 2},
+        "substrate___vacuum": {"phys_group": 47, "tags": [407], "dim": 2},
+    }
+    manifest = build_mesh_manifest(groups)
+    presets = {
+        "public_ma": {
+            "interface_type": "MA",
+            "thickness": 0.001,
+            "material_name": "AlOx_native_generic",
+        },
+        "public_ms": {
+            "interface_type": "MS",
+            "thickness": 0.002,
+            "permittivity": 10.0,
+            "loss_tangent": 0.002,
+        },
+        "public_sa": {
+            "interface_type": "SA",
+            "thickness": 0.003,
+            "permittivity": 2.0,
+        },
+    }
+
+    specs = build_dielectric_interface_specs_from_material_kinds(
+        manifest,
+        material_kind_by_name={
+            "metal": "superconductor",
+            "substrate": "dielectric",
+            "legacy": "dielectric",
+            "vacuum": "vacuum",
+        },
+        presets=presets,
+        preset_by_interface_type={
+            "MA": "public_ma",
+            "MS": "public_ms",
+            "SA": "public_sa",
+        },
+    )
+
+    assert specs == (
+        DielectricInterfaceSpec(
+            interface_type="MS",
+            thickness=0.002,
+            permittivity=10.0,
+            loss_tangent=0.002,
+            role="boundary_surface",
+            entry_names=("metal___substrate",),
+        ),
+        DielectricInterfaceSpec(
+            interface_type="MA",
+            thickness=0.001,
+            material_name="AlOx_native_generic",
+            role="boundary_surface",
+            entry_names=("metal___vacuum",),
+        ),
+        DielectricInterfaceSpec(
+            interface_type="SA",
+            thickness=0.003,
+            permittivity=2.0,
+            role="boundary_surface",
+            entry_names=("substrate___vacuum",),
+        ),
+    )
+
+    config = build_postprocessing_config_from_manifest(
+        manifest,
+        dielectric_interfaces=specs,
+    )
+
+    assert config.boundaries["Dielectric"] == [
+        {
+            "Index": 1,
+            "Attributes": [43],
+            "Type": "MS",
+            "Thickness": 0.002,
+            "LossTan": 0.002,
+            "Permittivity": 10.0,
+        },
+        {
+            "Index": 2,
+            "Attributes": [46],
+            "Type": "MA",
+            "Thickness": 0.001,
+            "LossTan": 0.0,
+            "_MaterialName": "AlOx_native_generic",
+        },
+        {
+            "Index": 3,
+            "Attributes": [47],
+            "Type": "SA",
+            "Thickness": 0.003,
+            "LossTan": 0.0,
+            "Permittivity": 2.0,
+        },
+    ]
+    assert (
+        config.index_map.indices_for_name(
+            "metal___None",
+            section="Boundaries.Postprocessing.Dielectric",
+        )
+        == ()
+    )
+    assert (
+        config.index_map.indices_for_name(
+            "legacy__substrate",
+            section="Boundaries.Postprocessing.Dielectric",
+        )
+        == ()
+    )
+
+
+def test_material_kind_interface_specs_allow_kind_pair_override_duplicates() -> None:
+    manifest = build_mesh_manifest(_minimal_groups())
+
+    specs = build_dielectric_interface_specs_from_material_kinds(
+        manifest,
+        material_kind_by_name={
+            "metal": "conductor",
+            "substrate": "dielectric",
+            "legacy": "dielectric",
+        },
+        presets={
+            "public_ma": {
+                "interface_type": "MA",
+                "thickness": 0.001,
+                "permittivity": 4.0,
+            },
+            "public_ms": {
+                "interface_type": "MS",
+                "thickness": 0.002,
+                "permittivity": 10.0,
+            },
+        },
+        preset_by_interface_type={
+            "MA": "public_ma",
+            "MS": "public_ms",
+        },
+        interface_types_by_kind_pair={
+            ("conductor", "dielectric"): ("MA", "MS"),
+        },
+    )
+
+    assert specs == (
+        DielectricInterfaceSpec(
+            interface_type="MA",
+            thickness=0.001,
+            permittivity=4.0,
+            role="boundary_surface",
+            entry_names=("metal___substrate",),
+        ),
+        DielectricInterfaceSpec(
+            interface_type="MS",
+            thickness=0.002,
+            permittivity=10.0,
+            role="boundary_surface",
+            entry_names=("metal___substrate",),
+        ),
+    )
+
+
+def test_material_kind_interface_specs_preserve_multiple_preset_order() -> None:
+    manifest = build_mesh_manifest(_minimal_groups())
+
+    specs = build_dielectric_interface_specs_from_material_kinds(
+        manifest,
+        material_kind_by_name={
+            "metal": "conductor",
+            "substrate": "dielectric",
+            "legacy": "dielectric",
+        },
+        presets={
+            "public_ms_inner": {
+                "interface_type": "MS",
+                "thickness": 0.001,
+                "permittivity": 8.0,
+            },
+            "public_ms_outer": {
+                "interface_type": "MS",
+                "thickness": 0.002,
+                "permittivity": 10.0,
+            },
+        },
+        preset_by_interface_type={
+            "MS": ("public_ms_inner", "public_ms_outer"),
+        },
+    )
+
+    assert specs == (
+        DielectricInterfaceSpec(
+            interface_type="MS",
+            thickness=0.001,
+            permittivity=8.0,
+            role="boundary_surface",
+            entry_names=("metal___substrate",),
+        ),
+        DielectricInterfaceSpec(
+            interface_type="MS",
+            thickness=0.002,
+            permittivity=10.0,
+            role="boundary_surface",
+            entry_names=("metal___substrate",),
+        ),
+    )
+
+
+def test_material_kind_interface_specs_match_kind_pairs_in_either_order() -> None:
+    groups = _minimal_groups()
+    groups["boundary_surfaces"] = {
+        **groups["boundary_surfaces"],
+        "vacuum___metal": {"phys_group": 46, "tags": [406], "dim": 2},
+    }
+    manifest = build_mesh_manifest(groups)
+
+    specs = build_dielectric_interface_specs_from_material_kinds(
+        manifest,
+        material_kind_by_name={
+            "metal": "conductor",
+            "substrate": "dielectric",
+            "legacy": "dielectric",
+            "vacuum": "vacuum",
+        },
+        presets={
+            "public_ma": {
+                "interface_type": "MA",
+                "thickness": 0.001,
+                "permittivity": 4.0,
+            },
+            "public_ms": {
+                "interface_type": "MS",
+                "thickness": 0.002,
+                "permittivity": 10.0,
+            },
+        },
+        preset_by_interface_type={
+            "MA": "public_ma",
+            "MS": "public_ms",
+        },
+    )
+
+    assert specs[-1] == DielectricInterfaceSpec(
+        interface_type="MA",
+        thickness=0.001,
+        permittivity=4.0,
+        role="boundary_surface",
+        entry_names=("vacuum___metal",),
+    )
+
+
+def test_material_kind_interface_specs_reject_missing_kind() -> None:
+    manifest = build_mesh_manifest(_minimal_groups())
+
+    with pytest.raises(KeyError, match="Missing dielectric material kind"):
+        build_dielectric_interface_specs_from_material_kinds(
+            manifest,
+            material_kind_by_name={"metal": "conductor"},
+            presets={
+                "public_ms": {
+                    "interface_type": "MS",
+                    "thickness": 0.002,
+                    "permittivity": 10.0,
+                }
+            },
+            preset_by_interface_type={"MS": "public_ms"},
+        )
+
+
+def test_material_kind_interface_specs_reject_unsupported_kind() -> None:
+    manifest = build_mesh_manifest(_minimal_groups())
+
+    with pytest.raises(ValueError, match="unsupported dielectric material kind"):
+        build_dielectric_interface_specs_from_material_kinds(
+            manifest,
+            material_kind_by_name={
+                "metal": "semiconductor",
+                "substrate": "dielectric",
+                "legacy": "dielectric",
+            },
+            presets={
+                "public_ms": {
+                    "interface_type": "MS",
+                    "thickness": 0.002,
+                    "permittivity": 10.0,
+                }
+            },
+            preset_by_interface_type={"MS": "public_ms"},
+        )
+
+
+def test_material_kind_interface_specs_reject_missing_interface_type_preset() -> None:
+    manifest = build_mesh_manifest(_minimal_groups())
+
+    with pytest.raises(KeyError, match="Missing preset assignment"):
+        build_dielectric_interface_specs_from_material_kinds(
+            manifest,
+            material_kind_by_name={
+                "metal": "conductor",
+                "substrate": "dielectric",
+                "legacy": "dielectric",
+            },
+            presets={
+                "public_ms": {
+                    "interface_type": "MS",
+                    "thickness": 0.002,
+                    "permittivity": 10.0,
+                }
+            },
+            preset_by_interface_type={},
+        )
+
+
+def test_material_kind_interface_specs_reject_preset_type_mismatch() -> None:
+    manifest = build_mesh_manifest(_minimal_groups())
+
+    with pytest.raises(ValueError, match="requires 'MS'"):
+        build_dielectric_interface_specs_from_material_kinds(
+            manifest,
+            material_kind_by_name={
+                "metal": "conductor",
+                "substrate": "dielectric",
+                "legacy": "dielectric",
+            },
+            presets={
+                "public_ma": {
+                    "interface_type": "MA",
+                    "thickness": 0.001,
+                    "permittivity": 4.0,
+                }
+            },
+            preset_by_interface_type={"MS": "public_ma"},
+        )
+
+
+def test_material_kind_interface_specs_are_public_exports() -> None:
+    from gsim.palace import (
+        build_dielectric_interface_specs_from_material_kinds as palace_helper,
+    )
+    from gsim.palace.mesh import (
+        build_dielectric_interface_specs_from_material_kinds as mesh_helper,
+    )
+
+    assert palace_helper is mesh_helper
 
 
 def test_postprocessing_index_map_supports_bidirectional_lookup() -> None:

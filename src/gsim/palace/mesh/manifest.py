@@ -33,6 +33,7 @@ _ROLE_DIMENSION: dict[str, int] = {
     "via_boundary_surface": 2,
 }
 _INTERFACE_DELIMITERS = ("___", "__")
+_EXTERIOR_SIDE_NAMES = {"none", "boundary"}
 
 
 @dataclass(frozen=True)
@@ -272,12 +273,16 @@ def _parse_physical_relation(
             left, right = physical_name.split(delimiter, maxsplit=1)
             if not left or not right:
                 continue
-            if right == "None":
+            if _is_exterior_side(right):
                 return None, left
-            if left == "None":
+            if _is_exterior_side(left):
                 return None, right
             return (left, right), None
     return None, None
+
+
+def _is_exterior_side(name: str) -> bool:
+    return name.lower() in _EXTERIOR_SIDE_NAMES
 
 
 __all__ = [
