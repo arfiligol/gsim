@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from gsim.common.stack import LayerStack
 from gsim.palace.mesh.config_generator import generate_palace_config, write_config
 from gsim.palace.mesh.generator import MeshResult
@@ -12,6 +14,7 @@ from gsim.palace.mesh.manifest import build_mesh_manifest
 from gsim.palace.mesh.postprocessing import (
     DielectricInterfaceSpec,
     SurfaceFluxSpec,
+    build_dielectric_interface_specs_from_assignments,
     build_postprocessing_config_from_manifest,
     build_terminal_index_map_from_manifest,
 )
@@ -475,6 +478,230 @@ def test_build_postprocessing_config_supports_interface_material_reference() -> 
             "_MaterialName": "AlOx_native_generic",
         }
     ]
+
+
+def test_interface_assignment_specs_target_exact_interfaces() -> None:
+    manifest = build_mesh_manifest(_minimal_groups())
+    presets = {
+        "public_ma": {
+            "interface_type": "MA",
+            "thickness": 0.001,
+            "material_name": "AlOx_native_generic",
+            "loss_tangent": 0.001,
+        },
+        "public_ms": {
+            "interface_type": "MS",
+            "thickness": 0.002,
+            "permittivity": 10.0,
+            "loss_tangent": 0.002,
+        },
+        "public_sa": {
+            "interface_type": "SA",
+            "thickness": 0.003,
+            "material_name": "AlOx_native_generic",
+        },
+    }
+
+    specs = build_dielectric_interface_specs_from_assignments(
+        manifest,
+        presets=presets,
+        assignments={
+            "metal___substrate": ("public_ma", "public_ms"),
+            ("legacy", "substrate"): "public_sa",
+        },
+    )
+
+    assert specs == (
+        DielectricInterfaceSpec(
+            interface_type="MA",
+            thickness=0.001,
+            material_name="AlOx_native_generic",
+            loss_tangent=0.001,
+            role="boundary_surface",
+            entry_names=("metal___substrate",),
+        ),
+        DielectricInterfaceSpec(
+            interface_type="MS",
+            thickness=0.002,
+            permittivity=10.0,
+            loss_tangent=0.002,
+            role="boundary_surface",
+            entry_names=("metal___substrate",),
+        ),
+        DielectricInterfaceSpec(
+            interface_type="SA",
+            thickness=0.003,
+            material_name="AlOx_native_generic",
+            role="boundary_surface",
+            entry_names=("legacy__substrate",),
+        ),
+    )
+
+    config = build_postprocessing_config_from_manifest(
+        manifest,
+        dielectric_interfaces=specs,
+    )
+
+    assert config.boundaries["Dielectric"] == [
+        {
+            "Index": 1,
+            "Attributes": [43],
+            "Type": "MA",
+            "Thickness": 0.001,
+            "LossTan": 0.001,
+            "_MaterialName": "AlOx_native_generic",
+        },
+        {
+            "Index": 2,
+            "Attributes": [43],
+            "Type": "MS",
+            "Thickness": 0.002,
+            "LossTan": 0.002,
+            "Permittivity": 10.0,
+        },
+        {
+            "Index": 3,
+            "Attributes": [45],
+            "Type": "SA",
+            "Thickness": 0.003,
+            "LossTan": 0.0,
+            "_MaterialName": "AlOx_native_generic",
+        },
+    ]
+    assert config.index_map.indices_for_name(
+        "metal___substrate",
+        section="Boundaries.Postprocessing.Dielectric",
+    ) == (1, 2)
+    assert (
+        config.index_map.physical_name_for_index(
+            "Boundaries.Postprocessing.Dielectric",
+            3,
+        )
+        == "legacy__substrate"
+    )
+
+
+def test_interface_assignment_specs_reject_exterior() -> None:
+    manifest = build_mesh_manifest(_minimal_groups())
+
+    with pytest.raises(ValueError, match="not a parsed material interface"):
+        build_dielectric_interface_specs_from_assignments(
+            manifest,
+            presets={
+                "public_sa": {
+                    "interface_type": "SA",
+                    "thickness": 0.003,
+                    "permittivity": 10.0,
+                }
+            },
+            assignments={"metal___None": "public_sa"},
+        )
+
+
+def test_interface_assignment_specs_allow_explicit_non_interface() -> None:
+    manifest = build_mesh_manifest(_minimal_groups())
+
+    specs = build_dielectric_interface_specs_from_assignments(
+        manifest,
+        presets={
+            "public_boundary": {
+                "interface_type": "Default",
+                "thickness": 0.004,
+                "permittivity": 1.0,
+            }
+        },
+        assignments={"absorbing": "public_boundary"},
+        require_interface=False,
+    )
+
+    assert specs == (
+        DielectricInterfaceSpec(
+            interface_type="Default",
+            thickness=0.004,
+            permittivity=1.0,
+            role="boundary_surface",
+            entry_names=("absorbing",),
+        ),
+    )
+
+
+def test_interface_assignment_specs_reject_unknown_selector() -> None:
+    manifest = build_mesh_manifest(_minimal_groups())
+
+    with pytest.raises(KeyError, match="No mesh manifest entry matches"):
+        build_dielectric_interface_specs_from_assignments(
+            manifest,
+            presets={
+                "public_sa": {
+                    "interface_type": "SA",
+                    "thickness": 0.003,
+                    "permittivity": 10.0,
+                }
+            },
+            assignments={"missing___substrate": "public_sa"},
+        )
+
+
+def test_interface_assignment_specs_reject_unknown_preset() -> None:
+    manifest = build_mesh_manifest(_minimal_groups())
+
+    with pytest.raises(KeyError, match="Unknown dielectric interface preset"):
+        build_dielectric_interface_specs_from_assignments(
+            manifest,
+            presets={},
+            assignments={"metal___substrate": "missing_preset"},
+        )
+
+
+def test_interface_assignment_specs_reject_ambiguous_preset_material() -> None:
+    manifest = build_mesh_manifest(_minimal_groups())
+
+    with pytest.raises(ValueError, match="exactly one"):
+        build_dielectric_interface_specs_from_assignments(
+            manifest,
+            presets={
+                "ambiguous": {
+                    "interface_type": "SA",
+                    "thickness": 0.003,
+                    "material_name": "AlOx_native_generic",
+                    "permittivity": 10.0,
+                }
+            },
+            assignments={"metal___substrate": "ambiguous"},
+        )
+
+
+def test_interface_assignment_specs_reject_missing_preset_material() -> None:
+    manifest = build_mesh_manifest(_minimal_groups())
+
+    with pytest.raises(ValueError, match="exactly one"):
+        build_dielectric_interface_specs_from_assignments(
+            manifest,
+            presets={
+                "missing_material": {
+                    "interface_type": "SA",
+                    "thickness": 0.003,
+                }
+            },
+            assignments={"metal___substrate": "missing_material"},
+        )
+
+
+def test_interface_assignment_specs_reject_invalid_preset_numbers() -> None:
+    manifest = build_mesh_manifest(_minimal_groups())
+
+    with pytest.raises(ValueError, match="thickness"):
+        build_dielectric_interface_specs_from_assignments(
+            manifest,
+            presets={
+                "invalid": {
+                    "interface_type": "SA",
+                    "thickness": 0.0,
+                    "permittivity": 10.0,
+                }
+            },
+            assignments={"metal___substrate": "invalid"},
+        )
 
 
 def test_postprocessing_index_map_supports_bidirectional_lookup() -> None:

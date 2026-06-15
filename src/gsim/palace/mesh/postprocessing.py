@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -12,6 +13,8 @@ from .manifest import MeshManifest, MeshPhysicalGroup, MeshRole
 
 SurfaceFluxType = Literal["Electric", "Magnetic", "Power"]
 DielectricInterfaceType = Literal["Default", "MA", "MS", "SA"]
+DielectricInterfaceSelector = str | tuple[str, str]
+_DIELECTRIC_INTERFACE_TYPES = {"Default", "MA", "MS", "SA"}
 
 
 @dataclass(frozen=True)
@@ -302,6 +305,41 @@ def build_postprocessing_config_from_manifest(
     )
 
 
+def build_dielectric_interface_specs_from_assignments(
+    manifest: MeshManifest,
+    *,
+    presets: Mapping[str, Mapping[str, Any]],
+    assignments: Mapping[DielectricInterfaceSelector, str | Iterable[str]],
+    role: MeshRole | str = "boundary_surface",
+    require_interface: bool = True,
+) -> tuple[DielectricInterfaceSpec, ...]:
+    """Build interface specs from caller-supplied preset assignments.
+
+    This helper is intentionally assignment-driven: public PDKs or private
+    overlays provide preset records and choose exact mesh entries, physical
+    names, or parsed interface pairs. ``gsim`` only resolves those selectors
+    against the manifest and emits Palace postprocessing specs.
+    """
+    specs: list[DielectricInterfaceSpec] = []
+    for selector, preset_names in assignments.items():
+        entry = _entry_for_dielectric_interface_assignment(
+            manifest=manifest,
+            selector=selector,
+            role=role,
+            require_interface=require_interface,
+        )
+        specs.extend(
+            _dielectric_interface_spec_from_preset(
+                preset_name=preset_name,
+                preset=_preset_record(presets=presets, preset_name=preset_name),
+                role=role,
+                entry_name=entry.name,
+            )
+            for preset_name in _preset_names(preset_names)
+        )
+    return tuple(specs)
+
+
 def build_terminal_index_map_from_manifest(
     manifest: MeshManifest,
     terminal_entries: Iterable[Mapping[str, Any]],
@@ -369,6 +407,157 @@ def _selected_entries(
     return tuple(entry for entry in entries if entry.name in selected)
 
 
+def _entry_for_dielectric_interface_assignment(
+    *,
+    manifest: MeshManifest,
+    selector: DielectricInterfaceSelector,
+    role: MeshRole | str,
+    require_interface: bool,
+) -> MeshPhysicalGroup:
+    matches = tuple(
+        entry
+        for entry in manifest.entries_for_role(role)
+        if _matches_dielectric_interface_selector(entry=entry, selector=selector)
+    )
+    if not matches:
+        msg = (
+            "No mesh manifest entry matches dielectric interface selector "
+            f"{selector!r}."
+        )
+        raise KeyError(msg)
+    if len(matches) > 1:
+        names = ", ".join(entry.name for entry in matches)
+        msg = f"Dielectric interface selector {selector!r} is ambiguous: {names}."
+        raise ValueError(msg)
+
+    entry = matches[0]
+    if require_interface and entry.interface_of is None:
+        msg = (
+            f"Dielectric interface selector {selector!r} matched {entry.name!r}, "
+            "but that manifest entry is not a parsed material interface."
+        )
+        raise ValueError(msg)
+    return entry
+
+
+def _matches_dielectric_interface_selector(
+    *,
+    entry: MeshPhysicalGroup,
+    selector: DielectricInterfaceSelector,
+) -> bool:
+    if isinstance(selector, str):
+        return selector == entry.name or selector in entry.physical_names
+    if len(selector) != 2 or entry.interface_of is None:
+        return False
+    return frozenset(str(part) for part in selector) == frozenset(entry.interface_of)
+
+
+def _preset_names(value: str | Iterable[str]) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return (value,)
+    names = tuple(str(item) for item in value)
+    if not names:
+        msg = "Dielectric interface assignment must reference at least one preset."
+        raise ValueError(msg)
+    return names
+
+
+def _preset_record(
+    *,
+    presets: Mapping[str, Mapping[str, Any]],
+    preset_name: str,
+) -> Mapping[str, Any]:
+    try:
+        return presets[preset_name]
+    except KeyError as error:
+        msg = f"Unknown dielectric interface preset {preset_name!r}."
+        raise KeyError(msg) from error
+
+
+def _dielectric_interface_spec_from_preset(
+    *,
+    preset_name: str,
+    preset: Mapping[str, Any],
+    role: MeshRole | str,
+    entry_name: str,
+) -> DielectricInterfaceSpec:
+    try:
+        interface_type = preset["interface_type"]
+        thickness = preset["thickness"]
+    except KeyError as error:
+        msg = (
+            f"Dielectric interface preset {preset_name!r} is missing {error.args[0]!r}."
+        )
+        raise KeyError(msg) from error
+
+    if interface_type not in _DIELECTRIC_INTERFACE_TYPES:
+        msg = (
+            f"Dielectric interface preset {preset_name!r} has unsupported "
+            f"interface_type {interface_type!r}."
+        )
+        raise ValueError(msg)
+
+    material_name = preset.get("material_name")
+    permittivity = preset.get("permittivity")
+    has_material_name = isinstance(material_name, str) and bool(material_name)
+    has_permittivity = permittivity is not None
+    if has_material_name == has_permittivity:
+        msg = (
+            f"Dielectric interface preset {preset_name!r} must set exactly one of "
+            "material_name or permittivity."
+        )
+        raise ValueError(msg)
+
+    kwargs: dict[str, Any] = {
+        "interface_type": interface_type,
+        "thickness": _positive_float(thickness, preset_name, "thickness"),
+        "loss_tangent": _nonnegative_float(
+            preset.get("loss_tangent", 0.0),
+            preset_name,
+            "loss_tangent",
+        ),
+        "role": role,
+        "entry_names": (entry_name,),
+    }
+    if has_material_name:
+        kwargs["material_name"] = material_name
+    else:
+        kwargs["permittivity"] = _positive_float(
+            permittivity,
+            preset_name,
+            "permittivity",
+        )
+    return DielectricInterfaceSpec(**kwargs)
+
+
+def _positive_float(value: Any, preset_name: str, field_name: str) -> float:
+    if not _is_finite_number(value) or float(value) <= 0.0:
+        msg = (
+            f"Dielectric interface preset {preset_name!r} field {field_name!r} "
+            "must be > 0."
+        )
+        raise ValueError(msg)
+    return float(value)
+
+
+def _nonnegative_float(value: Any, preset_name: str, field_name: str) -> float:
+    if not _is_finite_number(value) or float(value) < 0.0:
+        msg = (
+            f"Dielectric interface preset {preset_name!r} field {field_name!r} "
+            "must be >= 0."
+        )
+        raise ValueError(msg)
+    return float(value)
+
+
+def _is_finite_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )
+
+
 def _index_entry(
     *,
     section: str,
@@ -406,6 +595,7 @@ def _as_int_tuple(value: Any) -> tuple[int, ...]:
 
 
 __all__ = [
+    "DielectricInterfaceSelector",
     "DielectricInterfaceSpec",
     "DielectricInterfaceType",
     "PostprocessingConfig",
@@ -413,6 +603,7 @@ __all__ = [
     "PostprocessingIndexMap",
     "SurfaceFluxSpec",
     "SurfaceFluxType",
+    "build_dielectric_interface_specs_from_assignments",
     "build_postprocessing_config_from_manifest",
     "build_terminal_index_map_from_manifest",
 ]

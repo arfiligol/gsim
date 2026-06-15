@@ -90,6 +90,10 @@
     options:
       show_source: false
 
+::: gsim.palace.build_dielectric_interface_specs_from_assignments
+    options:
+      show_source: false
+
 ## Stack
 
 ::: gsim.palace.LayerStack

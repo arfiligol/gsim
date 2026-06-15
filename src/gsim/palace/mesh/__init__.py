@@ -45,6 +45,7 @@ from gsim.palace.mesh.manifest import (
     build_mesh_manifest,
 )
 from gsim.palace.mesh.postprocessing import (
+    DielectricInterfaceSelector,
     DielectricInterfaceSpec,
     DielectricInterfaceType,
     PostprocessingConfig,
@@ -52,6 +53,7 @@ from gsim.palace.mesh.postprocessing import (
     PostprocessingIndexMap,
     SurfaceFluxSpec,
     SurfaceFluxType,
+    build_dielectric_interface_specs_from_assignments,
     build_postprocessing_config_from_manifest,
     build_terminal_index_map_from_manifest,
 )
@@ -60,6 +62,7 @@ from gsim.palace.models.mesh import MeshConfig
 from . import gmsh_utils
 
 __all__ = [
+    "DielectricInterfaceSelector",
     "DielectricInterfaceSpec",
     "DielectricInterfaceType",
     "GeometryData",
@@ -73,6 +76,7 @@ __all__ = [
     "PostprocessingIndexMap",
     "SurfaceFluxSpec",
     "SurfaceFluxType",
+    "build_dielectric_interface_specs_from_assignments",
     "build_mesh_manifest",
     "build_postprocessing_config_from_manifest",
     "build_terminal_index_map_from_manifest",

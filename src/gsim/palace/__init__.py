@@ -66,8 +66,12 @@ from gsim.palace.materials import (
 
 # Mesh utilities
 from gsim.palace.mesh import (
+    DielectricInterfaceSelector,
+    DielectricInterfaceSpec,
+    DielectricInterfaceType,
     MeshConfig,
     MeshResult,
+    build_dielectric_interface_specs_from_assignments,
     generate_mesh,
 )
 
@@ -141,6 +145,9 @@ from gsim.viz import plot_cross_section, plot_mesh
 __all__ = [
     "MATERIALS_DB",
     "CPWPortConfig",
+    "DielectricInterfaceSelector",
+    "DielectricInterfaceSpec",
+    "DielectricInterfaceType",
     "DrivenConfig",
     "DrivenSim",
     "EigenmodeConfig",
@@ -177,6 +184,7 @@ __all__ = [
     "TransientConfig",
     "ValidationResult",
     "WavePortConfig",
+    "build_dielectric_interface_specs_from_assignments",
     "configure_cpw_port",
     "configure_inplane_port",
     "configure_via_port",
