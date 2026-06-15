@@ -43,6 +43,7 @@ from gsim.palace.results import (
     summarize_surface_q_by_interface,
     summarize_terminal_matrix_history,
     write_palace_handoff_metadata,
+    write_palace_resource_record,
     write_palace_sweep_points,
 )
 
@@ -780,6 +781,7 @@ class TestPalaceRunSummary:
         }
         assert summary.runtime["output_count"] == 1
         assert summary.runtime["output_bytes"] == 42
+        assert summary.resource["present"] is False
         assert summary.results["domain-E.csv"].present
         assert summary.results["surface-Q.csv"].present
         assert summary.results["port-EPR.csv"].present
@@ -854,6 +856,55 @@ class TestPalaceRunSummary:
         assert summary.handoff["metadata"] == {"campaign": "public_fixture"}
         assert "palace_handoff_metadata.json" not in summary.results
         assert summary.to_dict()["handoff"]["present"] is True
+
+    def test_write_palace_resource_record_round_trips_through_run_summary(
+        self,
+        indexed_report_dir: Path,
+    ) -> None:
+        record_path = write_palace_resource_record(
+            indexed_report_dir,
+            status="completed",
+            sources={"palace_log": {"path": "logs/palace-public.log"}},
+            launcher={"kind": "slurm"},
+            solver={
+                "palace_git_changeset": "v0.16.1",
+                "petsc_version": "3.24.3",
+            },
+            allocation={"nodes": 1, "num_processes": 4, "num_threads": 28},
+            runtime={"wall_time_seconds": 120.0},
+            model_size={"global_unknowns": 123456},
+            memory={"peak_total_hwm_bytes": 2 * 1024**3},
+            tables={"stage_timing": "metadata/records/palace_stage_timing.csv"},
+            missing_sources=("metadata/scontrol-job-123.txt",),
+            parse_warnings=("partial Palace log",),
+            metadata={"workflow": "public-test"},
+        )
+
+        assert record_path == (
+            indexed_report_dir / "metadata" / "records" / "palace_resource_record.json"
+        )
+        summary = load_palace_run_summary(indexed_report_dir)
+
+        assert summary.resource["present"] is True
+        assert summary.resource["status"] == "completed"
+        assert summary.resource["launcher"] == {"kind": "slurm"}
+        assert summary.resource["solver"]["palace_git_changeset"] == "v0.16.1"
+        assert summary.resource["allocation"]["num_processes"] == 4
+        assert summary.resource["allocation"]["num_threads"] == 28
+        assert summary.resource["runtime"]["wall_time_seconds"] == pytest.approx(120.0)
+        assert summary.resource["runtime"]["core_hours"] == pytest.approx(
+            120.0 * 112 / 3600
+        )
+        assert summary.resource["model_size"]["global_unknowns"] == 123456
+        assert summary.resource["memory"]["peak_total_hwm_gib"] == pytest.approx(2.0)
+        assert summary.resource["source_count"] == 1
+        assert summary.resource["table_count"] == 1
+        assert summary.resource["missing_source_count"] == 1
+        assert summary.resource["parse_warning_count"] == 1
+        assert summary.resource["metadata"] == {"workflow": "public-test"}
+        assert summary.resource["path"] == str(record_path)
+        assert "palace_resource_record.json" not in summary.results
+        assert summary.to_dict()["resource"]["present"] is True
 
 
 class TestPalaceSweepSummary:
@@ -1033,6 +1084,58 @@ class TestPalaceSweepSummary:
         assert (
             summary.to_dict()["points"][0]["run_summary"]["handoff"]["present"] is True
         )
+
+    def test_load_palace_sweep_summary_includes_resource_records(
+        self,
+        indexed_report_dir: Path,
+    ) -> None:
+        sweep_root = indexed_report_dir / "sweep_resource"
+        point_root = sweep_root / "points" / "gap_6um"
+        _write_sweep_point_artifacts(indexed_report_dir, point_root)
+        write_palace_resource_record(
+            point_root,
+            status="completed",
+            allocation={"nodes": 1, "num_processes": 2, "num_threads": 8},
+            runtime={"wall_time_seconds": 90.0},
+            model_size={"global_unknowns": 654321},
+            memory={"peak_total_hwm_bytes": 1024**3},
+        )
+        points_path = write_palace_sweep_points(
+            sweep_root,
+            [
+                PalaceSweepPointSpec(
+                    point_slug="gap_6um",
+                    parameters={"gap_um": 6.0},
+                    run_dir="points/gap_6um",
+                    resource_record_path=(
+                        "points/gap_6um/metadata/records/palace_resource_record.json"
+                    ),
+                )
+            ],
+            sweep_id="resource_sweep",
+        )
+        payload = json.loads(points_path.read_text())
+        assert payload["points"][0]["resource_record_path"] == (
+            "points/gap_6um/metadata/records/palace_resource_record.json"
+        )
+
+        summary = load_palace_sweep_summary(sweep_root)
+
+        assert summary.resource_present_count == 1
+        point = summary.points[0]
+        assert point.run_summary.resource["present"] is True
+        assert point.run_summary.resource["status"] == "completed"
+        record = summary.to_point_records()[0]
+        assert record["resource_present"] is True
+        assert record["resource_status"] == "completed"
+        assert record["resource_wall_time_seconds"] == pytest.approx(90.0)
+        assert record["resource_core_hours"] == pytest.approx(90.0 * 16 / 3600)
+        assert record["resource_nodes"] == 1
+        assert record["resource_num_processes"] == 2
+        assert record["resource_num_threads"] == 8
+        assert record["resource_global_unknowns"] == 654321
+        assert record["resource_peak_total_hwm_gib"] == pytest.approx(1.0)
+        assert summary.to_dict()["resource_present_count"] == 1
 
     def test_load_palace_sweep_summary_reports_duplicate_point_slugs(
         self,

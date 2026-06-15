@@ -162,6 +162,7 @@ from gsim.palace.results import (
     summarize_surface_q_by_interface,
     summarize_terminal_matrix_history,
     write_palace_handoff_metadata,
+    write_palace_resource_record,
     write_palace_sweep_points,
 )
 
@@ -272,6 +273,7 @@ __all__ = [
     "summarize_surface_q_by_interface",
     "summarize_terminal_matrix_history",
     "write_palace_handoff_metadata",
+    "write_palace_resource_record",
     "write_palace_run_handoff_archive_manifest",
     "write_palace_slurm_sbatch_handoff",
     "write_palace_slurm_sweep_array_handoff",

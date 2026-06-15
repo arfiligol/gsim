@@ -23,6 +23,7 @@ import re
 import warnings
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -60,6 +61,7 @@ _NON_RESULT_ARTIFACT_NAMES = (
     "palace_handoff_metadata.json",
     "palace_sweep_handoff_metadata.json",
     "palace_run_metadata.json",
+    "palace_resource_record.json",
     "palace_handoff_archive_manifest.json",
     "palace_sweep_handoff_archive_manifest.json",
     "port_information.json",
@@ -76,6 +78,7 @@ _SWEEP_POINT_PATH_FIELDS = (
     "material_resolution_path",
     "handoff_metadata_path",
     "runtime_metadata_path",
+    "resource_record_path",
     "port_information_path",
 )
 _REPORT_SOURCE_COLUMNS = ("name", "path", "required", "present", "loaded", "message")
@@ -871,6 +874,7 @@ class PalaceRunSummary:
     material_resolution: dict[str, Any]
     handoff: dict[str, Any]
     runtime: dict[str, Any]
+    resource: dict[str, Any]
 
     @property
     def missing_artifacts(self) -> tuple[str, ...]:
@@ -895,6 +899,7 @@ class PalaceRunSummary:
             "material_resolution": dict(self.material_resolution),
             "handoff": dict(self.handoff),
             "runtime": dict(self.runtime),
+            "resource": dict(self.resource),
             "missing_artifacts": list(self.missing_artifacts),
         }
 
@@ -914,6 +919,7 @@ class PalaceSweepPointSpec:
     material_resolution_path: str | Path | None = None
     handoff_metadata_path: str | Path | None = None
     runtime_metadata_path: str | Path | None = None
+    resource_record_path: str | Path | None = None
     port_information_path: str | Path | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -944,6 +950,11 @@ class PalaceSweepPointSummary:
         summary = self.run_summary
         runtime = summary.runtime
         handoff = summary.handoff
+        resource = summary.resource
+        allocation = _as_mapping(resource.get("allocation"))
+        resource_runtime = _as_mapping(resource.get("runtime"))
+        model_size = _as_mapping(resource.get("model_size"))
+        memory = _as_mapping(resource.get("memory"))
         handoff_profile = _as_mapping(handoff.get("profile"))
         record = {
             "point_slug": self.point_slug,
@@ -967,6 +978,15 @@ class PalaceSweepPointSummary:
             "handoff_script_present": handoff.get("script_present"),
             "handoff_archive_present": handoff.get("archive_present"),
             "handoff_archive_manifest_present": handoff.get("archive_manifest_present"),
+            "resource_present": resource.get("present") is True,
+            "resource_status": resource.get("status"),
+            "resource_wall_time_seconds": resource_runtime.get("wall_time_seconds"),
+            "resource_core_hours": resource_runtime.get("core_hours"),
+            "resource_nodes": allocation.get("nodes"),
+            "resource_num_processes": allocation.get("num_processes"),
+            "resource_num_threads": allocation.get("num_threads"),
+            "resource_peak_total_hwm_gib": memory.get("peak_total_hwm_gib"),
+            "resource_global_unknowns": model_size.get("global_unknowns"),
             "config_material_count": summary.config.get("material_count"),
             "mesh_manifest_entry_count": summary.mesh_manifest.get("entry_count"),
             "index_map_entry_count": summary.index_map.get("entry_count"),
@@ -1040,6 +1060,13 @@ class PalaceSweepSummary:
         )
 
     @property
+    def resource_present_count(self) -> int:
+        """Points with a post-run resource record sidecar."""
+        return sum(
+            point.run_summary.resource.get("present") is True for point in self.points
+        )
+
+    @property
     def problem_types(self) -> tuple[str, ...]:
         """Sorted Palace problem types observed across point summaries."""
         return tuple(
@@ -1092,6 +1119,7 @@ class PalaceSweepSummary:
             "duplicate_point_slugs": list(self.duplicate_point_slugs),
             "complete_point_count": self.complete_point_count,
             "runtime_present_count": self.runtime_present_count,
+            "resource_present_count": self.resource_present_count,
             "problem_types": list(self.problem_types),
             "total_runtime_elapsed_seconds": self.total_runtime_elapsed_seconds,
             "parse_warnings": list(self.parse_warnings),
@@ -1991,6 +2019,7 @@ def load_palace_run_summary(
     material_resolution_path = _find_material_resolution_json(source)
     handoff_metadata_path = _find_handoff_metadata_json(source)
     runtime_metadata_path = _find_runtime_metadata_json(source)
+    resource_record_path = _find_resource_record_json(source)
     mesh_path = _find_mesh_file(source)
 
     artifact_paths = {
@@ -2021,7 +2050,54 @@ def load_palace_run_summary(
         ),
         handoff=_summarize_handoff_metadata_json(handoff_metadata_path),
         runtime=_summarize_runtime_metadata_json(runtime_metadata_path),
+        resource=_summarize_resource_record_json(resource_record_path),
     )
+
+
+def write_palace_resource_record(
+    source: str | Path,
+    *,
+    status: str = "completed",
+    sources: Mapping[str, Any] | None = None,
+    launcher: Mapping[str, Any] | None = None,
+    solver: Mapping[str, Any] | None = None,
+    allocation: Mapping[str, Any] | None = None,
+    runtime: Mapping[str, Any] | None = None,
+    model_size: Mapping[str, Any] | None = None,
+    memory: Mapping[str, Any] | None = None,
+    tables: Mapping[str, Any] | None = None,
+    missing_sources: Iterable[str] = (),
+    parse_warnings: Iterable[str] = (),
+    metadata: Mapping[str, Any] | None = None,
+    filename: str = "metadata/records/palace_resource_record.json",
+) -> Path:
+    """Write a Palace post-run resource record sidecar.
+
+    The record is measured or caller-supplied post-run evidence. It is separate
+    from ``palace_run_metadata.json`` execution metadata and from dry-run
+    handoff intent.
+    """
+    record_path = _resource_record_path(source, filename=filename)
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "created_at_utc": datetime.now(UTC).isoformat(timespec="seconds"),
+        "status": str(status),
+        "sources": _json_ready(dict(sources or {})),
+        "launcher": _json_ready(dict(launcher or {})),
+        "solver": _json_ready(dict(solver or {})),
+        "allocation": _json_ready(dict(allocation or {})),
+        "runtime": _json_ready(dict(runtime or {})),
+        "model_size": _json_ready(dict(model_size or {})),
+        "memory": _json_ready(dict(memory or {})),
+        "tables": _json_ready(dict(tables or {})),
+        "missing_sources": [str(value) for value in missing_sources],
+        "parse_warnings": [str(value) for value in parse_warnings],
+        "metadata": _json_ready(dict(metadata or {})),
+    }
+
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return record_path
 
 
 def write_palace_handoff_metadata(
@@ -5379,6 +5455,11 @@ def _handoff_metadata_path(source: str | Path, *, filename: str) -> Path:
     return path if path.suffix.lower() == ".json" else path / filename
 
 
+def _resource_record_path(source: str | Path, *, filename: str) -> Path:
+    path = Path(source)
+    return path if path.suffix.lower() == ".json" else path / filename
+
+
 def _sweep_point_spec_row(
     point: PalaceSweepPointSpec | Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -5654,6 +5735,14 @@ def _palace_sweep_point_source(
     )
     _add_sweep_source_file(
         source,
+        "palace_resource_record.json",
+        _resolve_sweep_path(sweep_root, point_spec.get("resource_record_path")),
+        run_dir / "metadata" / "records" / "palace_resource_record.json",
+        run_dir / "palace_resource_record.json",
+        result_dir / "palace_resource_record.json",
+    )
+    _add_sweep_source_file(
+        source,
         "port_information.json",
         _resolve_sweep_path(
             sweep_root,
@@ -5833,6 +5922,11 @@ def _find_runtime_metadata_json(source: str | Path | dict) -> Path | None:
     return _find_sidecar_artifact(source, "palace_run_metadata.json")
 
 
+def _find_resource_record_json(source: str | Path | dict) -> Path | None:
+    """Search common local/cloud locations for post-run resource records."""
+    return _find_sidecar_artifact(source, "palace_resource_record.json")
+
+
 def _find_handoff_metadata_json(source: str | Path | dict) -> Path | None:
     """Search common local/cloud locations for handoff metadata."""
     return _find_sidecar_artifact(source, "palace_handoff_metadata.json")
@@ -5858,6 +5952,9 @@ def _find_sidecar_artifact(source: str | Path | dict, name: str) -> Path | None:
             root / name,
             root.parent / name,
             root.parent.parent / name,
+            root / "metadata" / "records" / name,
+            root.parent / "metadata" / "records" / name,
+            root.parent.parent / "metadata" / "records" / name,
             root / "input" / name,
             root.parent / "input" / name,
             root.parent.parent / "input" / name,
@@ -6098,6 +6195,93 @@ def _summarize_runtime_metadata_json(path: Path | None) -> dict[str, Any]:
     }
 
 
+def _summarize_resource_record_json(path: Path | None) -> dict[str, Any]:
+    if path is None or not path.exists():
+        return {"present": False}
+    data = json.loads(path.read_text())
+    sources = _as_mapping(data.get("sources"))
+    tables = _as_mapping(data.get("tables"))
+    runtime = _as_mapping(data.get("runtime"))
+    allocation = _as_mapping(data.get("allocation"))
+    model_size = _as_mapping(data.get("model_size"))
+    memory = _as_mapping(data.get("memory"))
+    _normalize_resource_runtime(runtime, allocation)
+    _normalize_resource_memory(memory)
+    missing_sources = [str(value) for value in data.get("missing_sources") or []]
+    parse_warnings = [str(value) for value in data.get("parse_warnings") or []]
+    return {
+        "present": True,
+        "schema_version": data.get("schema_version"),
+        "created_at_utc": data.get("created_at_utc"),
+        "status": data.get("status"),
+        "launcher": _as_mapping(data.get("launcher")),
+        "solver": _as_mapping(data.get("solver")),
+        "allocation": allocation,
+        "runtime": runtime,
+        "model_size": model_size,
+        "memory": memory,
+        "sources": sources,
+        "source_count": len(sources),
+        "tables": tables,
+        "table_count": len(tables),
+        "missing_sources": missing_sources,
+        "missing_source_count": len(missing_sources),
+        "parse_warnings": parse_warnings,
+        "parse_warning_count": len(parse_warnings),
+        "metadata": _as_mapping(data.get("metadata")),
+        "path": str(path),
+    }
+
+
+def _normalize_resource_runtime(
+    runtime: dict[str, Any],
+    allocation: Mapping[str, Any],
+) -> None:
+    wall_time_seconds = _first_optional_float(
+        runtime,
+        ("wall_time_seconds", "elapsed_seconds", "total_elapsed_seconds"),
+    )
+    if wall_time_seconds is not None and runtime.get("wall_time_seconds") is None:
+        runtime["wall_time_seconds"] = wall_time_seconds
+    if runtime.get("core_hours") is None and wall_time_seconds is not None:
+        cores = _resource_core_count(allocation)
+        if cores is not None:
+            runtime["core_hours"] = wall_time_seconds * cores / 3600.0
+
+
+def _normalize_resource_memory(memory: dict[str, Any]) -> None:
+    if memory.get("peak_total_hwm_gib") is None:
+        peak_bytes = _first_optional_float(
+            memory,
+            ("peak_total_hwm_bytes", "peak_total_memory_bytes"),
+        )
+        if peak_bytes is not None:
+            memory["peak_total_hwm_gib"] = peak_bytes / (1024.0**3)
+
+
+def _resource_core_count(allocation: Mapping[str, Any]) -> float | None:
+    for key in ("cores", "num_cpus"):
+        value = _optional_float(allocation.get(key))
+        if value is not None:
+            return value
+    num_processes = _optional_float(allocation.get("num_processes"))
+    num_threads = _optional_float(allocation.get("num_threads"))
+    if num_processes is not None and num_threads is not None:
+        return num_processes * num_threads
+    return None
+
+
+def _first_optional_float(
+    mapping: Mapping[str, Any],
+    keys: Iterable[str],
+) -> float | None:
+    for key in keys:
+        value = _optional_float(mapping.get(key))
+        if value is not None:
+            return value
+    return None
+
+
 def _list_of_mappings(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
@@ -6132,6 +6316,18 @@ def _optional_int(value: Any) -> int | None:
     if not np.isfinite(numeric):
         return None
     return int(value)
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(numeric):
+        return None
+    return numeric
 
 
 def _optional_str(value: Any) -> str | None:
