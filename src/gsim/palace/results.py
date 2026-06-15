@@ -883,6 +883,40 @@ class PalaceSweepPointSummary:
     source: dict[str, Path] | Path
     run_summary: PalaceRunSummary
 
+    def to_record(self) -> dict[str, Any]:
+        """Return one flat, table-friendly point summary row."""
+        summary = self.run_summary
+        runtime = summary.runtime
+        record = {
+            "point_slug": self.point_slug,
+            "problem_type": summary.problem_type,
+            "complete": not summary.missing_artifacts,
+            "missing_artifact_count": len(summary.missing_artifacts),
+            "missing_artifacts": ",".join(summary.missing_artifacts),
+            "core_artifact_count": _count_present_artifacts(summary.artifacts),
+            "core_artifact_bytes": _sum_artifact_bytes(summary.artifacts),
+            "result_count": _count_present_artifacts(summary.results),
+            "result_bytes": _sum_artifact_bytes(summary.results),
+            "runtime_present": runtime.get("present") is True,
+            "runtime_status": runtime.get("status"),
+            "runtime_return_code": runtime.get("return_code"),
+            "runtime_elapsed_seconds": runtime.get("elapsed_seconds"),
+            "runtime_output_count": runtime.get("output_count"),
+            "runtime_output_bytes": runtime.get("output_bytes"),
+            "config_material_count": summary.config.get("material_count"),
+            "mesh_manifest_entry_count": summary.mesh_manifest.get("entry_count"),
+            "index_map_entry_count": summary.index_map.get("entry_count"),
+            "material_resolution_material_count": summary.material_resolution.get(
+                "material_count"
+            ),
+            "material_resolution_interface_count": summary.material_resolution.get(
+                "interface_count"
+            ),
+        }
+        for key, value in sorted(self.parameters.items()):
+            record[f"parameter_{_record_column_key(key)}"] = _record_value(value)
+        return record
+
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-friendly sweep point summary."""
         source: dict[str, str] | str
@@ -895,6 +929,7 @@ class PalaceSweepPointSummary:
             "parameters": dict(self.parameters),
             "source": source,
             "run_summary": self.run_summary.to_dict(),
+            "record": self.to_record(),
             "missing_artifacts": list(self.run_summary.missing_artifacts),
         }
 
@@ -951,6 +986,22 @@ class PalaceSweepSummary:
             return None
         return float(sum(float(value) for value in elapsed))
 
+    def to_point_records(self) -> list[dict[str, Any]]:
+        """Return flat, table-friendly point records for this sweep."""
+        return [
+            {
+                "sweep_id": self.sweep_id,
+                **point.to_record(),
+            }
+            for point in self.points
+        ]
+
+    def to_dataframe(self):
+        """Return sweep point records as a pandas DataFrame."""
+        import pandas as pd
+
+        return pd.DataFrame.from_records(self.to_point_records())
+
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-friendly sweep summary."""
         return {
@@ -963,6 +1014,7 @@ class PalaceSweepSummary:
             "problem_types": list(self.problem_types),
             "total_runtime_elapsed_seconds": self.total_runtime_elapsed_seconds,
             "parse_warnings": list(self.parse_warnings),
+            "point_records": self.to_point_records(),
             "points": [point.to_dict() for point in self.points],
         }
 
@@ -5103,6 +5155,25 @@ def _sweep_point_slug(point_spec: dict[str, Any], index: int) -> str:
         or f"point_{index}"
     )
     return str(value)
+
+
+def _count_present_artifacts(artifacts: dict[str, PalaceArtifactStatus]) -> int:
+    return sum(artifact.present for artifact in artifacts.values())
+
+
+def _sum_artifact_bytes(artifacts: dict[str, PalaceArtifactStatus]) -> int:
+    return sum(artifact.bytes for artifact in artifacts.values() if artifact.present)
+
+
+def _record_column_key(value: object) -> str:
+    key = re.sub(r"[^0-9A-Za-z_]+", "_", str(value)).strip("_").lower()
+    return key or "value"
+
+
+def _record_value(value: Any) -> Any:
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return json.dumps(value, sort_keys=True)
 
 
 def _palace_sweep_point_source(

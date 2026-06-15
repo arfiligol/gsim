@@ -803,7 +803,10 @@ class TestPalaceSweepSummary:
                     "points": [
                         {
                             "point_slug": "gap_6um",
-                            "parameters": {"gap_um": 6.0},
+                            "parameters": {
+                                "gap_um": 6.0,
+                                "solver": {"order": 2},
+                            },
                             "run_dir": "points/gap_6um",
                         }
                     ],
@@ -822,13 +825,31 @@ class TestPalaceSweepSummary:
         assert summary.total_runtime_elapsed_seconds == pytest.approx(2.5)
         point = summary.points[0]
         assert point.point_slug == "gap_6um"
-        assert point.parameters == {"gap_um": 6.0}
+        assert point.parameters == {"gap_um": 6.0, "solver": {"order": 2}}
         assert point.run_summary.results["domain-E.csv"].present
         assert point.run_summary.runtime["status"] == "completed"
 
+        records = summary.to_point_records()
+        assert records[0]["sweep_id"] == "gap_sweep"
+        assert records[0]["point_slug"] == "gap_6um"
+        assert records[0]["parameter_gap_um"] == 6.0
+        assert records[0]["parameter_solver"] == '{"order": 2}'
+        assert records[0]["problem_type"] == "Eigenmode"
+        assert records[0]["complete"] is True
+        assert records[0]["runtime_elapsed_seconds"] == pytest.approx(2.5)
+        assert records[0]["result_count"] == 3
+        assert records[0]["result_bytes"] > 0
+        assert records[0]["core_artifact_count"] == 5
+
+        frame = summary.to_dataframe()
+        assert frame.loc[0, "parameter_gap_um"] == 6.0
+        assert bool(frame.loc[0, "runtime_present"]) is True
+
         as_dict = summary.to_dict()
         assert as_dict["point_count"] == 1
+        assert as_dict["point_records"][0]["parameter_gap_um"] == 6.0
         assert as_dict["points"][0]["missing_artifacts"] == []
+        assert as_dict["points"][0]["record"]["parameter_gap_um"] == 6.0
 
     def test_load_palace_sweep_summary_accepts_split_point_and_result_dirs(
         self,
