@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -213,6 +214,11 @@ class TestWaitForResultsSingle:
             job_def_name="prod-palace-simulation",
             status=SimStatus.COMPLETED,
             exit_code=0,
+            started_at=datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+            finished_at=datetime(2026, 1, 1, 0, 1, 5, tzinfo=UTC),
+            output_size_bytes=4,
+            requested_cpu=4,
+            requested_memory_mb=8192,
         )
         mock_sim.SimStatus = SimStatus
         mock_sim.get_job.return_value = fake_job
@@ -226,6 +232,27 @@ class TestWaitForResultsSingle:
             result = wait_for_results("job-1", verbose="quiet", parent_dir=tmp_path)
             assert result["parsed"] is True
             assert "result.csv" in result["files"]
+            assert "palace_run_metadata.json" in result["files"]
+            metadata = json.loads(
+                result["files"]["palace_run_metadata.json"].read_text()
+            )
+            assert metadata["schema_version"] == 1
+            assert metadata["status"] == "completed"
+            assert metadata["return_code"] == 0
+            assert metadata["elapsed_seconds"] == 65.0
+            assert metadata["launcher"] == {
+                "kind": "gdsfactoryplus_cloud",
+                "solver": "palace",
+                "job_name": "palace-done",
+                "job_definition": "prod-palace-simulation",
+            }
+            assert metadata["resources"] == {
+                "requested_cpu": 4,
+                "requested_memory_mb": 8192,
+            }
+            assert metadata["cloud"]["job_id"] == "job-1"
+            assert metadata["cloud"]["output_size_bytes"] == 4
+            assert metadata["outputs"]["result.csv"]["bytes"] == 4
         finally:
             del _RESULT_PARSERS["palace"]
 
@@ -356,7 +383,11 @@ class TestRunSimulationBackwardCompat:
         mock_sim.start_simulation.return_value = started_job
 
         finished_job = FakeJob(
-            id="job-bc", job_name="palace-bc", status=SimStatus.COMPLETED
+            id="job-bc",
+            job_name="palace-bc",
+            status=SimStatus.COMPLETED,
+            started_at=datetime.now(UTC),
+            finished_at=datetime.now(UTC) + timedelta(seconds=3),
         )
         mock_sim.wait_for_simulation.return_value = finished_job
 
@@ -372,6 +403,11 @@ class TestRunSimulationBackwardCompat:
         )
         assert result.job_name == "palace-bc"
         assert "result.csv" in result.files
+        assert "palace_run_metadata.json" in result.files
+        metadata = json.loads(result.files["palace_run_metadata.json"].read_text())
+        assert metadata["launcher"]["kind"] == "gdsfactoryplus_cloud"
+        assert metadata["launcher"]["solver"] == "palace"
+        assert metadata["elapsed_seconds"] == pytest.approx(3.0)
 
 
 # ---------------------------------------------------------------------------
