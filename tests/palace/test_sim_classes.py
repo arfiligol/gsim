@@ -59,6 +59,28 @@ def test_port_lowering_api_stays_in_owner_modules() -> None:
     assert all(not hasattr(palace, name) for name in root_only_names)
 
 
+def test_config_models_stay_in_models_owner_module() -> None:
+    import gsim.palace as palace
+    import gsim.palace.models as models
+
+    owner_model_names = (
+        "DrivenConfig",
+        "EigenmodeConfig",
+        "ElectrostaticConfig",
+        "GeometryConfig",
+        "MagnetostaticConfig",
+        "MaterialConfig",
+        "NumericalConfig",
+        "PECBlockConfig",
+        "TransientConfig",
+    )
+    assert all(hasattr(models, name) for name in owner_model_names)
+    assert all(not hasattr(palace, name) for name in owner_model_names)
+    assert palace.MeshConfig is models.MeshConfig
+    assert palace.SimulationResult is models.SimulationResult
+    assert palace.ValidationResult is models.ValidationResult
+
+
 class TestDrivenSimValidation:
     """Test DrivenSim validation logic."""
 
