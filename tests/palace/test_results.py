@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
+from textwrap import dedent
 
 import numpy as np
 import pytest
@@ -36,6 +37,7 @@ from gsim.palace.results import (
     load_surface_q_summary,
     load_terminal_matrix,
     load_terminal_matrix_history,
+    parse_palace_resource_log,
     summarize_domain_loss,
     summarize_eigenmode_history,
     summarize_loss_budget,
@@ -44,7 +46,86 @@ from gsim.palace.results import (
     summarize_terminal_matrix_history,
     write_palace_handoff_metadata,
     write_palace_resource_record,
+    write_palace_resource_record_from_log,
     write_palace_sweep_points,
+)
+
+PALACE_RESOURCE_LOG = (
+    dedent(
+        """
+Git changeset ID: v0.16.1
+Running with 4 MPI processes, 28 OpenMP threads
+Device configuration: omp,cpu
+Memory configuration: host-std
+libCEED backend: /cpu/self/xsmm/blocked
+
+Cumulative timing statistics:
+
+Elapsed Time Report (s)           Min.        Max.        Avg.
+==============================================================
+Initialization                   1.000       1.100       1.050
+Operator Construction            2.000       2.200       2.100
+Disk IO                          0.400       0.500       0.450
+--------------------------------------------------------------
+Total                           58.573      58.580      58.578
+
+Peak Memory                   Per-Node       Total   Total HWM
+==============================================================
+Initialization                   79.1M       79.1M       79.1M
+Operator Construction             1.6G        1.6G        2.0G
+Disk IO                         216.9M      216.9M        2.1G
+--------------------------------------------------------------
+Total                            10.8G       10.8G       10.8G
+Estimated peak per-rank memory usage is: Min. 2.7G, Max. 2.7G, Avg. 2.7G, Total 10.9G
+Estimated peak per-node memory usage is: Min. 10.9G, Max. 10.9G, Avg. 10.9G, Total 10.9G
+
+Adaptive mesh refinement (AMR) iteration 1:
+ Indicator norm = 3.158e-01, global unknowns = 887970
+ Max. iterations = 15, tol. = 1.000e-02, max. size = 5000000
+ Marked 12568/664696 elements for refinement (70.00% of the error, theta = 0.70)
+ Conforming mesh refinement added 659265 elements (initial = 664696, final = 1323961)
+
+Proceeding with solve/estimate iteration 2...
+
+Elapsed Time Report (s)           Min.        Max.        Avg.
+==============================================================
+Initialization                   1.000       1.100       1.050
+Operator Construction            3.000       3.200       3.100
+Disk IO                          0.400       0.500       0.450
+--------------------------------------------------------------
+Total                          120.000     121.000     120.500
+
+Peak Memory                   Per-Node       Total   Total HWM
+==============================================================
+Initialization                   79.1M       79.1M       79.1M
+Operator Construction             2.6G        2.6G        3.0G
+Disk IO                         216.9M      216.9M        3.1G
+--------------------------------------------------------------
+Total                            20.8G       20.8G       20.8G
+Estimated peak per-rank memory usage is: Min. 5.2G, Max. 5.2G, Avg. 5.2G, Total 20.9G
+Estimated peak per-node memory usage is: Min. 20.9G, Max. 20.9G, Avg. 20.9G, Total 20.9G
+
+Completed 1 iterations of adaptive mesh refinement (AMR):
+ Indicator norm = 1.522e-01, global unknowns = 10718029
+ Max. iterations = 15, tol. = 1.000e-02, max. size = 5000000
+
+"""
+    )
+    + "-" * 66
+    + " PETSc Performance Summary: "
+    + "-" * 66
+    + "\n\n"
+    + (
+        "/opt/private-palace/bin/palace-x86_64.bin on a  named private-node "
+        "with 4 processes, by private-user on Thu May 21 18:41:59 2026\n"
+    )
+    + """
+Using 28 OpenMP threads
+Using PETSc Release Version 3.24.3, unknown
+
+                         Max       Max/Min     Avg       Total
+Time (sec):           1.029e+03     1.000   1.029e+03
+"""
 )
 
 
@@ -705,6 +786,34 @@ class TestGetPortMap:
 class TestPalaceRunSummary:
     """Tests for reusable Palace run artifact summaries."""
 
+    def test_parse_palace_resource_log_extracts_sanitized_tables(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        log_path = tmp_path / "palace-public.log"
+        log_path.write_text(PALACE_RESOURCE_LOG)
+
+        record = parse_palace_resource_log(log_path)
+
+        assert record["solver"]["palace_git_changeset"] == "v0.16.1"
+        assert record["solver"]["petsc_version"] == "3.24.3"
+        assert record["allocation"]["num_processes"] == 4
+        assert record["allocation"]["num_threads"] == 28
+        assert record["runtime"]["wall_time_seconds"] == pytest.approx(121.0)
+        assert record["model_size"]["completed_amr_iterations"] == 1
+        assert record["model_size"]["global_unknowns"] == 10718029
+        assert record["memory"]["peak_total_hwm_bytes"] == pytest.approx(20.8 * 1024**3)
+        assert record["estimated_peak_memory"]["node"]["total"] == "20.9G"
+        assert record["petsc_summary"]["processes"] == 4
+        assert len(record["amr_passes"]) == 1
+        assert record["amr_passes"][0]["global_unknowns"] == 887970
+        assert len(record["stage_timing"]) == 8
+        assert len(record["stage_memory"]) == 8
+        serialized = json.dumps(record)
+        assert "private-node" not in serialized
+        assert "private-user" not in serialized
+        assert "/opt/private-palace" not in serialized
+
     def test_load_palace_run_summary_records_handoff_and_results(
         self,
         indexed_report_dir: Path,
@@ -905,6 +1014,64 @@ class TestPalaceRunSummary:
         assert summary.resource["path"] == str(record_path)
         assert "palace_resource_record.json" not in summary.results
         assert summary.to_dict()["resource"]["present"] is True
+
+    def test_write_palace_resource_record_from_log_writes_table_sidecars(
+        self,
+        indexed_report_dir: Path,
+    ) -> None:
+        log_path = indexed_report_dir / "logs" / "palace-public.log"
+        log_path.parent.mkdir()
+        log_path.write_text(PALACE_RESOURCE_LOG)
+
+        record_path = write_palace_resource_record_from_log(
+            indexed_report_dir,
+            log_path,
+            launcher={"kind": "slurm"},
+            allocation={"nodes": 1},
+            metadata={"workflow": "public-test"},
+        )
+
+        assert record_path == (
+            indexed_report_dir / "metadata" / "records" / "palace_resource_record.json"
+        )
+        records_dir = indexed_report_dir / "metadata" / "records"
+        assert (records_dir / "palace_amr_passes.csv").is_file()
+        assert (records_dir / "palace_stage_timing.csv").is_file()
+        assert (records_dir / "palace_stage_memory.csv").is_file()
+        assert (
+            "Operator Construction"
+            in (records_dir / "palace_stage_timing.csv").read_text()
+        )
+
+        summary = load_palace_run_summary(indexed_report_dir)
+
+        assert summary.resource["present"] is True
+        assert summary.resource["status"] == "completed"
+        assert summary.resource["launcher"] == {"kind": "slurm"}
+        assert summary.resource["solver"]["palace_git_changeset"] == "v0.16.1"
+        assert summary.resource["solver"]["petsc_version"] == "3.24.3"
+        assert summary.resource["allocation"]["nodes"] == 1
+        assert summary.resource["allocation"]["num_processes"] == 4
+        assert summary.resource["allocation"]["num_threads"] == 28
+        assert summary.resource["runtime"]["wall_time_seconds"] == pytest.approx(121.0)
+        assert summary.resource["runtime"]["core_hours"] == pytest.approx(
+            121.0 * 112 / 3600
+        )
+        assert summary.resource["model_size"]["global_unknowns"] == 10718029
+        assert summary.resource["memory"]["peak_total_hwm_gib"] == pytest.approx(20.8)
+        assert summary.resource["source_count"] == 1
+        assert summary.resource["sources"]["palace_log"]["path"] == (
+            "logs/palace-public.log"
+        )
+        assert summary.resource["table_count"] == 3
+        assert summary.resource["tables"]["stage_timing"]["path"] == (
+            "metadata/records/palace_stage_timing.csv"
+        )
+        assert summary.resource["tables"]["stage_timing"]["row_count"] == 8
+        serialized = json.dumps(summary.resource)
+        assert "private-node" not in serialized
+        assert "private-user" not in serialized
+        assert "/opt/private-palace" not in serialized
 
 
 class TestPalaceSweepSummary:

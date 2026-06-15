@@ -155,6 +155,7 @@ from gsim.palace.results import (
     load_surface_q_summary,
     load_terminal_matrix,
     load_terminal_matrix_history,
+    parse_palace_resource_log,
     summarize_domain_loss,
     summarize_eigenmode_history,
     summarize_loss_budget,
@@ -163,6 +164,7 @@ from gsim.palace.results import (
     summarize_terminal_matrix_history,
     write_palace_handoff_metadata,
     write_palace_resource_record,
+    write_palace_resource_record_from_log,
     write_palace_sweep_points,
 )
 
@@ -257,6 +259,7 @@ __all__ = [
     "load_terminal_matrix",
     "load_terminal_matrix_history",
     "parse_layer_stack",
+    "parse_palace_resource_log",
     "plot_cross_section",
     "plot_mesh",
     "plot_stack",
@@ -274,6 +277,7 @@ __all__ = [
     "summarize_terminal_matrix_history",
     "write_palace_handoff_metadata",
     "write_palace_resource_record",
+    "write_palace_resource_record_from_log",
     "write_palace_run_handoff_archive_manifest",
     "write_palace_slurm_sbatch_handoff",
     "write_palace_slurm_sweep_array_handoff",
