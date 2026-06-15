@@ -394,6 +394,30 @@ def resolve_palace_slurm_profile(
     )
 
 
+def load_palace_slurm_profile_catalog(
+    path: str | Path,
+) -> dict[str, PalaceSlurmProfileSpec]:
+    """Load a caller-owned Slurm profile catalog from JSON.
+
+    The JSON file may be either a direct mapping of profile names to profile
+    specs or an envelope with ``schema_version: 1`` and a ``profiles`` mapping.
+    """
+    catalog_path = Path(path)
+    if catalog_path.suffix.lower() != ".json":
+        raise ValueError("Slurm profile catalogs must be JSON files")
+    if not catalog_path.is_file():
+        raise FileNotFoundError(catalog_path)
+
+    payload = json.loads(catalog_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, Mapping):
+        raise TypeError("Slurm profile catalog must contain a JSON object")
+    profiles_payload = _slurm_profile_catalog_profiles(payload)
+    return {
+        str(name): _normalize_slurm_profile_spec(str(name), profile)
+        for name, profile in profiles_payload.items()
+    }
+
+
 def write_palace_slurm_sbatch_handoff(
     source: str | Path,
     spec: PalaceSlurmSbatchSpec,
@@ -880,6 +904,27 @@ def _normalize_slurm_profile_resources(
         msg += ", ".join(str(field) for field in unknown_fields)
         raise ValueError(msg)
     return PalaceSlurmResourceSpec(**dict(resources))
+
+
+def _slurm_profile_catalog_profiles(
+    payload: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    if "schema_version" not in payload and "profiles" not in payload:
+        return payload
+
+    schema_version = payload.get("schema_version")
+    if schema_version != 1:
+        raise ValueError("Slurm profile catalog schema_version must be 1")
+    allowed_fields = {"metadata", "profiles", "schema_version"}
+    unknown_fields = sorted(set(payload) - allowed_fields)
+    if unknown_fields:
+        msg = "Unknown Slurm profile catalog field(s): "
+        msg += ", ".join(str(field) for field in unknown_fields)
+        raise ValueError(msg)
+    profiles = payload.get("profiles")
+    if not isinstance(profiles, Mapping):
+        raise TypeError("Slurm profile catalog field 'profiles' must be a mapping")
+    return profiles
 
 
 def _sweep_point_specs(payload: Any) -> list[Mapping[str, Any]]:

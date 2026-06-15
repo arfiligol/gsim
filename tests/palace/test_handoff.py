@@ -13,6 +13,7 @@ from gsim.palace import (
     PalaceSlurmSweepArraySpec,
     PalaceSweepPointSpec,
     load_palace_run_summary,
+    load_palace_slurm_profile_catalog,
     load_palace_sweep_summary,
     resolve_palace_slurm_profile,
     write_palace_run_handoff_archive_manifest,
@@ -90,6 +91,103 @@ def test_resolve_palace_slurm_profile_accepts_spec_objects() -> None:
         "name": "public-slurm:cpu",
         "source": "caller-supplied",
     }
+
+
+def test_load_palace_slurm_profile_catalog_accepts_envelope(
+    tmp_path: Path,
+) -> None:
+    catalog_path = tmp_path / "profiles.json"
+    catalog_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "metadata": {"owner": "public-test"},
+                "profiles": {
+                    "public-slurm:cpu": {
+                        "source": "caller-supplied test catalog",
+                        "resources": {
+                            "account": "public_alloc",
+                            "partition": "cpu",
+                            "wall_time": "00:30:00",
+                        },
+                    }
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    catalog = load_palace_slurm_profile_catalog(catalog_path)
+    resolution = resolve_palace_slurm_profile(
+        catalog,
+        "public-slurm:cpu",
+        resource_overrides={"ntasks_per_node": 4},
+    )
+
+    assert set(catalog) == {"public-slurm:cpu"}
+    assert catalog["public-slurm:cpu"].resources.wall_time == "00:30:00"
+    assert resolution.resources.num_processes == 4
+    assert resolution.profile == {
+        "name": "public-slurm:cpu",
+        "source": "caller-supplied test catalog",
+        "resource_overrides": {"ntasks_per_node": 4},
+    }
+
+
+def test_load_palace_slurm_profile_catalog_accepts_direct_mapping(
+    tmp_path: Path,
+) -> None:
+    catalog_path = tmp_path / "profiles.json"
+    catalog_path.write_text(
+        json.dumps(
+            {
+                "public-slurm:cpu": {
+                    "resources": {
+                        "account": "public_alloc",
+                        "partition": "cpu",
+                        "wall_time": "00:30:00",
+                    }
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    catalog = load_palace_slurm_profile_catalog(catalog_path)
+
+    assert catalog["public-slurm:cpu"].source == "caller-supplied"
+    assert catalog["public-slurm:cpu"].resources.partition == "cpu"
+
+
+def test_load_palace_slurm_profile_catalog_validates_inputs(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="JSON"):
+        load_palace_slurm_profile_catalog(tmp_path / "profiles.yml")
+
+    catalog_path = tmp_path / "profiles.json"
+    catalog_path.write_text(
+        json.dumps({"schema_version": 2, "profiles": {}}) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="schema_version"):
+        load_palace_slurm_profile_catalog(catalog_path)
+
+    catalog_path.write_text(
+        json.dumps({"schema_version": 1, "profile": {}}) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="Unknown Slurm profile catalog field"):
+        load_palace_slurm_profile_catalog(catalog_path)
+
+    catalog_path.write_text(
+        json.dumps({"schema_version": 1, "profiles": []}) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(TypeError, match="profiles"):
+        load_palace_slurm_profile_catalog(catalog_path)
 
 
 def test_resolve_palace_slurm_profile_validates_inputs() -> None:
