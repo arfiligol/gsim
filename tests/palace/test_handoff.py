@@ -16,6 +16,7 @@ from gsim.palace import (
     load_palace_run_summary,
     load_palace_slurm_profile_catalog,
     load_palace_sweep_summary,
+    palace_slurm_solver_config_hints,
     resolve_palace_slurm_profile,
     write_palace_run_handoff_archive_manifest,
     write_palace_slurm_sbatch_handoff,
@@ -72,6 +73,7 @@ def test_resolve_palace_slurm_profile_accepts_mapping_and_overrides() -> None:
         "petsc_options": (),
     }
     assert resolution.solver == {"device": "CPU"}
+    assert resolution.to_palace_config_hints() == {"Solver": {"Device": "CPU"}}
     assert resolution.profile == {
         "name": "public-slurm:cpu",
         "source": "caller-supplied test fixture",
@@ -88,6 +90,18 @@ def test_resolve_palace_slurm_profile_accepts_mapping_and_overrides() -> None:
             "wall_time": "01:00:00",
         },
     }
+
+
+def test_palace_slurm_solver_config_hints_maps_solver_metadata() -> None:
+    assert palace_slurm_solver_config_hints(
+        {"device": "GPU", "backend": "/gpu/cuda"}
+    ) == {
+        "Device": "GPU",
+        "Backend": "/gpu/cuda",
+    }
+    assert palace_slurm_solver_config_hints({"device": None, "backend": None}) == {}
+    with pytest.raises(ValueError, match="Unknown Slurm profile solver field"):
+        palace_slurm_solver_config_hints({"runtime": "cuda"})
 
 
 def test_resolve_palace_slurm_profile_accepts_spec_objects() -> None:

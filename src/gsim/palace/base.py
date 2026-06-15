@@ -1384,6 +1384,7 @@ class PalaceSimMixin:
         reuse_postprocessing: bool = True,
         write_artifacts: bool = True,
         material_overlay: Any | None = None,
+        hints: dict[str, Any] | None = None,
     ) -> Path:
         """Write Palace config.json after mesh generation.
 
@@ -1407,6 +1408,7 @@ class PalaceSimMixin:
             material_overlay: Optional PDK material overlay path, raw overlay
                 mapping, or loaded overlay mapping used to resolve Palace
                 material values without mutating the source layer stack.
+            hints: Optional Palace config fragments merged into ``config.json``.
 
         Returns:
             Path to the generated config.json
@@ -1456,57 +1458,65 @@ class PalaceSimMixin:
         stack = self._resolve_stack()
         electrostatic_config = getattr(self, "electrostatic", None)
         terminals = getattr(self, "terminals", None)
-        config_path = gen_write_config(
-            mesh_result=self._last_mesh_result,
-            stack=stack,
-            ports=self._last_ports,
-            simulation_type=self.simulation_type,
-            eigenmode_config=self.eigenmode,
-            driven_config=self.driven,
-            numerical_config=self.numerical,
-            absorbing_boundary=self.absorbing_boundary,
-            hints=self._hints,
-            electrostatic_config=electrostatic_config,
-            terminals=terminals or [],
-            postprocessing_config=domain_postprocessing_config,
-            boundary_postprocessing_config=boundary_postprocessing_config,
-            material_overlay=material_overlay,
-        )
-
-        if write_artifacts:
-            self._last_mesh_result.manifest.write_json(
-                config_path.parent / "mesh_manifest.json"
+        config_hints = dict(self._hints)
+        if hints:
+            config_hints.update(hints)
+        previous_hints = self._hints
+        self._hints = config_hints
+        try:
+            config_path = gen_write_config(
+                mesh_result=self._last_mesh_result,
+                stack=stack,
+                ports=self._last_ports,
+                simulation_type=self.simulation_type,
+                eigenmode_config=self.eigenmode,
+                driven_config=self.driven,
+                numerical_config=self.numerical,
+                absorbing_boundary=self.absorbing_boundary,
+                hints=self._hints,
+                electrostatic_config=electrostatic_config,
+                terminals=terminals or [],
+                postprocessing_config=domain_postprocessing_config,
+                boundary_postprocessing_config=boundary_postprocessing_config,
+                material_overlay=material_overlay,
             )
-            index_map_entries = []
-            if postprocessing is not None:
-                index_map_entries.extend(postprocessing.index_map.entries)
 
-            if self.simulation_type == "electrostatic":
-                config = json.loads(config_path.read_text())
-                terminal_entries = config.get("Boundaries", {}).get("Terminal", [])
-                if isinstance(terminal_entries, list):
-                    terminal_names = tuple(
-                        terminal.name for terminal in terminals or []
-                    )
-                    terminal_map = build_terminal_index_map_from_manifest(
-                        self._last_mesh_result.manifest,
-                        terminal_entries,
-                        terminal_names=terminal_names,
-                    )
-                    index_map_entries.extend(terminal_map.entries)
-
-            if index_map_entries:
-                PostprocessingIndexMap(entries=tuple(index_map_entries)).write_json(
-                    config_path.parent / "palace_index_map.json"
+            if write_artifacts:
+                self._last_mesh_result.manifest.write_json(
+                    config_path.parent / "mesh_manifest.json"
                 )
+                index_map_entries = []
+                if postprocessing is not None:
+                    index_map_entries.extend(postprocessing.index_map.entries)
 
-        # Validate mesh and config unless this is a photonic workflow.
-        if not photonic and validate_mesh:
-            validation = self.validate_mesh(material_overlay=material_overlay)
-            if not validation.valid:
-                raise ValueError(f"Mesh validation failed:\n{validation}")
+                if self.simulation_type == "electrostatic":
+                    config = json.loads(config_path.read_text())
+                    terminal_entries = config.get("Boundaries", {}).get("Terminal", [])
+                    if isinstance(terminal_entries, list):
+                        terminal_names = tuple(
+                            terminal.name for terminal in terminals or []
+                        )
+                        terminal_map = build_terminal_index_map_from_manifest(
+                            self._last_mesh_result.manifest,
+                            terminal_entries,
+                            terminal_names=terminal_names,
+                        )
+                        index_map_entries.extend(terminal_map.entries)
 
-        return config_path
+                if index_map_entries:
+                    PostprocessingIndexMap(entries=tuple(index_map_entries)).write_json(
+                        config_path.parent / "palace_index_map.json"
+                    )
+
+            # Validate mesh and config unless this is a photonic workflow.
+            if not photonic and validate_mesh:
+                validation = self.validate_mesh(material_overlay=material_overlay)
+                if not validation.valid:
+                    raise ValueError(f"Mesh validation failed:\n{validation}")
+
+            return config_path
+        finally:
+            self._hints = previous_hints
 
     # -------------------------------------------------------------------------
     # Cloud: fine-grained control

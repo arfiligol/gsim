@@ -162,6 +162,34 @@ def test_generate_palace_config_merges_postprocessing_config(tmp_path: Path) -> 
     assert postprocessing["SurfaceFlux"] == [{"Attributes": [22]}]
 
 
+def test_generate_palace_config_deep_merges_solver_hints(tmp_path: Path) -> None:
+    groups = {
+        "volumes": {"air": {"phys_group": 1}},
+        "conductor_surfaces": {},
+        "pec_surfaces": {},
+        "port_surfaces": {},
+        "boundary_surfaces": {},
+    }
+
+    config_path = generate_palace_config(
+        groups=groups,
+        ports=[],
+        port_info=[],
+        stack=LayerStack(materials={"air": {"permittivity": 1.0}}),
+        output_path=tmp_path,
+        model_name="palace",
+        fmax=10e9,
+        absorbing_boundary=False,
+        hints={"Solver": {"Device": "GPU", "Backend": "/gpu/cuda"}},
+    )
+
+    solver = json.loads(config_path.read_text())["Solver"]
+    assert solver["Device"] == "GPU"
+    assert solver["Backend"] == "/gpu/cuda"
+    assert solver["Linear"]["Type"] == "Default"
+    assert solver["Driven"]["Samples"][0]["Type"] == "Driven"
+
+
 def test_write_config_merges_postprocessing_config(tmp_path: Path) -> None:
     groups = {
         "volumes": {"air": {"phys_group": 1}},

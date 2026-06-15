@@ -852,6 +852,24 @@ class TestNumericalConfig:
         assert config["Solver"]["Order"] == 3
         assert config["Solver"]["Device"] == "CPU"
 
+    def test_write_config_merges_solver_hints(self, cpw_component, tmp_path):
+        sim = DrivenSim()
+        sim.set_output_dir(str(tmp_path / "solver-hints"))
+        sim.set_geometry(cpw_component)
+        sim.set_stack(substrate_thickness=2.0, air_above=300.0)
+        sim.add_cpw_port("o1", layer="metal1", s_width=10, gap_width=6, length=5.0)
+        sim.add_cpw_port("o2", layer="metal1", s_width=10, gap_width=6, length=5.0)
+        sim.set_driven(fmin=1e9, fmax=100e9)
+        sim.mesh(preset="coarse")
+        sim.write_config(hints={"Solver": {"Device": "GPU", "Backend": "/gpu/cuda"}})
+        assert sim._output_dir is not None
+        config = json.loads((sim._output_dir / "config.json").read_text())
+
+        assert config["Solver"]["Device"] == "GPU"
+        assert config["Solver"]["Backend"] == "/gpu/cuda"
+        assert config["Solver"]["Linear"]["Type"] == "Default"
+        assert config["Solver"]["Driven"]["Samples"]
+
     def test_mumps_solver_config_defaults(self, cpw_component, tmp_path):
         sim = DrivenSim()
         sim.set_output_dir(str(tmp_path / "numerical-mumps"))

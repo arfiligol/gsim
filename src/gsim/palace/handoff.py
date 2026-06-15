@@ -194,6 +194,11 @@ class PalaceSlurmProfileResolution:
     profile: Mapping[str, Any]
     resource_overrides: Mapping[str, Any] = field(default_factory=dict)
 
+    def to_palace_config_hints(self) -> dict[str, Any]:
+        """Return Palace config hints derived from profile solver metadata."""
+        solver_hints = palace_slurm_solver_config_hints(self.solver)
+        return {"Solver": solver_hints} if solver_hints else {}
+
 
 @dataclass(frozen=True)
 class PalaceSlurmSbatchSpec:
@@ -480,6 +485,21 @@ def load_palace_slurm_profile_catalog(
         str(name): _normalize_slurm_profile_spec(str(name), profile)
         for name, profile in profiles_payload.items()
     }
+
+
+def palace_slurm_solver_config_hints(
+    solver: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Convert Slurm profile solver metadata into Palace ``Solver`` hints."""
+    if solver is None:
+        return {}
+    normalized = _normalize_slurm_profile_solver(solver)
+    hints: dict[str, Any] = {}
+    if device := normalized.get("device"):
+        hints["Device"] = device
+    if backend := normalized.get("backend"):
+        hints["Backend"] = backend
+    return hints
 
 
 def write_palace_slurm_sbatch_handoff(

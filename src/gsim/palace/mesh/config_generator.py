@@ -607,7 +607,7 @@ def generate_palace_config(
 
     # Merge any extra hints into the config
     if hints:
-        config.update(hints)
+        _deep_merge_config(config, hints)
 
     # Write config file
     config_path = output_path / "config.json"
@@ -708,6 +708,15 @@ def _resolve_boundary_dielectric_interfaces(
             )
         )
     return resolution_rows
+
+
+def _deep_merge_config(target: dict[str, Any], updates: dict[str, Any]) -> None:
+    for key, value in updates.items():
+        existing = target.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            _deep_merge_config(existing, value)
+        else:
+            target[key] = deepcopy(value)
 
 
 def _resolve_single_interface_material(
