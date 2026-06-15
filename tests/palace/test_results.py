@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from gsim.palace.results import (
+    DrivenReport,
     EigenmodeReport,
     Eigenmodes,
     ElectrostaticReport,
@@ -17,6 +18,7 @@ from gsim.palace.results import (
     load_dielectric_interface_summary,
     load_domain_energy_summary,
     load_domain_material_summary,
+    load_driven_report,
     load_eigenmode_history,
     load_eigenmode_report,
     load_eigenmodes,
@@ -241,6 +243,26 @@ def indexed_report_dir(tmp_path: Path) -> Path:
     )
     (palace_dir / "port-EPR.csv").write_text("m, p[3]\n1, -2.5e-4\n")
     return tmp_path
+
+
+@pytest.fixture
+def driven_report_dir(indexed_report_dir: Path) -> Path:
+    """Create a Palace driven report output with S-parameters and port EPR."""
+    palace_dir = indexed_report_dir / "output" / "palace"
+    port_info = {
+        "ports": [
+            {"portnumber": 1, "name": "readout", "Z0": 50.0, "type": "cpw"},
+        ],
+        "unit": 1e-6,
+        "name": "palace",
+    }
+    (indexed_report_dir / "port_information.json").write_text(json.dumps(port_info))
+    (palace_dir / "port-S.csv").write_text(
+        "f (GHz), |S[1][1]| (dB), arg(S[1][1]) (deg.)\n"
+        "5.0, -12.0, -33.0\n"
+        "6.0, -6.0, -45.0\n"
+    )
+    return indexed_report_dir
 
 
 @pytest.fixture
@@ -590,6 +612,69 @@ class TestGetPortMap:
     def test_legacy_numeric_fallback(self, sim_dir_no_names: Path) -> None:
         pm = get_port_map(sim_dir_no_names)
         assert pm == {1: "p1", 2: "p2"}
+
+
+class TestDrivenReport:
+    """Tests for composed Palace driven report bundles."""
+
+    def test_load_driven_report_composes_existing_summaries(
+        self,
+        driven_report_dir: Path,
+    ) -> None:
+        report = load_driven_report(driven_report_dir)
+
+        assert isinstance(report, DrivenReport)
+        assert report.sparams.port_names == ["readout"]
+        assert report.network is report.sparams
+        assert report.sparams["readout", "readout"].db.tolist() == pytest.approx(
+            [-12.0, -6.0]
+        )
+        material_rows = report.domain_materials.set_index("material_attribute")
+        assert material_rows.loc[10, "source_name"] == "D1_SUBSTRATE"
+        assert material_rows.loc[10, "material_name"] == "silicon"
+        interface_rows = report.dielectric_interfaces.set_index("surface_index")
+        assert interface_rows.loc[2, "source_name"] == "MA:D1_TOP_M1___D1_SUBSTRATE"
+        assert interface_rows.loc[2, "preset_name"] == "public_ma"
+        assert report.port_epr.iloc[0]["source_name"] == "P1"
+        assert report.port_epr.iloc[0]["p_port"] == pytest.approx(-2.5e-4)
+        assert report.index_map["entry_name"].tolist() == [
+            "substrate",
+            "ma_interface",
+            "readout_port_surface",
+        ]
+        assert report.missing_reports == ()
+        sources = report.sources.set_index("name")
+        assert bool(sources.loc["port-S.csv", "loaded"])
+        assert bool(sources.loc["palace_index_map.json", "loaded"])
+        assert bool(sources.loc["config.json", "loaded"])
+        assert bool(sources.loc["port-EPR.csv", "loaded"])
+
+    def test_load_driven_report_allows_missing_optional_reports(
+        self,
+        sim_dir: Path,
+    ) -> None:
+        report = load_driven_report(sim_dir)
+
+        assert report.sparams.port_names == ["o1", "o2", "o3"]
+        assert report.port_epr.empty
+        assert report.domain_materials.empty
+        assert report.dielectric_interfaces.empty
+        assert report.index_map.empty
+        assert report.missing_reports == (
+            "palace_index_map.json",
+            "config.json",
+            "port-EPR.csv",
+        )
+        sources = report.sources.set_index("name")
+        assert bool(sources.loc["port-S.csv", "loaded"])
+        assert not bool(sources.loc["port-EPR.csv", "loaded"])
+
+    def test_load_driven_report_can_require_port_epr(
+        self,
+        sim_dir: Path,
+    ) -> None:
+        with pytest.raises(FileNotFoundError, match="port-EPR"):
+            load_driven_report(sim_dir, require_port_epr=True)
 
 
 class TestEigenmodes:

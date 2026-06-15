@@ -669,6 +669,34 @@ class Eigenmodes:
 
 
 @dataclass(frozen=True)
+class DrivenReport:
+    """Composed Palace Driven report tables for notebook workflows."""
+
+    sparams: SParams
+    port_epr: pd.DataFrame
+    domain_materials: pd.DataFrame
+    dielectric_interfaces: pd.DataFrame
+    index_map: pd.DataFrame
+    sources: pd.DataFrame
+
+    @property
+    def network(self) -> SParams:
+        """Return the driven S-parameter network."""
+        return self.sparams
+
+    @property
+    def missing_reports(self) -> tuple[str, ...]:
+        """Optional report names that were expected but absent."""
+        if self.sources.empty:
+            return ()
+        missing = self.sources.loc[
+            (~self.sources["required"]) & (~self.sources["present"]),
+            "name",
+        ]
+        return tuple(str(name) for name in missing)
+
+
+@dataclass(frozen=True)
 class EigenmodeReport:
     """Composed Palace Eigenmode report tables for notebook workflows."""
 
@@ -902,6 +930,130 @@ def load_sparams(
 
     files = dict(source) if isinstance(source, dict) else None
     return SParams(freq=freq, data=data, port_names=port_names, files=files)
+
+
+def load_driven_report(
+    source: str | Path | dict,
+    *,
+    index_map_path: str | Path | None = None,
+    port_info_path: str | Path | None = None,
+    require_port_epr: bool = False,
+) -> DrivenReport:
+    """Load Driven S-parameters plus optional indexed port-EPR reports.
+
+    This is a thin composition layer over the stricter primitive loaders. The
+    final ``port-S.csv`` is required. Palace index/config/provenance artifacts
+    and ``port-EPR.csv`` are loaded independently when present and are reported
+    as missing rather than forcing every Driven run to emit all report families.
+    """
+    import pandas as pd
+
+    sparams = load_sparams(source, port_info_path=port_info_path)
+    port_s_path, _ = _resolve_source(source)
+    source_rows: list[dict[str, Any]] = [
+        _report_source_row(
+            "port-S.csv",
+            port_s_path,
+            required=True,
+            present=True,
+            loaded=True,
+            message="loaded driven S-parameters",
+        )
+    ]
+
+    resolved_index_map_path = _find_optional_postprocessing_index_map_path(
+        source,
+        index_map_path=index_map_path,
+    )
+    index_map_present = (
+        resolved_index_map_path is not None and resolved_index_map_path.exists()
+    )
+    index_map_loaded = False
+    if index_map_present:
+        index_map = load_postprocessing_index_map(
+            source,
+            index_map_path=resolved_index_map_path,
+        )
+        index_map_frame = _postprocessing_index_map_to_dataframe(index_map)
+        index_map_loaded = True
+        index_message = "loaded postprocessing index map"
+    else:
+        index_map_frame = _empty_index_map_dataframe()
+        index_message = "not found"
+    source_rows.append(
+        _report_source_row(
+            "palace_index_map.json",
+            resolved_index_map_path,
+            required=False,
+            present=index_map_present,
+            loaded=index_map_loaded,
+            message=index_message,
+        )
+    )
+
+    resolved_config_path = _find_optional_config_path(source, config_path=None)
+    config_present = resolved_config_path is not None and resolved_config_path.exists()
+    config_loaded = False
+    if config_present:
+        domain_materials = load_domain_material_summary(
+            source,
+            config_path=resolved_config_path,
+            index_map_path=resolved_index_map_path if index_map_present else None,
+        )
+        dielectric_interfaces = load_dielectric_interface_summary(
+            source,
+            config_path=resolved_config_path,
+            index_map_path=resolved_index_map_path if index_map_present else None,
+        )
+        config_loaded = True
+        config_message = (
+            "loaded config material and interface summaries"
+            if index_map_present
+            else (
+                "loaded config material and interface summaries without "
+                "palace_index_map.json"
+            )
+        )
+    else:
+        domain_materials = _empty_domain_material_summary()
+        dielectric_interfaces = _empty_dielectric_interface_summary()
+        config_message = "not found"
+    source_rows.append(
+        _report_source_row(
+            "config.json",
+            resolved_config_path,
+            required=False,
+            present=config_present,
+            loaded=config_loaded,
+            message=config_message,
+        )
+    )
+
+    port_epr, port_source = _load_optional_eigenmode_report_table(
+        source,
+        "port-EPR.csv",
+        loader=load_port_epr_summary,
+        empty_factory=_empty_port_epr_summary,
+        index_map_path=resolved_index_map_path,
+        index_map_present=index_map_present,
+    )
+    source_rows.append(port_source)
+
+    if require_port_epr and not bool(port_source["loaded"]):
+        msg = "Missing required driven port-EPR.csv report"
+        raise FileNotFoundError(msg)
+
+    return DrivenReport(
+        sparams=sparams,
+        port_epr=port_epr,
+        domain_materials=domain_materials,
+        dielectric_interfaces=dielectric_interfaces,
+        index_map=index_map_frame,
+        sources=pd.DataFrame.from_records(
+            source_rows,
+            columns=_REPORT_SOURCE_COLUMNS,
+        ),
+    )
 
 
 def load_eigenmodes(source: str | Path | dict) -> Eigenmodes:

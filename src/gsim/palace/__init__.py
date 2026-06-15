@@ -109,6 +109,7 @@ from gsim.palace.ports import (
 
 # Results utilities
 from gsim.palace.results import (
+    DrivenReport,
     EigenmodeReport,
     Eigenmodes,
     ElectrostaticReport,
@@ -121,6 +122,7 @@ from gsim.palace.results import (
     load_dielectric_interface_summary,
     load_domain_energy_summary,
     load_domain_material_summary,
+    load_driven_report,
     load_eigenmode_history,
     load_eigenmode_report,
     load_eigenmodes,
@@ -152,6 +154,7 @@ __all__ = [
     "DielectricInterfaceType",
     "DielectricMaterialKind",
     "DrivenConfig",
+    "DrivenReport",
     "DrivenSim",
     "EigenmodeConfig",
     "EigenmodeReport",
@@ -202,6 +205,7 @@ __all__ = [
     "load_dielectric_interface_summary",
     "load_domain_energy_summary",
     "load_domain_material_summary",
+    "load_driven_report",
     "load_eigenmode_history",
     "load_eigenmode_report",
     "load_eigenmodes",

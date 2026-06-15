@@ -120,6 +120,10 @@
 
 ## Results
 
+::: gsim.palace.load_driven_report
+    options:
+      show_source: false
+
 ::: gsim.palace.load_eigenmode_report
     options:
       show_source: false
