@@ -57,6 +57,13 @@ from gsim.gcloud import run_simulation as _run_simulation
 from gsim.palace.driven import DrivenSim
 from gsim.palace.eigenmode import EigenmodeSim
 from gsim.palace.electrostatic import ElectrostaticSim
+from gsim.palace.handoff import (
+    DEFAULT_PALACE_PETSC_OPTIONS,
+    PalaceSlurmHandoffResult,
+    PalaceSlurmResourceSpec,
+    PalaceSlurmSbatchSpec,
+    write_palace_slurm_sbatch_handoff,
+)
 
 # Material resolution with dispersion
 from gsim.palace.materials import (
@@ -156,6 +163,7 @@ from gsim.palace.results import (
 from gsim.viz import plot_cross_section, plot_mesh
 
 __all__ = [
+    "DEFAULT_PALACE_PETSC_OPTIONS",
     "MATERIALS_DB",
     "CPWPortConfig",
     "DielectricInterfaceSelector",
@@ -188,6 +196,9 @@ __all__ = [
     "PalaceArtifactStatus",
     "PalacePort",
     "PalaceRunSummary",
+    "PalaceSlurmHandoffResult",
+    "PalaceSlurmResourceSpec",
+    "PalaceSlurmSbatchSpec",
     "PalaceSweepPointSpec",
     "PalaceSweepPointSummary",
     "PalaceSweepSummary",
@@ -252,6 +263,7 @@ __all__ = [
     "summarize_surface_q_by_interface",
     "summarize_terminal_matrix_history",
     "write_palace_handoff_metadata",
+    "write_palace_slurm_sbatch_handoff",
     "write_palace_sweep_points",
 ]
 

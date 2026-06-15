@@ -60,6 +60,7 @@ _NON_RESULT_ARTIFACT_NAMES = (
     "palace_handoff_metadata.json",
     "palace_run_metadata.json",
     "port_information.json",
+    "run_palace.sbatch",
 )
 _SWEEP_POINT_PATH_FIELDS = (
     "run_dir",
