@@ -1,5 +1,11 @@
 # Palace API
 
+This API reference is curated around notebook-facing and downstream-facing
+entry points. Deep modules may contain reusable implementation types, but a
+symbol should be promoted to the `gsim.palace` import surface only when users
+are expected to import it directly in notebooks, public fixtures, or downstream
+packages. Helper-only lowering details should stay in their owning modules.
+
 ## Simulation Classes
 
 ::: gsim.palace.DrivenSim
@@ -75,6 +81,29 @@
         - validate_mesh
         - run
 
+::: gsim.palace.MagnetostaticSim
+    options:
+      show_source: false
+      inherited_members: false
+      members:
+        - set_output_dir
+        - set_geometry
+        - set_stack
+        - set_magnetostatic
+        - set_material
+        - set_numerical
+        - add_current_source
+        - add_pec
+        - mesh
+        - plot_mesh
+        - plot_stack
+        - show_stack
+        - preview
+        - validate_config
+        - validate_mesh
+        - write_config
+        - run
+
 ## Mesh Generation
 
 These APIs control mesh construction. They should change generated geometry or
@@ -105,6 +134,11 @@ provenance sidecars without adding new mesh-generation knobs.
       inherited_members: false
 
 ::: gsim.palace.mesh.MeshManifest
+    options:
+      show_source: false
+      inherited_members: false
+
+::: gsim.palace.mesh.SurfaceFluxSpec
     options:
       show_source: false
       inherited_members: false
@@ -143,6 +177,15 @@ provenance sidecars without adding new mesh-generation knobs.
 
 ## Results
 
+::: gsim.palace.SParams
+    options:
+      show_source: false
+      inherited_members: false
+
+::: gsim.palace.load_sparams
+    options:
+      show_source: false
+
 ::: gsim.palace.load_palace_run_summary
     options:
       show_source: false
@@ -160,6 +203,14 @@ provenance sidecars without adding new mesh-generation knobs.
       show_source: false
 
 ::: gsim.palace.load_electrostatic_report
+    options:
+      show_source: false
+
+::: gsim.palace.load_postprocessing_index_map
+    options:
+      show_source: false
+
+::: gsim.palace.load_terminal_matrix
     options:
       show_source: false
 
