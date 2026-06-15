@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 import gmsh
 
+from gsim.palace.models.sources import palace_direction
 from gsim.palace.ports.config import PortType
 
 if TYPE_CHECKING:
@@ -354,26 +355,19 @@ def generate_palace_config(
             boundaries["Ground"] = {"Attributes": sorted(set(ground_attrs))}
 
     elif is_magnetostatic and current_sources:
-        source_entries, _, _ = _selector_entries(
-            groups=groups,
-            stack=stack,
-            selectors=current_sources,
-        )
         surface_currents: list[dict[str, object]] = []
         magnetic_fluxes: list[dict[str, object]] = []
-        for entry, source in zip(source_entries, current_sources, strict=True):
-            attrs = entry.get("Attributes", [])
-            if not attrs:
-                raise ValueError(
-                    f"Current source {source.name!r} on layer {source.layer!r} "
-                    "did not match any conductor surface attributes."
-                )
-            surface_current = dict(entry)
-            surface_current["Direction"] = source.direction
+        for index, source in enumerate(current_sources, start=1):
+            surface_current, attrs = _surface_current_entry(
+                groups=groups,
+                stack=stack,
+                source=source,
+                index=index,
+            )
             surface_currents.append(surface_current)
             magnetic_fluxes.append(
                 {
-                    "Index": entry["Index"],
+                    "Index": index,
                     "Attributes": attrs,
                     "Type": "Magnetic",
                     "TwoSided": False,
@@ -667,23 +661,14 @@ def _selector_entries(
     via_boundary = groups.get("via_boundary_surfaces", {})
 
     for idx, selector in enumerate(selectors, start=1):
-        attrs: list[int] = []
-
-        for surf_name, surf_info in groups.get("conductor_surfaces", {}).items():
-            surf_layer = surf_name.rsplit("_", 1)[0]
-            if surf_layer == selector.layer:
-                attrs.extend(_physical_group_values(surf_info.get("phys_group")))
-
-        for pec_name, pec_info in pec_surfaces.items():
-            if _pec_matches_selector(pec_name, pec_info, selector):
-                attrs.extend(_physical_group_values(pec_info.get("phys_group")))
-
-        for via_name, via_pgs in via_boundary.items():
-            if _via_touches_layer(stack, via_name, selector.layer):
-                attrs.extend(_physical_group_values(via_pgs))
-                selected_vias.add(via_name)
-
-        unique_attrs = sorted(set(attrs))
+        unique_attrs, selector_vias = _selector_attributes(
+            groups=groups,
+            stack=stack,
+            selector=selector,
+            pec_surfaces=pec_surfaces,
+            via_boundary=via_boundary,
+        )
+        selected_vias.update(selector_vias)
         assigned_pgs.update(unique_attrs)
         entries.append(
             {
@@ -693,6 +678,95 @@ def _selector_entries(
         )
 
     return entries, assigned_pgs, selected_vias
+
+
+def _selector_attributes(
+    *,
+    groups: dict[str, Any],
+    stack: LayerStack,
+    selector: Any,
+    pec_surfaces: dict[str, Any] | None = None,
+    via_boundary: dict[str, Any] | None = None,
+) -> tuple[list[int], set[str]]:
+    """Resolve a layer/center selector to generated boundary attributes."""
+    if not selector.layer:
+        raise ValueError("Selector layer is required for physical-group lookup.")
+
+    attrs: list[int] = []
+    selected_vias: set[str] = set()
+    resolved_pec_surfaces = (
+        groups.get("pec_surfaces", {}) if pec_surfaces is None else pec_surfaces
+    )
+    resolved_via_boundary = (
+        groups.get("via_boundary_surfaces", {})
+        if via_boundary is None
+        else via_boundary
+    )
+
+    for surf_name, surf_info in groups.get("conductor_surfaces", {}).items():
+        surf_layer = surf_name.rsplit("_", 1)[0]
+        if surf_layer == selector.layer:
+            attrs.extend(_physical_group_values(surf_info.get("phys_group")))
+
+    for pec_name, pec_info in resolved_pec_surfaces.items():
+        if _pec_matches_selector(pec_name, pec_info, selector):
+            attrs.extend(_physical_group_values(pec_info.get("phys_group")))
+
+    for via_name, via_pgs in resolved_via_boundary.items():
+        if _via_touches_layer(stack, via_name, selector.layer):
+            attrs.extend(_physical_group_values(via_pgs))
+            selected_vias.add(via_name)
+
+    return sorted(set(attrs)), selected_vias
+
+
+def _surface_current_entry(
+    *,
+    groups: dict[str, Any],
+    stack: LayerStack,
+    source: CurrentSourceConfig,
+    index: int,
+) -> tuple[dict[str, object], list[int]]:
+    """Build one Palace SurfaceCurrent row from selector-based source intent."""
+    if source.elements:
+        elements: list[dict[str, object]] = []
+        all_attrs: list[int] = []
+        for element_index, element in enumerate(source.elements, start=1):
+            attrs, _ = _selector_attributes(
+                groups=groups,
+                stack=stack,
+                selector=element,
+            )
+            if not attrs:
+                raise ValueError(
+                    f"Current source {source.name!r} element {element_index} "
+                    f"on layer {element.layer!r} did not match any conductor "
+                    "surface attributes."
+                )
+            element_entry: dict[str, object] = {
+                "Attributes": attrs,
+                "Direction": palace_direction(element.direction),
+            }
+            if element.coordinate_system is not None:
+                element_entry["CoordinateSystem"] = element.coordinate_system
+            elements.append(element_entry)
+            all_attrs.extend(attrs)
+        return {"Index": index, "Elements": elements}, sorted(set(all_attrs))
+
+    attrs, _ = _selector_attributes(groups=groups, stack=stack, selector=source)
+    if not attrs:
+        raise ValueError(
+            f"Current source {source.name!r} on layer {source.layer!r} "
+            "did not match any conductor surface attributes."
+        )
+    entry: dict[str, object] = {
+        "Index": index,
+        "Attributes": attrs,
+        "Direction": palace_direction(source.direction),
+    }
+    if source.coordinate_system is not None:
+        entry["CoordinateSystem"] = source.coordinate_system
+    return entry, attrs
 
 
 def _pec_matches_selector(

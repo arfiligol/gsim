@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from gsim.palace import DrivenSim, EigenmodeSim, ElectrostaticSim, MagnetostaticSim
-from gsim.palace.models import MeshConfig
+from gsim.palace.models import CurrentSourceConfig, MeshConfig
 
 
 class TestDrivenSimValidation:
@@ -159,6 +159,56 @@ class TestMagnetostaticSimValidation:
         sim = MagnetostaticSim()
         sim.add_current_source("signal", layer="metal1", direction="x")
         assert sim.current_sources[0].direction == "+X"
+
+    def test_current_source_accepts_vector_direction(self):
+        """Vector directions are accepted for Palace current sources."""
+        sim = MagnetostaticSim()
+        sim.add_current_source(
+            "signal",
+            layer="metal1",
+            direction=[0.0, 1.0, 0.0],
+            coordinate_system="Cartesian",
+        )
+        assert sim.current_sources[0].direction == (0.0, 1.0, 0.0)
+        assert sim.current_sources[0].coordinate_system == "Cartesian"
+
+    def test_current_source_accepts_radial_direction_keyword(self):
+        """Radial Palace direction keywords are normalized at the model boundary."""
+        sim = MagnetostaticSim()
+        sim.add_current_source("signal", layer="metal1", direction="r")
+        assert sim.current_sources[0].direction == "+R"
+
+    def test_multielement_current_source_keeps_element_selectors(self):
+        """Multielement sources put selectors on elements, not raw attributes."""
+        source = CurrentSourceConfig(
+            name="loop",
+            elements=(
+                {"layer": "metal1", "center": (0, 0), "direction": "+X"},
+                {
+                    "layer": "metal1",
+                    "center": (0, 31),
+                    "direction": [0.0, -1.0, 0.0],
+                    "coordinate_system": "Cartesian",
+                },
+            ),
+        )
+        assert source.layer is None
+        assert len(source.elements) == 2
+        assert source.elements[1].direction == (0.0, -1.0, 0.0)
+
+    def test_multielement_current_source_rejects_parent_layer(self):
+        """A multielement source cannot mix parent and element selectors."""
+        with pytest.raises(ValueError, match="Multielement current sources"):
+            CurrentSourceConfig(
+                name="loop",
+                layer="metal1",
+                elements=({"layer": "metal1", "direction": "+X"},),
+            )
+
+    def test_current_source_requires_layer_or_elements(self):
+        """Single-element source selectors must include a layer."""
+        with pytest.raises(ValueError, match="layer is required"):
+            CurrentSourceConfig(name="signal")
 
     def test_invalid_current_source_direction_raises(self):
         """Invalid source directions are rejected before config generation."""

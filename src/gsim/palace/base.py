@@ -816,11 +816,20 @@ class PalaceSimMixin:
                     "Magnetostatic simulation requires at least 1 current source. "
                     "Call add_current_source() to add a source."
                 )
-            errors.extend(
-                f"Current source '{source.name}': 'layer' is required"
-                for source in current_sources
-                if not source.layer
-            )
+            for source in current_sources:
+                if source.elements:
+                    errors.extend(
+                        f"Current source '{source.name}' element {element_index}: "
+                        "'layer' is required"
+                        for element_index, element in enumerate(
+                            source.elements, start=1
+                        )
+                        if not element.layer
+                    )
+                elif not source.layer:
+                    errors.append(
+                        f"Current source '{source.name}': 'layer' is required"
+                    )
 
         valid = len(errors) == 0
         return ValidationResult(valid=valid, errors=errors, warnings=warnings_list)

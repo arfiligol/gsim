@@ -12,6 +12,7 @@ from gsim.common import Geometry, LayerStack
 from gsim.palace.base import PalaceSimMixin
 from gsim.palace.models import (
     CurrentSourceConfig,
+    CurrentSourceElementConfig,
     MagnetostaticConfig,
     MaterialConfig,
     NumericalConfig,
@@ -69,9 +70,11 @@ class MagnetostaticSim(PalaceSimMixin, BaseModel):
         self,
         name: str,
         *,
-        layer: str,
+        layer: str | None = None,
         center: tuple[float, float] | None = None,
-        direction: str = "+X",
+        direction: str | tuple[float, float, float] | list[float] = "+X",
+        coordinate_system: Literal["Cartesian", "Cylindrical"] | None = None,
+        elements: tuple[CurrentSourceElementConfig | dict[str, Any], ...] = (),
     ) -> None:
         """Add or replace a magnetostatic surface-current source.
 
@@ -81,8 +84,12 @@ class MagnetostaticSim(PalaceSimMixin, BaseModel):
             center: Optional XY point used to select one conductor island on
                 ``layer``. When omitted, all conductor surfaces on the layer
                 are assigned to the source.
-            direction: Palace current direction, one of ``+X``, ``-X``,
-                ``+Y``, ``-Y``, ``+Z``, or ``-Z``.
+            direction: Palace current direction. Axis keywords, radial
+                keywords, and 3-vectors are supported.
+            coordinate_system: Coordinate system for vector directions.
+            elements: Optional selector-based elements for a multielement
+                Palace surface-current source. When provided, put ``layer`` and
+                ``center`` on each element instead of on the parent source.
         """
         self.current_sources = [
             source for source in self.current_sources if source.name != name
@@ -93,6 +100,8 @@ class MagnetostaticSim(PalaceSimMixin, BaseModel):
                 layer=layer,
                 center=center,
                 direction=direction,
+                coordinate_system=coordinate_system,
+                elements=elements,
             )
         )
         self._configured_sources = True

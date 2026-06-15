@@ -734,7 +734,8 @@ class TestMagnetostaticSimWorkflow:
             "signal",
             layer="metal1",
             center=(0, 0),
-            direction="+X",
+            direction=[1.0, 0.0, 0.0],
+            coordinate_system="Cartesian",
         )
         sim.add_current_source(
             "return",
@@ -758,10 +759,10 @@ class TestMagnetostaticSimWorkflow:
         boundaries = config["Boundaries"]
         assert "SurfaceCurrent" in boundaries
         assert len(boundaries["SurfaceCurrent"]) == 2
-        assert {entry["Direction"] for entry in boundaries["SurfaceCurrent"]} == {
-            "+X",
-            "-X",
-        }
+        directions = [entry["Direction"] for entry in boundaries["SurfaceCurrent"]]
+        assert [1.0, 0.0, 0.0] in directions
+        assert "-X" in directions
+        assert boundaries["SurfaceCurrent"][0]["CoordinateSystem"] == "Cartesian"
         for entry in boundaries["SurfaceCurrent"]:
             assert entry["Attributes"], "SurfaceCurrent source has no attributes"
         assert set(boundaries["SurfaceCurrent"][0]["Attributes"]).isdisjoint(
@@ -803,6 +804,73 @@ class TestMagnetostaticSimWorkflow:
         assert {row["role"] for row in source_rows} == {"pec_surface"}
         assert {row["index"] for row in flux_rows} == {1, 2}
         assert {row["Type"] for row in flux_rows} == {"Magnetic"}
+
+    def test_write_config_supports_multielement_current_source(
+        self, tmp_path, cpw_component
+    ):
+        """Multielement current sources emit Palace Elements and flux rows."""
+        sim = MagnetostaticSim()
+        sim.set_output_dir(str(tmp_path / "multielement"))
+        sim.set_geometry(cpw_component)
+        sim.set_stack(substrate_thickness=2.0)
+        sim.set_airbox(margin_x=50.0, margin_y=50.0, z_above=100.0, z_below=20.0)
+        sim.add_current_source(
+            "loop",
+            elements=(
+                {
+                    "layer": "metal1",
+                    "center": (0, 0),
+                    "direction": "+X",
+                },
+                {
+                    "layer": "metal1",
+                    "center": (0, 31),
+                    "direction": [0.0, -1.0, 0.0],
+                    "coordinate_system": "Cartesian",
+                },
+            ),
+        )
+        sim.mesh(preset="coarse", planar_conductors=True)
+        config_path = sim.write_config()
+        config = json.loads(config_path.read_text())
+
+        surface_current = config["Boundaries"]["SurfaceCurrent"][0]
+        assert surface_current["Index"] == 1
+        assert "Attributes" not in surface_current
+        assert len(surface_current["Elements"]) == 2
+        assert surface_current["Elements"][0]["Direction"] == "+X"
+        assert surface_current["Elements"][1]["Direction"] == [0.0, -1.0, 0.0]
+        assert surface_current["Elements"][1]["CoordinateSystem"] == "Cartesian"
+        assert set(surface_current["Elements"][0]["Attributes"]).isdisjoint(
+            surface_current["Elements"][1]["Attributes"]
+        )
+
+        flux = config["Boundaries"]["Postprocessing"]["SurfaceFlux"][0]
+        assert flux["Index"] == 1
+        assert flux["Type"] == "Magnetic"
+        assert set(flux["Attributes"]) == set(
+            surface_current["Elements"][0]["Attributes"]
+            + surface_current["Elements"][1]["Attributes"]
+        )
+
+        index_map = json.loads(
+            (Path(sim._output_dir) / "palace_index_map.json").read_text()
+        )
+        source_rows = [
+            row
+            for row in index_map["entries"]
+            if row["section"] == "Boundaries.SurfaceCurrent"
+        ]
+        assert {row["current_source_name"] for row in source_rows} == {"loop"}
+        assert {row["current_source_element_count"] for row in source_rows} == {2}
+        assert {row["current_source_element_index"] for row in source_rows} == {1, 2}
+        assert any(row["Direction"] == "+X" for row in source_rows)
+        assert any(row["Direction"] == [0.0, -1.0, 0.0] for row in source_rows)
+        assert {
+            row["CoordinateSystem"]
+            for row in source_rows
+            if row.get("CoordinateSystem") is not None
+        } == {"Cartesian"}
 
 
 # ---------------------------------------------------------------------------

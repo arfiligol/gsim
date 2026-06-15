@@ -102,6 +102,7 @@ from gsim.palace.mesh import (
 from gsim.palace.models import (
     CPWPortConfig,
     CurrentSourceConfig,
+    CurrentSourceElementConfig,
     DrivenConfig,
     EigenmodeConfig,
     ElectrostaticConfig,
@@ -188,6 +189,7 @@ __all__ = [
     "MATERIALS_DB",
     "CPWPortConfig",
     "CurrentSourceConfig",
+    "CurrentSourceElementConfig",
     "DielectricInterfaceSelector",
     "DielectricInterfaceSpec",
     "DielectricInterfaceType",
