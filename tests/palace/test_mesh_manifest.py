@@ -281,6 +281,67 @@ def test_write_config_applies_material_overlay_without_mutating_stack(
     assert row["model_source"] == "test PDK"
 
 
+def test_write_config_applies_material_overlay_alias_to_generated_air(
+    tmp_path: Path,
+) -> None:
+    groups = {
+        "volumes": {"air": {"phys_group": 1}},
+        "conductor_surfaces": {},
+        "pec_surfaces": {},
+        "port_surfaces": {},
+        "boundary_surfaces": {},
+    }
+    stack = LayerStack(materials={"air": {"permittivity": 1.0, "loss_tangent": 0.0}})
+    mesh_result = MeshResult(
+        mesh_path=tmp_path / "palace.msh",
+        groups=groups,
+        output_dir=tmp_path,
+        model_name="palace",
+        fmax=10e9,
+    )
+
+    config_path = write_config(
+        mesh_result=mesh_result,
+        stack=stack,
+        ports=[],
+        absorbing_boundary=False,
+        material_overlay={
+            "materials": {
+                "vacuum": {
+                    "relative_permittivity": 1.0,
+                    "permeability": 1.0,
+                    "dispersion_models": [
+                        {
+                            "type": "constant",
+                            "permittivity": 1.0,
+                            "source": "test PDK vacuum",
+                            "validity_frequency": [0, 20e9],
+                        }
+                    ],
+                }
+            },
+            "material_aliases": {"air": "vacuum"},
+        },
+    )
+
+    material = json.loads(config_path.read_text())["Domains"]["Materials"][0]
+    assert material["Permittivity"] == pytest.approx(1.0)
+    assert material["LossTan"] == pytest.approx(0.0)
+    assert material["Permeability"] == pytest.approx(1.0)
+
+    material_resolution = json.loads(
+        (tmp_path / "palace_material_resolution.json").read_text()
+    )
+    row = material_resolution["materials"][0]
+    assert row["material_attribute"] == 1
+    assert row["volume_name"] == "air"
+    assert row["stack_material_name"] == "air"
+    assert row["matched_material_name"] == "air"
+    assert row["palace_material"]["Permeability"] == pytest.approx(1.0)
+    assert row["model_type"] == "constant"
+    assert row["model_source"] == "test PDK vacuum"
+
+
 def test_write_config_resolves_dielectric_interface_material_overlay(
     tmp_path: Path,
 ) -> None:

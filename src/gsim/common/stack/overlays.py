@@ -59,10 +59,14 @@ def load_overlay_data(data: Mapping[str, Any] | None) -> dict[str, MaterialPrope
         loss_tangent: 0.0
         validity_frequency: [0, 10e9]
         source: "IHP SG13G2 PDK"
+    material_aliases:
+      silicon: Si
     ```
 
     Args:
-        data: Mapping containing a ``materials`` section.
+        data: Mapping containing a ``materials`` section and optional
+            ``material_aliases`` section mapping external names to overlay
+            material records.
 
     Returns:
         Dict of material name -> MaterialProperties from the overlay mapping.
@@ -112,7 +116,46 @@ def load_overlay_data(data: Mapping[str, Any] | None) -> dict[str, MaterialPrope
 
         overlay_materials[name] = MaterialProperties(**props_kwargs)
 
-    return overlay_materials
+    return _expand_material_aliases(overlay_materials, data.get("material_aliases"))
+
+
+def _expand_material_aliases(
+    overlay_materials: dict[str, MaterialProperties],
+    material_aliases: Any,
+) -> dict[str, MaterialProperties]:
+    """Return overlay materials with explicit overlay-local aliases expanded."""
+    if material_aliases is None:
+        return overlay_materials
+
+    if not isinstance(material_aliases, Mapping):
+        msg = "material_aliases must be a mapping of alias name to material name."
+        raise TypeError(msg)
+
+    expanded = dict(overlay_materials)
+    for alias, target in material_aliases.items():
+        alias_name = _material_alias_name(alias)
+        target_name = _material_alias_name(target)
+        if alias_name in overlay_materials:
+            msg = (
+                f"material_aliases entry {alias_name!r} collides with an "
+                "explicit overlay material."
+            )
+            raise ValueError(msg)
+        if target_name not in overlay_materials:
+            msg = (
+                f"material_aliases entry {alias_name!r} targets unknown "
+                f"overlay material {target_name!r}."
+            )
+            raise KeyError(msg)
+        expanded[alias_name] = overlay_materials[target_name]
+    return expanded
+
+
+def _material_alias_name(name: Any) -> str:
+    if isinstance(name, bool) or not isinstance(name, str) or not name:
+        msg = "material_aliases entries must be non-empty strings."
+        raise ValueError(msg)
+    return name
 
 
 def load_overlay(path: str | Path) -> dict[str, MaterialProperties]:

@@ -223,8 +223,14 @@ def generate_palace_config(
         mat_entry: dict[str, object] = {"Attributes": [info["phys_group"]]}
 
         if volume_name in {"airbox", "air"}:
-            mat_entry["Permittivity"] = 1.0
-            mat_entry["LossTan"] = 0.0
+            mat_entry["Permittivity"] = mat_props.get("permittivity", 1.0)
+            mat_entry["LossTan"] = mat_props.get("loss_tangent", 0.0)
+
+            if "permeability" in mat_props:
+                mat_entry["Permeability"] = mat_props["permeability"]
+
+            if "material_axes" in mat_props:
+                mat_entry["MaterialAxes"] = mat_props["material_axes"]
         elif is_via:
             sigma = mat_props.get("conductivity", 0.0)
             mat_entry["Permittivity"] = 1.0

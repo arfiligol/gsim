@@ -151,6 +151,55 @@ class TestResolvePalaceMaterialsAtFrequency:
         assert row["within_validity"] is True
         assert row["effective_material"]["loss_tangent"] == pytest.approx(1.0e-6)
 
+    def test_material_overlay_report_expands_material_aliases(self):
+        materials = {
+            "air": {"permittivity": 1.0, "loss_tangent": 0.0},
+            "silicon": {"permittivity": 11.9, "conductivity": 2.0},
+        }
+        overlay = {
+            "materials": {
+                "vacuum": {
+                    "relative_permittivity": 1.0,
+                    "permeability": 1.0,
+                    "dispersion_models": [
+                        {
+                            "type": "constant",
+                            "permittivity": 1.0,
+                            "source": "test PDK vacuum",
+                            "validity_frequency": [0, 20e9],
+                        }
+                    ],
+                },
+                "Si": {
+                    "relative_permittivity": 11.45,
+                    "permeability": 1.0,
+                    "dispersion_models": [
+                        {
+                            "type": "constant",
+                            "permittivity": 11.45,
+                            "source": "test PDK silicon",
+                            "validity_frequency": [0, 20e9],
+                        }
+                    ],
+                },
+            },
+            "material_aliases": {"air": "vacuum", "silicon": "Si"},
+        }
+
+        resolved, report = resolve_palace_materials_with_report(
+            materials,
+            5e9,
+            material_overlay=overlay,
+        )
+
+        rows = {row["stack_material_name"]: row for row in report["materials"]}
+        assert resolved["air"]["permeability"] == pytest.approx(1.0)
+        assert rows["air"]["matched_material_name"] == "air"
+        assert rows["air"]["model_source"] == "test PDK vacuum"
+        assert rows["silicon"]["matched_material_name"] == "silicon"
+        assert rows["silicon"]["model_source"] == "test PDK silicon"
+        assert resolved["silicon"]["permittivity"] == pytest.approx(11.45)
+
     def test_material_overlay_preserves_unknown_materials(self):
         materials = {"custom_mat": {"permittivity": 5.0}}
         overlay = {"materials": {"Si": {"relative_permittivity": 11.45}}}
