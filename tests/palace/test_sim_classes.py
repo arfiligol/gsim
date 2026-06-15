@@ -72,13 +72,13 @@ def test_config_models_stay_in_models_owner_module() -> None:
         "MaterialConfig",
         "NumericalConfig",
         "PECBlockConfig",
+        "SimulationResult",
         "TransientConfig",
+        "ValidationResult",
     )
     assert all(hasattr(models, name) for name in owner_model_names)
     assert all(not hasattr(palace, name) for name in owner_model_names)
     assert palace.MeshConfig is models.MeshConfig
-    assert palace.SimulationResult is models.SimulationResult
-    assert palace.ValidationResult is models.ValidationResult
 
 
 def test_common_stack_viz_cloud_helpers_stay_in_owner_modules() -> None:

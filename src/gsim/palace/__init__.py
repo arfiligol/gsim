@@ -55,12 +55,6 @@ from gsim.palace.mesh import (
     generate_mesh,
 )
 
-# Models (new submodule)
-from gsim.palace.models import (
-    SimulationResult,
-    ValidationResult,
-)
-
 # Results utilities
 from gsim.palace.results import (
     DrivenReport,
@@ -96,9 +90,7 @@ __all__ = [
     "MagnetostaticSim",
     "MeshConfig",
     "SParams",
-    "SimulationResult",
     "TerminalMatrix",
-    "ValidationResult",
     "generate_mesh",
     "load_dielectric_interface_summary",
     "load_domain_energy_summary",

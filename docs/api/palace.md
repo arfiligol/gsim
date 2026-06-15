@@ -281,6 +281,22 @@ specs live in the postprocessing owner module instead of the
     options:
       show_source: false
 
+## Advanced Return Models
+
+Notebook workflows usually inspect the objects returned by simulation methods
+directly. Callers that need explicit type imports for mesh or validation return
+values should use the owner module, not the root `gsim.palace` import surface.
+
+::: gsim.palace.models.results.SimulationResult
+    options:
+      show_source: false
+      inherited_members: false
+
+::: gsim.palace.models.results.ValidationResult
+    options:
+      show_source: false
+      inherited_members: false
+
 ::: gsim.palace.load_dielectric_interface_summary
     options:
       show_source: false
