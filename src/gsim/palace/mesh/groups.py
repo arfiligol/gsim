@@ -83,6 +83,11 @@ def assign_physical_groups(
             max(bbox[5] for bbox in bboxes),
         )
 
+    def _surface_tags_for_physical_group(pg_tag: int) -> list[int]:
+        with contextlib.suppress(Exception):
+            return list(gmsh.model.getEntitiesForPhysicalGroup(2, pg_tag))
+        return []
+
     def _append_pec_surface(
         *,
         key: str,
@@ -440,6 +445,27 @@ def assign_physical_groups(
             via_boundary.setdefault(via_parts[0], []).append(pg_tag)
         if via_boundary:
             groups["via_boundary_surfaces"] = via_boundary
+
+    # --- Internal material-interface surfaces ---
+    #
+    # The boolean pipeline labels unassigned surfaces by the two volume names
+    # they separate, e.g. "metal___substrate" or "substrate___vacuum". Preserve
+    # those names in the public groups dict so manifests, postprocessing
+    # builders, and report loaders can keep Palace indices tied to CAD/mesh
+    # identity instead of requiring private mesh readers.
+    for pg_name, pg_tag in pg_map.items():
+        if pg_name in groups["boundary_surfaces"]:
+            continue
+        if gmsh_utils.is_exterior_physical_name(pg_name):
+            continue
+        interface_parts = gmsh_utils.split_interface_physical_name(pg_name)
+        if len(interface_parts) != 2:
+            continue
+        groups["boundary_surfaces"][pg_name] = {
+            "phys_group": pg_tag,
+            "tags": _surface_tags_for_physical_group(pg_tag),
+            "physical_name": pg_name,
+        }
 
     # --- Boundary surfaces (outer faces labelled *___None by the pipeline) ---
     boundary_pgs: list[int] = [

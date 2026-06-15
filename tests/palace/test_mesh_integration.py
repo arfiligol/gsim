@@ -15,6 +15,7 @@ import pytest
 
 from gsim.common import Layer, LayerStack
 from gsim.palace import DrivenSim
+from gsim.palace.mesh.gmsh_utils import is_exterior_physical_name
 
 
 def _make_cpw_component():
@@ -149,6 +150,33 @@ class TestCPWMeshVolumetricConductors:
             name.endswith("__None") and not name.endswith("___None")
             for name in physical_names
         )
+
+    def test_manifest_preserves_generated_interface_identities(self, volumetric_sim):
+        """Generated internal interface groups remain visible in the manifest."""
+        groups = volumetric_sim._last_mesh_result.groups
+        interface_names = {
+            name
+            for name in groups["boundary_surfaces"]
+            if "___" in name and not is_exterior_physical_name(name)
+        }
+
+        assert interface_names
+
+        manifest_entries = {
+            entry.name: entry
+            for entry in volumetric_sim._last_mesh_result.manifest.entries
+            if entry.interface_of is not None
+        }
+
+        assert interface_names <= set(manifest_entries)
+        for name in interface_names:
+            entry = manifest_entries[name]
+            assert entry.role == "boundary_surface"
+            assert entry.attributes
+            assert entry.entity_tags
+            assert entry.physical_names == (name,)
+            assert entry.interface_of is not None
+            assert "None" not in entry.interface_of
 
     def test_config_json_valid(self, volumetric_sim):
         """Generated config.json must have required Palace sections."""
