@@ -148,6 +148,7 @@ from gsim.palace.results import (
     summarize_surface_loss,
     summarize_surface_q_by_interface,
     summarize_terminal_matrix_history,
+    write_palace_handoff_metadata,
     write_palace_sweep_points,
 )
 
@@ -250,6 +251,7 @@ __all__ = [
     "summarize_surface_loss",
     "summarize_surface_q_by_interface",
     "summarize_terminal_matrix_history",
+    "write_palace_handoff_metadata",
     "write_palace_sweep_points",
 ]
 

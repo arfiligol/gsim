@@ -57,6 +57,7 @@ _CORE_RUN_ARTIFACT_NAMES = (
 )
 _NON_RESULT_ARTIFACT_NAMES = (
     *_CORE_RUN_ARTIFACT_NAMES,
+    "palace_handoff_metadata.json",
     "palace_run_metadata.json",
     "port_information.json",
 )
@@ -68,6 +69,7 @@ _SWEEP_POINT_PATH_FIELDS = (
     "mesh_manifest_path",
     "index_map_path",
     "material_resolution_path",
+    "handoff_metadata_path",
     "runtime_metadata_path",
     "port_information_path",
 )
@@ -862,6 +864,7 @@ class PalaceRunSummary:
     mesh_manifest: dict[str, Any]
     index_map: dict[str, Any]
     material_resolution: dict[str, Any]
+    handoff: dict[str, Any]
     runtime: dict[str, Any]
 
     @property
@@ -885,6 +888,7 @@ class PalaceRunSummary:
             "mesh_manifest": dict(self.mesh_manifest),
             "index_map": dict(self.index_map),
             "material_resolution": dict(self.material_resolution),
+            "handoff": dict(self.handoff),
             "runtime": dict(self.runtime),
             "missing_artifacts": list(self.missing_artifacts),
         }
@@ -903,6 +907,7 @@ class PalaceSweepPointSpec:
     mesh_manifest_path: str | Path | None = None
     index_map_path: str | Path | None = None
     material_resolution_path: str | Path | None = None
+    handoff_metadata_path: str | Path | None = None
     runtime_metadata_path: str | Path | None = None
     port_information_path: str | Path | None = None
 
@@ -933,6 +938,8 @@ class PalaceSweepPointSummary:
         """Return one flat, table-friendly point summary row."""
         summary = self.run_summary
         runtime = summary.runtime
+        handoff = summary.handoff
+        handoff_profile = _as_mapping(handoff.get("profile"))
         record = {
             "point_slug": self.point_slug,
             "problem_type": summary.problem_type,
@@ -949,6 +956,11 @@ class PalaceSweepPointSummary:
             "runtime_elapsed_seconds": runtime.get("elapsed_seconds"),
             "runtime_output_count": runtime.get("output_count"),
             "runtime_output_bytes": runtime.get("output_bytes"),
+            "handoff_present": handoff.get("present") is True,
+            "handoff_status": handoff.get("status"),
+            "handoff_profile_name": handoff_profile.get("name"),
+            "handoff_script_present": handoff.get("script_present"),
+            "handoff_archive_present": handoff.get("archive_present"),
             "config_material_count": summary.config.get("material_count"),
             "mesh_manifest_entry_count": summary.mesh_manifest.get("entry_count"),
             "index_map_entry_count": summary.index_map.get("entry_count"),
@@ -1969,6 +1981,7 @@ def load_palace_run_summary(
     manifest_path = _find_mesh_manifest_json(source)
     index_map_path = _find_postprocessing_index_map(source)
     material_resolution_path = _find_material_resolution_json(source)
+    handoff_metadata_path = _find_handoff_metadata_json(source)
     runtime_metadata_path = _find_runtime_metadata_json(source)
     mesh_path = _find_mesh_file(source)
 
@@ -1998,8 +2011,69 @@ def load_palace_run_summary(
         material_resolution=_summarize_material_resolution_json(
             material_resolution_path
         ),
+        handoff=_summarize_handoff_metadata_json(handoff_metadata_path),
         runtime=_summarize_runtime_metadata_json(runtime_metadata_path),
     )
+
+
+def write_palace_handoff_metadata(
+    source: str | Path,
+    *,
+    status: str = "planned",
+    launcher: Mapping[str, Any] | None = None,
+    profile: Mapping[str, Any] | None = None,
+    resources: Mapping[str, Any] | None = None,
+    script_path: str | Path | None = None,
+    archive_path: str | Path | None = None,
+    command: Mapping[str, Any] | None = None,
+    metadata: Mapping[str, Any] | None = None,
+    filename: str = "palace_handoff_metadata.json",
+) -> Path:
+    """Write dry-run Palace handoff metadata beside a run or sweep point.
+
+    The sidecar records scheduler/profile intent and generated artifact
+    references only. It does not render an sbatch file, submit a job, package
+    archives, or infer cluster policy.
+
+    Args:
+        source: Run directory or direct JSON sidecar path.
+        status: Handoff state such as ``"planned"``, ``"packaged"``, or
+            ``"submitted"``.
+        launcher: Generic launcher metadata, for example ``{"kind": "slurm"}``.
+        profile: Resolved profile metadata, for example site or partition name.
+        resources: Requested or resolved resources.
+        script_path: Optional path to a generated batch script.
+        archive_path: Optional path to a generated handoff archive.
+        command: Redacted command shape for local review.
+        metadata: Additional JSON-friendly metadata.
+        filename: File name when ``source`` is a directory.
+
+    Returns:
+        Path to the written sidecar.
+    """
+    sidecar_path = _handoff_metadata_path(source, filename=filename)
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "status": str(status),
+    }
+    if launcher is not None:
+        payload["launcher"] = _json_ready(dict(launcher))
+    if profile is not None:
+        payload["profile"] = _json_ready(dict(profile))
+    if resources is not None:
+        payload["resources"] = _json_ready(dict(resources))
+    if script_path is not None:
+        payload["script"] = {"path": _path_value(script_path)}
+    if archive_path is not None:
+        payload["archive"] = {"path": _path_value(archive_path)}
+    if command is not None:
+        payload["command"] = _json_ready(dict(command))
+    if metadata is not None:
+        payload["metadata"] = _json_ready(dict(metadata))
+
+    sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+    sidecar_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return sidecar_path
 
 
 def write_palace_sweep_points(
@@ -5282,6 +5356,11 @@ def _sweep_points_path(source: str | Path, *, filename: str) -> Path:
     return path if path.suffix.lower() == ".json" else path / filename
 
 
+def _handoff_metadata_path(source: str | Path, *, filename: str) -> Path:
+    path = Path(source)
+    return path if path.suffix.lower() == ".json" else path / filename
+
+
 def _sweep_point_spec_row(
     point: PalaceSweepPointSpec | Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -5540,6 +5619,14 @@ def _palace_sweep_point_source(
     )
     _add_sweep_source_file(
         source,
+        "palace_handoff_metadata.json",
+        _resolve_sweep_path(sweep_root, point_spec.get("handoff_metadata_path")),
+        run_dir / "palace_handoff_metadata.json",
+        result_dir / "palace_handoff_metadata.json",
+        run_dir / "metadata" / "palace_handoff_metadata.json",
+    )
+    _add_sweep_source_file(
+        source,
         "palace_run_metadata.json",
         _resolve_sweep_path(sweep_root, point_spec.get("runtime_metadata_path")),
         result_dir / "palace_run_metadata.json",
@@ -5726,6 +5813,11 @@ def _find_mesh_file(source: str | Path | dict) -> Path | None:
 def _find_runtime_metadata_json(source: str | Path | dict) -> Path | None:
     """Search common local/cloud locations for local runtime metadata."""
     return _find_sidecar_artifact(source, "palace_run_metadata.json")
+
+
+def _find_handoff_metadata_json(source: str | Path | dict) -> Path | None:
+    """Search common local/cloud locations for handoff metadata."""
+    return _find_sidecar_artifact(source, "palace_handoff_metadata.json")
 
 
 def _find_sidecar_artifact(source: str | Path | dict, name: str) -> Path | None:
@@ -5921,6 +6013,38 @@ def _summarize_material_resolution_json(path: Path | None) -> dict[str, Any]:
         "material_validity": _count_mapping_values(materials, "within_validity"),
         "interface_validity": _count_mapping_values(interfaces, "within_validity"),
     }
+
+
+def _summarize_handoff_metadata_json(path: Path | None) -> dict[str, Any]:
+    if path is None or not path.exists():
+        return {"present": False}
+    data = json.loads(path.read_text())
+    script = _as_mapping(data.get("script"))
+    archive = _as_mapping(data.get("archive"))
+    script_path = _referenced_sidecar_path(path, script.get("path"))
+    archive_path = _referenced_sidecar_path(path, archive.get("path"))
+    return {
+        "present": True,
+        "schema_version": data.get("schema_version"),
+        "status": data.get("status"),
+        "launcher": _as_mapping(data.get("launcher")),
+        "profile": _as_mapping(data.get("profile")),
+        "resources": _as_mapping(data.get("resources")),
+        "script": script,
+        "script_present": script_path is not None and script_path.exists(),
+        "archive": archive,
+        "archive_present": archive_path is not None and archive_path.exists(),
+        "command": _as_mapping(data.get("command")),
+        "metadata": _as_mapping(data.get("metadata")),
+        "path": str(path),
+    }
+
+
+def _referenced_sidecar_path(sidecar_path: Path, value: Any) -> Path | None:
+    if value is None:
+        return None
+    path = Path(str(value))
+    return path if path.is_absolute() else sidecar_path.parent / path
 
 
 def _summarize_runtime_metadata_json(path: Path | None) -> dict[str, Any]:

@@ -42,6 +42,7 @@ from gsim.palace.results import (
     summarize_surface_loss,
     summarize_surface_q_by_interface,
     summarize_terminal_matrix_history,
+    write_palace_handoff_metadata,
     write_palace_sweep_points,
 )
 
@@ -816,6 +817,44 @@ class TestPalaceRunSummary:
         assert summary.runtime["present"] is False
         assert "palace.msh" in summary.missing_artifacts
 
+    def test_write_palace_handoff_metadata_round_trips_through_run_summary(
+        self,
+        indexed_report_dir: Path,
+    ) -> None:
+        script_path = indexed_report_dir / "run_palace.sbatch"
+        archive_path = indexed_report_dir.parent / "public-fixture-palace.tar.gz"
+        script_path.write_text("#!/bin/bash\n")
+        archive_path.write_text("archive placeholder\n")
+
+        sidecar_path = write_palace_handoff_metadata(
+            indexed_report_dir,
+            status="planned",
+            launcher={"kind": "slurm"},
+            profile={"name": "public-test:cpu", "partition": "cpu"},
+            resources={"nodes": 1, "tasks_per_node": 2, "wall_time": "00:10:00"},
+            script_path=script_path.name,
+            archive_path=archive_path,
+            command={"argv": ["sbatch", script_path.name]},
+            metadata={"campaign": "public_fixture"},
+        )
+
+        payload = json.loads(sidecar_path.read_text())
+        assert payload["schema_version"] == 1
+        assert payload["script"]["path"] == "run_palace.sbatch"
+
+        summary = load_palace_run_summary(indexed_report_dir)
+
+        assert summary.handoff["present"] is True
+        assert summary.handoff["status"] == "planned"
+        assert summary.handoff["launcher"] == {"kind": "slurm"}
+        assert summary.handoff["profile"]["name"] == "public-test:cpu"
+        assert summary.handoff["resources"]["nodes"] == 1
+        assert summary.handoff["script_present"] is True
+        assert summary.handoff["archive_present"] is True
+        assert summary.handoff["metadata"] == {"campaign": "public_fixture"}
+        assert "palace_handoff_metadata.json" not in summary.results
+        assert summary.to_dict()["handoff"]["present"] is True
+
 
 class TestPalaceSweepSummary:
     """Tests for reusable point-local Palace sweep summaries."""
@@ -944,6 +983,56 @@ class TestPalaceSweepSummary:
         assert as_dict["point_records"][0]["parameter_gap_um"] == 6.0
         assert as_dict["points"][0]["missing_artifacts"] == []
         assert as_dict["points"][0]["record"]["parameter_gap_um"] == 6.0
+
+    def test_load_palace_sweep_summary_includes_handoff_records(
+        self,
+        indexed_report_dir: Path,
+    ) -> None:
+        sweep_root = indexed_report_dir / "sweep_handoff"
+        point_root = sweep_root / "points" / "gap_6um"
+        _write_sweep_point_artifacts(indexed_report_dir, point_root)
+        (point_root / "run_palace.sbatch").write_text("#!/bin/bash\n")
+        write_palace_handoff_metadata(
+            point_root,
+            status="planned",
+            launcher={"kind": "slurm"},
+            profile={"name": "public-test:cpu"},
+            resources={"nodes": 1, "tasks_per_node": 1},
+            script_path="run_palace.sbatch",
+        )
+        points_path = write_palace_sweep_points(
+            sweep_root,
+            [
+                PalaceSweepPointSpec(
+                    point_slug="gap_6um",
+                    parameters={"gap_um": 6.0},
+                    run_dir="points/gap_6um",
+                    handoff_metadata_path=(
+                        "points/gap_6um/palace_handoff_metadata.json"
+                    ),
+                )
+            ],
+            sweep_id="handoff_sweep",
+        )
+        payload = json.loads(points_path.read_text())
+        assert payload["points"][0]["handoff_metadata_path"] == (
+            "points/gap_6um/palace_handoff_metadata.json"
+        )
+
+        summary = load_palace_sweep_summary(sweep_root)
+
+        point = summary.points[0]
+        assert point.run_summary.handoff["present"] is True
+        assert point.run_summary.handoff["profile"]["name"] == "public-test:cpu"
+        record = summary.to_point_records()[0]
+        assert record["handoff_present"] is True
+        assert record["handoff_status"] == "planned"
+        assert record["handoff_profile_name"] == "public-test:cpu"
+        assert record["handoff_script_present"] is True
+        assert record["handoff_archive_present"] is False
+        assert (
+            summary.to_dict()["points"][0]["run_summary"]["handoff"]["present"] is True
+        )
 
     def test_load_palace_sweep_summary_reports_duplicate_point_slugs(
         self,
