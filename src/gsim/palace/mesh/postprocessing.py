@@ -165,8 +165,9 @@ class DielectricInterfaceSpec:
 
     interface_type: DielectricInterfaceType
     thickness: float
-    permittivity: float
+    permittivity: float | None = None
     loss_tangent: float = 0.0
+    material_name: str | None = None
     role: MeshRole | str = "boundary_surface"
     entry_names: tuple[str, ...] = ()
 
@@ -260,6 +261,11 @@ def build_postprocessing_config_from_manifest(
 
     dielectric_index = 1
     for spec in dielectric_interfaces:
+        if spec.permittivity is None and spec.material_name is None:
+            msg = (
+                "DielectricInterfaceSpec requires either permittivity or material_name."
+            )
+            raise ValueError(msg)
         for entry in _selected_entries(
             manifest=manifest,
             role=spec.role,
@@ -267,16 +273,18 @@ def build_postprocessing_config_from_manifest(
         ):
             if not entry.attributes:
                 continue
-            boundaries["Dielectric"].append(
-                {
-                    "Index": dielectric_index,
-                    "Attributes": list(entry.attributes),
-                    "Type": spec.interface_type,
-                    "Thickness": spec.thickness,
-                    "Permittivity": spec.permittivity,
-                    "LossTan": spec.loss_tangent,
-                }
-            )
+            dielectric_entry: dict[str, Any] = {
+                "Index": dielectric_index,
+                "Attributes": list(entry.attributes),
+                "Type": spec.interface_type,
+                "Thickness": spec.thickness,
+                "LossTan": spec.loss_tangent,
+            }
+            if spec.permittivity is not None:
+                dielectric_entry["Permittivity"] = spec.permittivity
+            if spec.material_name is not None:
+                dielectric_entry["_MaterialName"] = spec.material_name
+            boundaries["Dielectric"].append(dielectric_entry)
             index_entries.append(
                 _index_entry(
                     section="Boundaries.Postprocessing.Dielectric",

@@ -199,6 +199,34 @@ def indexed_report_dir(tmp_path: Path) -> Path:
                 },
             },
         ],
+        "interfaces": [
+            {
+                "interface_row_index": 1,
+                "surface_index": 2,
+                "surface_attributes": [20],
+                "interface_type": "MA",
+                "interface_material_name": "AlOx_native_generic",
+                "matched_material_name": "AlOx_native_generic",
+                "evaluation_frequency_hz": 5.0e9,
+                "evaluation_frequency_ghz": 5.0,
+                "model_type": "constant",
+                "model_source": "test PDK interface material",
+                "within_validity": True,
+                "validity_note": None,
+                "effective_material": {
+                    "permittivity": 10.0,
+                    "loss_tangent": 0.0033,
+                },
+                "palace_interface": {
+                    "Index": 2,
+                    "Attributes": [20],
+                    "Type": "MA",
+                    "Thickness": 0.002,
+                    "Permittivity": 10.0,
+                    "LossTan": 0.0033,
+                },
+            }
+        ],
     }
     (tmp_path / "palace_material_resolution.json").write_text(
         json.dumps(material_resolution)
@@ -883,6 +911,14 @@ class TestIndexedReportSummaries:
         assert by_index.loc[2, "thickness"] == pytest.approx(0.002)
         assert by_index.loc[2, "permittivity"] == pytest.approx(10.0)
         assert by_index.loc[2, "loss_tangent"] == pytest.approx(0.0033)
+        assert by_index.loc[2, "interface_material_name"] == "AlOx_native_generic"
+        assert by_index.loc[2, "matched_material_name"] == "AlOx_native_generic"
+        assert by_index.loc[2, "material_model_type"] == "constant"
+        assert by_index.loc[2, "material_model_source"] == (
+            "test PDK interface material"
+        )
+        assert bool(by_index.loc[2, "material_within_validity"])
+        assert by_index.loc[2, "material_frequency_ghz"] == pytest.approx(5.0)
 
     def test_load_dielectric_interface_summary_keeps_unmapped_interfaces(
         self, indexed_report_dir: Path

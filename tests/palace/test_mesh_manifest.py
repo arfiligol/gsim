@@ -246,6 +246,79 @@ def test_write_config_applies_material_overlay_without_mutating_stack(
     assert row["model_source"] == "test PDK"
 
 
+def test_write_config_resolves_dielectric_interface_material_overlay(
+    tmp_path: Path,
+) -> None:
+    groups = {
+        "volumes": {"Si": {"phys_group": 1}},
+        "conductor_surfaces": {},
+        "pec_surfaces": {},
+        "port_surfaces": {},
+        "boundary_surfaces": {"sa_boundary": {"phys_group": 70}},
+    }
+    stack = LayerStack(materials={"Si": {"permittivity": 11.45}})
+    postprocessing = {
+        "Dielectric": [
+            {
+                "Index": 7,
+                "Attributes": [70],
+                "Type": "SA",
+                "Thickness": 0.003,
+                "_MaterialName": "AlOx_native_generic",
+            }
+        ]
+    }
+
+    config_path = generate_palace_config(
+        groups=groups,
+        ports=[],
+        port_info=[],
+        stack=stack,
+        output_path=tmp_path,
+        model_name="palace",
+        fmax=5e9,
+        absorbing_boundary=False,
+        boundary_postprocessing_config=postprocessing,
+        material_overlay={
+            "materials": {
+                "AlOx_native_generic": {
+                    "relative_permittivity": 10.0,
+                    "loss_tangent": 0.0017,
+                    "dispersion_models": [
+                        {
+                            "type": "constant",
+                            "permittivity": 10.0,
+                            "validity_frequency": [0, 10e9],
+                            "source": "test PDK interface material",
+                        }
+                    ],
+                }
+            }
+        },
+    )
+
+    interface = json.loads(config_path.read_text())["Boundaries"]["Postprocessing"][
+        "Dielectric"
+    ][0]
+    assert "_MaterialName" not in interface
+    assert interface["Permittivity"] == 10.0
+    assert interface["LossTan"] == 0.0017
+
+    material_resolution = json.loads(
+        (tmp_path / "palace_material_resolution.json").read_text()
+    )
+    row = material_resolution["interfaces"][0]
+    assert row["surface_index"] == 7
+    assert row["surface_attributes"] == [70]
+    assert row["interface_type"] == "SA"
+    assert row["interface_material_name"] == "AlOx_native_generic"
+    assert row["matched_material_name"] == "AlOx_native_generic"
+    assert row["palace_interface"]["Permittivity"] == 10.0
+    assert row["palace_interface"]["LossTan"] == 0.0017
+    assert row["model_type"] == "constant"
+    assert row["model_source"] == "test PDK interface material"
+
+
 def test_build_postprocessing_config_from_manifest_has_stable_indices(
     tmp_path: Path,
 ) -> None:
@@ -374,6 +447,34 @@ def test_build_postprocessing_config_from_manifest_has_stable_indices(
 
     assert index_map_json["schema_version"] == 1
     assert index_map_json["entries"][0]["entry_name"] == "substrate"
+
+
+def test_build_postprocessing_config_supports_interface_material_reference() -> None:
+    manifest = build_mesh_manifest(_minimal_groups())
+
+    config = build_postprocessing_config_from_manifest(
+        manifest,
+        dielectric_interfaces=(
+            DielectricInterfaceSpec(
+                role="boundary_surface",
+                entry_names=("absorbing",),
+                interface_type="SA",
+                thickness=0.003,
+                material_name="AlOx_native_generic",
+            ),
+        ),
+    )
+
+    assert config.boundaries["Dielectric"] == [
+        {
+            "Index": 1,
+            "Attributes": [41, 42],
+            "Type": "SA",
+            "Thickness": 0.003,
+            "LossTan": 0.0,
+            "_MaterialName": "AlOx_native_generic",
+        }
+    ]
 
 
 def test_postprocessing_index_map_supports_bidirectional_lookup() -> None:

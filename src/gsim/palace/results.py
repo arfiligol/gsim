@@ -93,6 +93,15 @@ _DIELECTRIC_INTERFACE_COLUMNS = (
     "thickness",
     "permittivity",
     "loss_tangent",
+    "interface_material_name",
+    "matched_material_name",
+    "material_model_type",
+    "material_model_source",
+    "material_within_validity",
+    "material_validity_note",
+    "material_frequency_hz",
+    "material_frequency_ghz",
+    "raw_material_resolution",
     "raw_interface",
 )
 _DOMAIN_LOSS_COLUMNS = (
@@ -2417,6 +2426,7 @@ def load_dielectric_interface_summary(
     *,
     config_path: str | Path | None = None,
     index_map_path: str | Path | None = None,
+    material_resolution_path: str | Path | None = None,
 ) -> pd.DataFrame:
     """Load Palace dielectric postprocessing interfaces with provenance.
 
@@ -2440,11 +2450,20 @@ def load_dielectric_interface_summary(
         source,
         index_map_path=index_map_path,
     )
+    material_resolution_rows = _load_optional_interface_material_resolution_rows(
+        source,
+        material_resolution_path=material_resolution_path,
+    )
 
     rows: list[dict[str, Any]] = []
     for interface_row_index, interface in enumerate(interfaces, start=1):
         surface_index = _optional_int(_config_material_value(interface, "Index"))
         attributes = _material_attributes(interface)
+        interface_resolution = _matching_interface_material_resolution_row(
+            material_resolution_rows,
+            interface_row_index=interface_row_index,
+            surface_index=surface_index,
+        )
         matches = _dielectric_interface_matches(
             index_map,
             surface_index=surface_index,
@@ -2459,6 +2478,7 @@ def load_dielectric_interface_summary(
                     surface_attributes=attributes,
                     interface=interface,
                     index_entry=None,
+                    material_resolution=interface_resolution,
                 )
             )
             continue
@@ -2470,6 +2490,7 @@ def load_dielectric_interface_summary(
                 surface_attributes=attributes,
                 interface=interface,
                 index_entry=index_entry,
+                material_resolution=interface_resolution,
             )
             for index_entry in matches
         )
@@ -2580,6 +2601,24 @@ def _load_optional_material_resolution_rows(
         return ()
     data = json.loads(resolved_path.read_text())
     rows = data.get("materials", ()) if isinstance(data, dict) else ()
+    if not isinstance(rows, (list, tuple)):
+        return ()
+    return tuple(dict(row) for row in rows if isinstance(row, dict))
+
+
+def _load_optional_interface_material_resolution_rows(
+    source: str | Path | dict,
+    *,
+    material_resolution_path: str | Path | None,
+) -> tuple[dict[str, Any], ...]:
+    resolved_path = _find_optional_material_resolution_path(
+        source,
+        material_resolution_path=material_resolution_path,
+    )
+    if resolved_path is None or not resolved_path.exists():
+        return ()
+    data = json.loads(resolved_path.read_text())
+    rows = data.get("interfaces", ()) if isinstance(data, dict) else ()
     if not isinstance(rows, (list, tuple)):
         return ()
     return tuple(dict(row) for row in rows if isinstance(row, dict))
@@ -2725,6 +2764,23 @@ def _matching_material_resolution_row(
     return None
 
 
+def _matching_interface_material_resolution_row(
+    rows: tuple[dict[str, Any], ...],
+    *,
+    interface_row_index: int,
+    surface_index: int | None,
+) -> dict[str, Any] | None:
+    if surface_index is not None:
+        for row in rows:
+            if _optional_int(row.get("surface_index")) == surface_index:
+                return row
+
+    for row in rows:
+        if _optional_int(row.get("interface_row_index")) == interface_row_index:
+            return row
+    return None
+
+
 def _material_resolution_value(
     material_resolution: dict[str, Any] | None,
     key: str,
@@ -2801,6 +2857,7 @@ def _dielectric_interface_row(
     surface_attributes: tuple[int, ...],
     interface: dict[str, Any],
     index_entry: Any | None,
+    material_resolution: dict[str, Any] | None,
 ) -> dict[str, Any]:
     physical_name = None
     entry_name = None
@@ -2855,6 +2912,39 @@ def _dielectric_interface_row(
                 "loss_tangent",
                 "tan_delta",
             )
+        ),
+        "interface_material_name": _material_resolution_value(
+            material_resolution,
+            "interface_material_name",
+        ),
+        "matched_material_name": _material_resolution_value(
+            material_resolution,
+            "matched_material_name",
+        ),
+        "material_model_type": _material_resolution_value(
+            material_resolution,
+            "model_type",
+        ),
+        "material_model_source": _material_resolution_value(
+            material_resolution,
+            "model_source",
+        ),
+        "material_within_validity": _material_resolution_value(
+            material_resolution,
+            "within_validity",
+        ),
+        "material_validity_note": _material_resolution_value(
+            material_resolution,
+            "validity_note",
+        ),
+        "material_frequency_hz": _optional_numeric(
+            _material_resolution_value(material_resolution, "evaluation_frequency_hz")
+        ),
+        "material_frequency_ghz": _optional_numeric(
+            _material_resolution_value(material_resolution, "evaluation_frequency_ghz")
+        ),
+        "raw_material_resolution": (
+            {} if material_resolution is None else dict(material_resolution)
         ),
         "raw_interface": dict(interface),
     }

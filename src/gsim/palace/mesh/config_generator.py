@@ -164,15 +164,15 @@ def generate_palace_config(
 
     # Build domains section
     # Evaluate dispersion models at the center frequency of the sweep band
+    material_frequency = (
+        driven_config.center_frequency if driven_config is not None else fmax
+    )
     stack_materials = stack.materials
     material_resolution_by_name: dict[str, dict[str, Any]] = {}
     material_resolution_rows: list[dict[str, Any]] = []
     if driven_config is not None or material_overlay is not None:
         from gsim.palace.materials import resolve_palace_materials_with_report
 
-        material_frequency = (
-            driven_config.center_frequency if driven_config is not None else fmax
-        )
         stack_materials, material_resolution_report = (
             resolve_palace_materials_with_report(
                 stack.materials,
@@ -596,7 +596,14 @@ def generate_palace_config(
             else {}
         )
         boundary_postprocessing.update(deepcopy(boundary_postprocessing_config))
+        interface_resolution_rows = _resolve_boundary_dielectric_interfaces(
+            boundary_postprocessing,
+            material_frequency_hz=material_frequency,
+            material_overlay=material_overlay,
+        )
         boundaries["Postprocessing"] = boundary_postprocessing
+    else:
+        interface_resolution_rows = []
 
     # Merge any extra hints into the config
     if hints:
@@ -607,13 +614,14 @@ def generate_palace_config(
     with config_path.open("w") as f:
         json.dump(config, f, indent=4)
 
-    if material_resolution_rows:
+    if material_resolution_rows or interface_resolution_rows:
         material_resolution_path = output_path / "palace_material_resolution.json"
         with material_resolution_path.open("w") as f:
             json.dump(
                 {
                     "schema_version": 1,
                     "materials": material_resolution_rows,
+                    "interfaces": interface_resolution_rows,
                 },
                 f,
                 indent=4,
@@ -648,6 +656,119 @@ def _material_resolution_config_row(
     }
     row.update(dict(resolution))
     return row
+
+
+def _resolve_boundary_dielectric_interfaces(
+    boundary_postprocessing: dict[str, Any],
+    *,
+    material_frequency_hz: float,
+    material_overlay: Any | None,
+) -> list[dict[str, Any]]:
+    dielectric_rows = boundary_postprocessing.get("Dielectric")
+    if not isinstance(dielectric_rows, list):
+        return []
+
+    resolution_rows: list[dict[str, Any]] = []
+    for interface_row_index, interface in enumerate(dielectric_rows, start=1):
+        if not isinstance(interface, dict):
+            continue
+        material_name = interface.pop("_MaterialName", None)
+        if material_name is None:
+            continue
+
+        material_name = str(material_name)
+        resolved_material, resolution = _resolve_single_interface_material(
+            material_name,
+            material_frequency_hz=material_frequency_hz,
+            material_overlay=material_overlay,
+        )
+        if "permittivity" in resolved_material:
+            interface["Permittivity"] = resolved_material["permittivity"]
+        if "loss_tangent" in resolved_material:
+            interface["LossTan"] = resolved_material["loss_tangent"]
+        elif "LossTan" not in interface:
+            interface["LossTan"] = 0.0
+
+        if "Permittivity" not in interface:
+            msg = (
+                "Dielectric interface material resolution did not provide "
+                f"Permittivity for {material_name!r}."
+            )
+            raise ValueError(msg)
+
+        resolution_rows.append(
+            _interface_material_resolution_config_row(
+                interface_row_index=interface_row_index,
+                surface_index=_optional_int(interface.get("Index")),
+                surface_attributes=_int_list(interface.get("Attributes")),
+                interface_type=interface.get("Type"),
+                material_name=material_name,
+                palace_interface=interface,
+                resolution=resolution,
+            )
+        )
+    return resolution_rows
+
+
+def _resolve_single_interface_material(
+    material_name: str,
+    *,
+    material_frequency_hz: float,
+    material_overlay: Any | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    from gsim.palace.materials import resolve_palace_materials_with_report
+
+    resolved, report = resolve_palace_materials_with_report(
+        {material_name: {}},
+        material_frequency_hz,
+        material_overlay=material_overlay,
+    )
+    resolution_rows = report.get("materials", ())
+    resolution = (
+        dict(resolution_rows[0])
+        if isinstance(resolution_rows, list) and resolution_rows
+        else {}
+    )
+    return dict(resolved.get(material_name, {})), resolution
+
+
+def _interface_material_resolution_config_row(
+    *,
+    interface_row_index: int,
+    surface_index: int | None,
+    surface_attributes: list[int],
+    interface_type: Any,
+    material_name: str,
+    palace_interface: dict[str, object],
+    resolution: dict[str, Any],
+) -> dict[str, Any]:
+    row = {
+        "interface_row_index": interface_row_index,
+        "surface_index": surface_index,
+        "surface_attributes": surface_attributes,
+        "interface_type": interface_type,
+        "interface_material_name": material_name,
+        "palace_interface": dict(palace_interface),
+    }
+    row.update(dict(resolution))
+    return row
+
+
+def _optional_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    return None
+
+
+def _int_list(value: Any) -> list[int]:
+    if isinstance(value, (str, bytes)) or value is None:
+        return []
+    try:
+        return [int(item) for item in value]
+    except (TypeError, ValueError):
+        return []
 
 
 def collect_mesh_stats() -> dict:
