@@ -299,6 +299,36 @@ def _write_sweep_point_artifacts(
         shutil.copy(csv_path, result_dir / csv_path.name)
 
 
+def _single_point_report_sweep(
+    sweep_root: Path,
+    run_dir: Path,
+    *,
+    point_slug: str,
+    problem_type: str,
+) -> PalaceSweepSummary:
+    sweep_root.mkdir(parents=True)
+    config_path = run_dir / "config.json"
+    config = json.loads(config_path.read_text()) if config_path.exists() else {}
+    config["Problem"] = {"Type": problem_type}
+    config_path.write_text(json.dumps(config))
+    (sweep_root / "points.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "sweep_id": f"{point_slug}_sweep",
+                "points": [
+                    {
+                        "point_slug": point_slug,
+                        "parameters": {"problem_type": problem_type},
+                        "run_dir": str(run_dir),
+                    }
+                ],
+            }
+        )
+    )
+    return load_palace_sweep_summary(sweep_root, include_report_metrics=True)
+
+
 @pytest.fixture
 def driven_report_dir(indexed_report_dir: Path) -> Path:
     """Create a Palace driven report output with S-parameters and port EPR."""
@@ -894,6 +924,102 @@ class TestPalaceSweepSummary:
         )
         assert point.run_summary.runtime["present"] is True
         assert point.run_summary.missing_artifacts == ()
+
+    def test_load_palace_sweep_summary_report_metrics_for_driven(
+        self,
+        tmp_path: Path,
+        driven_report_dir: Path,
+    ) -> None:
+        summary = _single_point_report_sweep(
+            tmp_path / "driven_sweep",
+            driven_report_dir,
+            point_slug="driven_point",
+            problem_type="Driven",
+        )
+
+        point = summary.points[0]
+        assert point.report_metrics["status"] == "loaded"
+        assert point.report_metrics["frequency_point_count"] == 2
+        assert point.report_metrics["port_count"] == 1
+        assert point.report_metrics["s_parameter_count"] == 1
+        assert point.report_metrics["port_epr_rows"] == 1
+
+        record = summary.to_point_records()[0]
+        assert record["report_status"] == "loaded"
+        assert record["report_frequency_point_count"] == 2
+        assert record["report_s_parameter_count"] == 1
+
+    def test_load_palace_sweep_summary_report_metrics_for_eigenmode(
+        self,
+        tmp_path: Path,
+        eigenmode_report_dir: Path,
+    ) -> None:
+        summary = _single_point_report_sweep(
+            tmp_path / "eigenmode_sweep",
+            eigenmode_report_dir,
+            point_slug="eigenmode_point",
+            problem_type="Eigenmode",
+        )
+
+        point = summary.points[0]
+        assert point.report_metrics["status"] == "loaded"
+        assert point.report_metrics["mode_count"] == 2
+        assert point.report_metrics["pass_count"] == 2
+        assert point.report_metrics["min_frequency_ghz"] == pytest.approx(6.3)
+        assert point.report_metrics["min_q"] == pytest.approx(110.0)
+        assert point.report_metrics["loss_budget_rows"] == 2
+
+        record = summary.to_point_records()[0]
+        assert record["report_status"] == "loaded"
+        assert record["report_mode_count"] == 2
+        assert record["report_loss_budget_rows"] == 2
+
+    def test_load_palace_sweep_summary_report_metrics_for_electrostatic(
+        self,
+        tmp_path: Path,
+        electrostatic_report_dir: Path,
+    ) -> None:
+        summary = _single_point_report_sweep(
+            tmp_path / "electrostatic_sweep",
+            electrostatic_report_dir,
+            point_slug="electrostatic_point",
+            problem_type="Electrostatic",
+        )
+
+        point = summary.points[0]
+        assert point.report_metrics["status"] == "loaded"
+        assert point.report_metrics["terminal_count"] == 2
+        assert point.report_metrics["capacitance_row_count"] == 2
+        assert point.report_metrics["capacitance_column_count"] == 2
+        assert point.report_metrics["has_mutual_capacitance"] is True
+        assert point.report_metrics["has_inverse_capacitance"] is True
+        assert point.report_metrics["loss_budget_rows"] == 2
+
+        record = summary.to_point_records()[0]
+        assert record["report_status"] == "loaded"
+        assert record["report_terminal_count"] == 2
+        assert record["report_has_mutual_capacitance"] is True
+
+    def test_load_palace_sweep_summary_report_metrics_can_record_missing_reports(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        run_dir = tmp_path / "missing_driven_report"
+        run_dir.mkdir()
+        (run_dir / "config.json").write_text(
+            json.dumps({"Problem": {"Type": "Driven"}})
+        )
+        summary = _single_point_report_sweep(
+            tmp_path / "missing_report_sweep",
+            run_dir,
+            point_slug="missing_report_point",
+            problem_type="Driven",
+        )
+
+        point = summary.points[0]
+        assert point.report_metrics["status"] == "missing"
+        assert point.report_metrics["problem_type"] == "Driven"
+        assert "port-S.csv" in point.report_metrics["message"]
 
 
 class TestDrivenReport:

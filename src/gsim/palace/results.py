@@ -54,7 +54,11 @@ _CORE_RUN_ARTIFACT_NAMES = (
     "palace_index_map.json",
     "palace_material_resolution.json",
 )
-_NON_RESULT_ARTIFACT_NAMES = (*_CORE_RUN_ARTIFACT_NAMES, "palace_run_metadata.json")
+_NON_RESULT_ARTIFACT_NAMES = (
+    *_CORE_RUN_ARTIFACT_NAMES,
+    "palace_run_metadata.json",
+    "port_information.json",
+)
 _REPORT_SOURCE_COLUMNS = ("name", "path", "required", "present", "loaded", "message")
 _DOMAIN_MATERIAL_COLUMNS = (
     "material_row_index",
@@ -882,6 +886,7 @@ class PalaceSweepPointSummary:
     parameters: dict[str, Any]
     source: dict[str, Path] | Path
     run_summary: PalaceRunSummary
+    report_metrics: dict[str, Any] = field(default_factory=dict)
 
     def to_record(self) -> dict[str, Any]:
         """Return one flat, table-friendly point summary row."""
@@ -913,6 +918,8 @@ class PalaceSweepPointSummary:
                 "interface_count"
             ),
         }
+        for key, value in sorted(self.report_metrics.items()):
+            record[f"report_{_record_column_key(key)}"] = _record_value(value)
         for key, value in sorted(self.parameters.items()):
             record[f"parameter_{_record_column_key(key)}"] = _record_value(value)
         return record
@@ -929,6 +936,7 @@ class PalaceSweepPointSummary:
             "parameters": dict(self.parameters),
             "source": source,
             "run_summary": self.run_summary.to_dict(),
+            "report_metrics": dict(self.report_metrics),
             "record": self.to_record(),
             "missing_artifacts": list(self.run_summary.missing_artifacts),
         }
@@ -1945,18 +1953,22 @@ def load_palace_sweep_summary(
     source: str | Path,
     *,
     include_hashes: bool = False,
+    include_report_metrics: bool = False,
 ) -> PalaceSweepSummary:
     """Load a compact summary for a point-local Palace sweep.
 
     The sweep root must provide a ``points.json`` file. Each point row may
     contain ``point_slug``, ``parameters``, ``run_dir``, ``result_dir``,
     ``config_path``, and ``mesh_path`` fields. Point-local artifact loading
-    reuses :func:`load_palace_run_summary`; this helper does not infer point
-    identity from folder names alone and does not run Palace.
+    reuses :func:`load_palace_run_summary`; optional report metrics reuse the
+    composed Driven/Eigenmode/Electrostatic report loaders. This helper does not
+    infer point identity from folder names alone and does not run Palace.
 
     Args:
         source: Sweep root directory or direct ``points.json`` path.
         include_hashes: Include SHA-256 checksums for present point files.
+        include_report_metrics: Include compact physics/report metrics when the
+            point has the result files required by its Palace problem type.
 
     Returns:
         :class:`PalaceSweepSummary` with one run summary per sweep point.
@@ -2000,12 +2012,18 @@ def load_palace_sweep_summary(
             point_source,
             include_hashes=include_hashes,
         )
+        report_metrics = (
+            _load_sweep_point_report_metrics(point_source, run_summary.problem_type)
+            if include_report_metrics
+            else {}
+        )
         points.append(
             PalaceSweepPointSummary(
                 point_slug=point_slug,
                 parameters=dict(parameters),
                 source=point_source,
                 run_summary=run_summary,
+                report_metrics=report_metrics,
             )
         )
 
@@ -5176,6 +5194,111 @@ def _record_value(value: Any) -> Any:
     return json.dumps(value, sort_keys=True)
 
 
+def _load_sweep_point_report_metrics(
+    source: str | Path | dict,
+    problem_type: str | None,
+) -> dict[str, Any]:
+    normalized = (problem_type or "").strip().lower()
+    if not normalized:
+        return {
+            "status": "skipped",
+            "problem_type": None,
+            "message": "problem type unavailable",
+        }
+
+    try:
+        if normalized == "driven":
+            return _driven_report_metrics(load_driven_report(source))
+        if normalized == "eigenmode":
+            return _eigenmode_report_metrics(load_eigenmode_report(source))
+        if normalized == "electrostatic":
+            return _electrostatic_report_metrics(load_electrostatic_report(source))
+    except FileNotFoundError as exc:
+        return {
+            "status": "missing",
+            "problem_type": problem_type,
+            "message": str(exc),
+        }
+    except ValueError as exc:
+        return {
+            "status": "error",
+            "problem_type": problem_type,
+            "message": str(exc),
+        }
+
+    return {
+        "status": "skipped",
+        "problem_type": problem_type,
+        "message": f"unsupported Palace problem type {problem_type!r}",
+    }
+
+
+def _driven_report_metrics(report: DrivenReport) -> dict[str, Any]:
+    return {
+        "status": "loaded",
+        "problem_type": "Driven",
+        "frequency_point_count": len(report.sparams.freq),
+        "port_count": len(report.sparams.port_names),
+        "s_parameter_count": len(report.sparams.keys()),
+        "port_epr_rows": len(report.port_epr),
+        "domain_material_rows": len(report.domain_materials),
+        "dielectric_interface_rows": len(report.dielectric_interfaces),
+        "index_map_rows": len(report.index_map),
+        "missing_reports": ",".join(report.missing_reports),
+    }
+
+
+def _eigenmode_report_metrics(report: EigenmodeReport) -> dict[str, Any]:
+    return {
+        "status": "loaded",
+        "problem_type": "Eigenmode",
+        "mode_count": int(report.eigenmodes.n_modes),
+        "pass_count": len(report.pass_summary),
+        "min_frequency_ghz": _finite_min(report.eigenmodes.freq_real_ghz),
+        "min_q": _finite_min(report.eigenmodes.q),
+        "domain_energy_rows": len(report.domain_energy),
+        "surface_q_rows": len(report.surface_q),
+        "port_epr_rows": len(report.port_epr),
+        "loss_budget_rows": len(report.loss_budget),
+        "min_q_total": _dataframe_column_min(report.loss_budget, "q_total"),
+        "index_map_rows": len(report.index_map),
+        "missing_reports": ",".join(report.missing_reports),
+    }
+
+
+def _electrostatic_report_metrics(report: ElectrostaticReport) -> dict[str, Any]:
+    rows, columns = report.capacitance.dataframe.shape
+    return {
+        "status": "loaded",
+        "problem_type": "Electrostatic",
+        "terminal_count": len(report.capacitance.terminal_names),
+        "capacitance_row_count": int(rows),
+        "capacitance_column_count": int(columns),
+        "has_mutual_capacitance": report.mutual_capacitance is not None,
+        "has_inverse_capacitance": report.inverse_capacitance is not None,
+        "domain_energy_rows": len(report.domain_energy),
+        "surface_q_rows": len(report.surface_q),
+        "loss_budget_rows": len(report.loss_budget),
+        "min_q_total": _dataframe_column_min(report.loss_budget, "q_total"),
+        "index_map_rows": len(report.index_map),
+        "missing_reports": ",".join(report.missing_reports),
+    }
+
+
+def _finite_min(values: Any) -> float | None:
+    array = np.asarray(values, dtype=float)
+    finite = array[np.isfinite(array)]
+    if finite.size == 0:
+        return None
+    return float(np.min(finite))
+
+
+def _dataframe_column_min(frame: Any, column: str) -> float | None:
+    if getattr(frame, "empty", True) or column not in frame.columns:
+        return None
+    return _finite_min(frame[column].to_numpy())
+
+
 def _palace_sweep_point_source(
     sweep_root: Path,
     point_spec: dict[str, Any],
@@ -5250,6 +5373,20 @@ def _palace_sweep_point_source(
         run_dir / "palace_run_metadata.json",
         run_dir / "output" / "palace" / "palace_run_metadata.json",
         run_dir / "palace" / "palace_run_metadata.json",
+    )
+    _add_sweep_source_file(
+        source,
+        "port_information.json",
+        _resolve_sweep_path(
+            sweep_root,
+            _first_mapping_value(
+                point_spec,
+                ("port_information_path", "port_info_path"),
+            ),
+        ),
+        run_dir / "port_information.json",
+        run_dir / "output" / "port_information.json",
+        result_dir / "port_information.json",
     )
 
     _add_sweep_result_files(source, result_dir)
