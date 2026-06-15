@@ -54,6 +54,7 @@ _CORE_RUN_ARTIFACT_NAMES = (
     "palace_index_map.json",
     "palace_material_resolution.json",
 )
+_NON_RESULT_ARTIFACT_NAMES = (*_CORE_RUN_ARTIFACT_NAMES, "palace_run_metadata.json")
 _REPORT_SOURCE_COLUMNS = ("name", "path", "required", "present", "loaded", "message")
 _DOMAIN_MATERIAL_COLUMNS = (
     "material_row_index",
@@ -845,6 +846,7 @@ class PalaceRunSummary:
     mesh_manifest: dict[str, Any]
     index_map: dict[str, Any]
     material_resolution: dict[str, Any]
+    runtime: dict[str, Any]
 
     @property
     def missing_artifacts(self) -> tuple[str, ...]:
@@ -867,6 +869,7 @@ class PalaceRunSummary:
             "mesh_manifest": dict(self.mesh_manifest),
             "index_map": dict(self.index_map),
             "material_resolution": dict(self.material_resolution),
+            "runtime": dict(self.runtime),
             "missing_artifacts": list(self.missing_artifacts),
         }
 
@@ -1760,6 +1763,7 @@ def load_palace_run_summary(
     manifest_path = _find_mesh_manifest_json(source)
     index_map_path = _find_postprocessing_index_map(source)
     material_resolution_path = _find_material_resolution_json(source)
+    runtime_metadata_path = _find_runtime_metadata_json(source)
     mesh_path = _find_mesh_file(source)
 
     artifact_paths = {
@@ -1788,6 +1792,7 @@ def load_palace_run_summary(
         material_resolution=_summarize_material_resolution_json(
             material_resolution_path
         ),
+        runtime=_summarize_runtime_metadata_json(runtime_metadata_path),
     )
 
 
@@ -5022,6 +5027,11 @@ def _find_mesh_file(source: str | Path | dict) -> Path | None:
     return _find_sidecar_artifact(source, "palace.msh")
 
 
+def _find_runtime_metadata_json(source: str | Path | dict) -> Path | None:
+    """Search common local/cloud locations for local runtime metadata."""
+    return _find_sidecar_artifact(source, "palace_run_metadata.json")
+
+
 def _find_sidecar_artifact(source: str | Path | dict, name: str) -> Path | None:
     if isinstance(source, dict):
         explicit = source.get(name)
@@ -5056,7 +5066,7 @@ def _palace_result_files(source: str | Path | dict) -> dict[str, Path]:
         return {
             str(name): Path(value)
             for name, value in sorted(source.items())
-            if str(name) not in _CORE_RUN_ARTIFACT_NAMES and Path(value).is_file()
+            if str(name) not in _NON_RESULT_ARTIFACT_NAMES and Path(value).is_file()
         }
 
     path = Path(source)
@@ -5078,7 +5088,7 @@ def _palace_result_files(source: str | Path | dict) -> dict[str, Path]:
                 for child in sorted(candidate.iterdir())
                 if child.is_file()
                 and not child.name.startswith(".")
-                and child.name not in _CORE_RUN_ARTIFACT_NAMES
+                and child.name not in _NON_RESULT_ARTIFACT_NAMES
             }
             if files:
                 return files
@@ -5214,6 +5224,30 @@ def _summarize_material_resolution_json(path: Path | None) -> dict[str, Any]:
         ),
         "material_validity": _count_mapping_values(materials, "within_validity"),
         "interface_validity": _count_mapping_values(interfaces, "within_validity"),
+    }
+
+
+def _summarize_runtime_metadata_json(path: Path | None) -> dict[str, Any]:
+    if path is None or not path.exists():
+        return {"present": False}
+    data = json.loads(path.read_text())
+    outputs = _as_mapping(data.get("outputs"))
+    output_bytes = 0
+    for output in outputs.values():
+        if isinstance(output, dict):
+            output_bytes += int(output.get("bytes", 0) or 0)
+    return {
+        "present": True,
+        "schema_version": data.get("schema_version"),
+        "status": data.get("status"),
+        "return_code": data.get("return_code"),
+        "elapsed_seconds": data.get("elapsed_seconds"),
+        "launcher": _as_mapping(data.get("launcher")),
+        "resources": _as_mapping(data.get("resources")),
+        "command": _as_mapping(data.get("command")),
+        "output_count": len(outputs),
+        "output_bytes": output_bytes,
+        "path": str(path),
     }
 
 

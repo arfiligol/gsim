@@ -10,6 +10,8 @@ import json
 import logging
 import math
 import tempfile
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -34,6 +36,27 @@ if TYPE_CHECKING:
     from gsim.palace.results import SParams
 
 logger = logging.getLogger(__name__)
+
+
+def _relative_to_output_dir(path: Path, output_dir: Path) -> str:
+    try:
+        return path.relative_to(output_dir).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _redact_local_palace_command(
+    cmd: list[str],
+    *,
+    use_apptainer: bool,
+) -> list[str]:
+    redacted: list[str] = []
+    for index, part in enumerate(cmd):
+        if index == 0 or (use_apptainer and index == 2):
+            redacted.append(Path(part).name)
+        else:
+            redacted.append(part)
+    return redacted
 
 
 class PalaceSimMixin:
@@ -1847,6 +1870,8 @@ class PalaceSimMixin:
             _emit_info("Processes: %d", num_processes)
 
         # Run simulation
+        started = time.perf_counter()
+        returncode: int | None = None
         try:
             if verbose:
                 streamed_lines: list[str] = []
@@ -1884,6 +1909,7 @@ class PalaceSimMixin:
                     text=True,
                     env=run_env,
                 )
+                returncode = result.returncode
                 if result.stdout:
                     logger.debug(result.stdout)
                 if result.stderr:
@@ -1913,6 +1939,22 @@ class PalaceSimMixin:
             for file in postpro_dir.iterdir()
             if file.is_file() and not file.name.startswith(".")
         }
+        self._write_local_run_metadata(
+            output_dir=output_dir,
+            postpro_dir=postpro_dir,
+            cmd=cmd,
+            elapsed_seconds=time.perf_counter() - started,
+            returncode=0 if returncode is None else returncode,
+            use_apptainer=use_apptainer,
+            executable_mode=executable_mode,
+            executable_path=None if use_apptainer else exe_path,
+            sif_path=sif_path if use_apptainer else None,
+            num_processes=num_processes,
+            num_threads=num_threads,
+            serial=serial,
+            omp_num_threads=run_env.get("OMP_NUM_THREADS"),
+            files=files,
+        )
 
         # Match cloud run() behavior for Palace: return parsed SParams when
         # possible, else fall back to raw files dict.
@@ -1922,6 +1964,80 @@ class PalaceSimMixin:
             return load_sparams(files)
         except FileNotFoundError:
             return files
+
+    def _write_local_run_metadata(
+        self,
+        *,
+        output_dir: Path,
+        postpro_dir: Path,
+        cmd: list[str],
+        elapsed_seconds: float,
+        returncode: int,
+        use_apptainer: bool,
+        executable_mode: Literal["wrapper", "binary"],
+        executable_path: Path | None,
+        sif_path: Path | None,
+        num_processes: int,
+        num_threads: int | None,
+        serial: bool,
+        omp_num_threads: str | None,
+        files: dict[str, Path],
+    ) -> Path:
+        launcher: dict[str, Any]
+        if use_apptainer:
+            launcher = {
+                "kind": "apptainer",
+                "palace_sif_configured": sif_path is not None,
+                "palace_sif_name": None if sif_path is None else sif_path.name,
+            }
+        else:
+            launcher = {
+                "kind": "executable",
+                "executable_mode": executable_mode,
+                "serial": serial,
+                "palace_executable_configured": executable_path is not None,
+                "palace_executable_name": (
+                    None if executable_path is None else executable_path.name
+                ),
+            }
+
+        metadata = {
+            "schema_version": 1,
+            "created_at_utc": datetime.now(UTC).isoformat(timespec="seconds"),
+            "status": "completed",
+            "return_code": returncode,
+            "elapsed_seconds": elapsed_seconds,
+            "launcher": launcher,
+            "resources": {
+                "num_processes": num_processes,
+                "num_threads": num_threads,
+                "omp_num_threads": omp_num_threads,
+            },
+            "command": {
+                "argv": _redact_local_palace_command(
+                    cmd,
+                    use_apptainer=use_apptainer,
+                )
+            },
+            "paths": {
+                "config": "config.json",
+                "mesh": "palace.msh",
+                "postprocessing_output": _relative_to_output_dir(
+                    postpro_dir,
+                    output_dir,
+                ),
+            },
+            "outputs": {
+                name: {
+                    "path": _relative_to_output_dir(path, output_dir),
+                    "bytes": int(path.stat().st_size),
+                }
+                for name, path in sorted(files.items())
+            },
+        }
+        metadata_path = output_dir / "palace_run_metadata.json"
+        metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
+        return metadata_path
 
     # -------------------------------------------------------------------------
     # Port methods

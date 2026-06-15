@@ -653,6 +653,20 @@ class TestPalaceRunSummary:
                 }
             )
         )
+        (indexed_report_dir / "palace_run_metadata.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "status": "completed",
+                    "return_code": 0,
+                    "elapsed_seconds": 1.25,
+                    "launcher": {"kind": "executable", "executable_mode": "binary"},
+                    "resources": {"num_processes": 1, "num_threads": 2},
+                    "command": {"argv": ["palace", "config.json"]},
+                    "outputs": {"domain-E.csv": {"bytes": 42}},
+                }
+            )
+        )
 
         summary = load_palace_run_summary(indexed_report_dir, include_hashes=True)
 
@@ -672,6 +686,15 @@ class TestPalaceRunSummary:
         assert summary.index_map["sections"]["Domains.Postprocessing.Energy"] == 1
         assert summary.material_resolution["material_count"] == 2
         assert summary.material_resolution["interface_count"] == 1
+        assert summary.runtime["present"] is True
+        assert summary.runtime["status"] == "completed"
+        assert summary.runtime["elapsed_seconds"] == pytest.approx(1.25)
+        assert summary.runtime["launcher"] == {
+            "kind": "executable",
+            "executable_mode": "binary",
+        }
+        assert summary.runtime["output_count"] == 1
+        assert summary.runtime["output_bytes"] == 42
         assert summary.results["domain-E.csv"].present
         assert summary.results["surface-Q.csv"].present
         assert summary.results["port-EPR.csv"].present
@@ -681,6 +704,7 @@ class TestPalaceRunSummary:
         assert as_dict["missing_artifacts"] == []
         assert as_dict["artifacts"]["config.json"]["present"] is True
         assert as_dict["results"]["domain-E.csv"]["bytes"] > 0
+        assert as_dict["runtime"]["present"] is True
 
     def test_load_palace_run_summary_accepts_results_dict(
         self,
@@ -705,6 +729,7 @@ class TestPalaceRunSummary:
         assert summary.artifacts["palace_index_map.json"].present
         assert summary.artifacts["palace.msh"].present is False
         assert summary.results["domain-E.csv"].present
+        assert summary.runtime["present"] is False
         assert "palace.msh" in summary.missing_artifacts
 
 

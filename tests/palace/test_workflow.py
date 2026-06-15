@@ -382,6 +382,33 @@ def test_run_local_direct_palace_supports_serial_wrapper_flag(tmp_path, monkeypa
     assert (
         results["terminal-C.csv"] == tmp_path / "output" / "palace" / "terminal-C.csv"
     )
+    metadata = json.loads((tmp_path / "palace_run_metadata.json").read_text())
+    assert metadata["schema_version"] == 1
+    assert metadata["status"] == "completed"
+    assert metadata["return_code"] == 0
+    assert metadata["elapsed_seconds"] >= 0
+    assert metadata["launcher"] == {
+        "kind": "executable",
+        "executable_mode": "wrapper",
+        "serial": True,
+        "palace_executable_configured": True,
+        "palace_executable_name": "palace",
+    }
+    assert metadata["resources"] == {
+        "num_processes": 1,
+        "num_threads": 1,
+        "omp_num_threads": None,
+    }
+    assert metadata["command"]["argv"] == [
+        "palace",
+        "-serial",
+        "-np",
+        "1",
+        "-nt",
+        "1",
+        "config.json",
+    ]
+    assert metadata["outputs"]["terminal-C.csv"]["bytes"] > 0
 
 
 def test_run_local_direct_palace_binary_mode_omits_wrapper_flags(tmp_path, monkeypatch):
@@ -432,6 +459,20 @@ def test_run_local_direct_palace_binary_mode_omits_wrapper_flags(tmp_path, monke
     assert (
         results["terminal-C.csv"] == tmp_path / "output" / "palace" / "terminal-C.csv"
     )
+    metadata = json.loads((tmp_path / "palace_run_metadata.json").read_text())
+    assert metadata["launcher"] == {
+        "kind": "executable",
+        "executable_mode": "binary",
+        "serial": False,
+        "palace_executable_configured": True,
+        "palace_executable_name": "palace-arm64.bin",
+    }
+    assert metadata["resources"] == {
+        "num_processes": 1,
+        "num_threads": 2,
+        "omp_num_threads": "2",
+    }
+    assert metadata["command"]["argv"] == ["palace-arm64.bin", "config.json"]
 
 
 def test_run_local_direct_palace_binary_mode_rejects_multi_process(tmp_path):
