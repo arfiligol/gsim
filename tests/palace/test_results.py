@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +15,7 @@ from gsim.palace.results import (
     Eigenmodes,
     ElectrostaticReport,
     PalaceRunSummary,
+    PalaceSweepSummary,
     SParams,
     get_port_map,
     load_dielectric_interface_summary,
@@ -26,6 +28,7 @@ from gsim.palace.results import (
     load_electrostatic_report,
     load_indexed_csv,
     load_palace_run_summary,
+    load_palace_sweep_summary,
     load_port_epr_summary,
     load_postprocessing_index_map,
     load_sparams,
@@ -245,6 +248,55 @@ def indexed_report_dir(tmp_path: Path) -> Path:
     )
     (palace_dir / "port-EPR.csv").write_text("m, p[3]\n1, -2.5e-4\n")
     return tmp_path
+
+
+def _write_sweep_point_artifacts(
+    source: Path,
+    run_dir: Path,
+    *,
+    result_dir: Path | None = None,
+    mesh_name: str = "palace.msh",
+) -> None:
+    run_dir.mkdir(parents=True)
+    result_dir = result_dir or run_dir / "output" / "palace"
+    result_dir.mkdir(parents=True)
+
+    config = json.loads((source / "config.json").read_text())
+    config["Problem"] = {"Type": "Eigenmode"}
+    (run_dir / "config.json").write_text(json.dumps(config))
+    (run_dir / mesh_name).write_text("$MeshFormat\n")
+    (run_dir / "mesh_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "entries": [
+                    {
+                        "name": "substrate",
+                        "role": "dielectric_volume",
+                        "dimension": 3,
+                        "physical_names": ["D1_SUBSTRATE"],
+                    }
+                ],
+            }
+        )
+    )
+    for name in ("palace_index_map.json", "palace_material_resolution.json"):
+        shutil.copy(source / name, run_dir / name)
+    (result_dir / "palace_run_metadata.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "completed",
+                "return_code": 0,
+                "elapsed_seconds": 2.5,
+                "launcher": {"kind": "executable"},
+                "resources": {"num_processes": 1, "num_threads": 1},
+                "outputs": {"domain-E.csv": {"bytes": 42}},
+            }
+        )
+    )
+    for csv_path in (source / "output" / "palace").glob("*.csv"):
+        shutil.copy(csv_path, result_dir / csv_path.name)
 
 
 @pytest.fixture
@@ -731,6 +783,96 @@ class TestPalaceRunSummary:
         assert summary.results["domain-E.csv"].present
         assert summary.runtime["present"] is False
         assert "palace.msh" in summary.missing_artifacts
+
+
+class TestPalaceSweepSummary:
+    """Tests for reusable point-local Palace sweep summaries."""
+
+    def test_load_palace_sweep_summary_uses_points_json_run_dirs(
+        self,
+        indexed_report_dir: Path,
+    ) -> None:
+        sweep_root = indexed_report_dir / "sweep_run_dirs"
+        point_root = sweep_root / "points" / "gap_6um"
+        _write_sweep_point_artifacts(indexed_report_dir, point_root)
+        (sweep_root / "points.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "sweep_id": "gap_sweep",
+                    "points": [
+                        {
+                            "point_slug": "gap_6um",
+                            "parameters": {"gap_um": 6.0},
+                            "run_dir": "points/gap_6um",
+                        }
+                    ],
+                }
+            )
+        )
+
+        summary = load_palace_sweep_summary(sweep_root)
+
+        assert isinstance(summary, PalaceSweepSummary)
+        assert summary.sweep_id == "gap_sweep"
+        assert summary.point_count == 1
+        assert summary.complete_point_count == 1
+        assert summary.runtime_present_count == 1
+        assert summary.problem_types == ("Eigenmode",)
+        assert summary.total_runtime_elapsed_seconds == pytest.approx(2.5)
+        point = summary.points[0]
+        assert point.point_slug == "gap_6um"
+        assert point.parameters == {"gap_um": 6.0}
+        assert point.run_summary.results["domain-E.csv"].present
+        assert point.run_summary.runtime["status"] == "completed"
+
+        as_dict = summary.to_dict()
+        assert as_dict["point_count"] == 1
+        assert as_dict["points"][0]["missing_artifacts"] == []
+
+    def test_load_palace_sweep_summary_accepts_split_point_and_result_dirs(
+        self,
+        indexed_report_dir: Path,
+    ) -> None:
+        sweep_root = indexed_report_dir / "sweep_split_dirs"
+        run_dir = sweep_root / "points" / "gap_8um"
+        result_dir = sweep_root / "results" / "gap_8um" / "palace"
+        _write_sweep_point_artifacts(
+            indexed_report_dir,
+            run_dir,
+            result_dir=result_dir,
+            mesh_name="mesh.msh",
+        )
+        (sweep_root / "points.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "sweep_id": "split_sweep",
+                    "points": [
+                        {
+                            "point_slug": "gap_8um",
+                            "parameters": {"gap_um": 8.0},
+                            "config_path": "points/gap_8um/config.json",
+                            "mesh_path": "points/gap_8um/mesh.msh",
+                            "result_dir": "results/gap_8um/palace",
+                        }
+                    ],
+                }
+            )
+        )
+
+        summary = load_palace_sweep_summary(sweep_root, include_hashes=True)
+
+        point = summary.points[0]
+        assert summary.sweep_id == "split_sweep"
+        assert point.run_summary.artifacts["palace.msh"].present
+        assert point.run_summary.artifacts["palace.msh"].path == run_dir / "mesh.msh"
+        assert point.run_summary.artifacts["palace.msh"].sha256
+        assert point.run_summary.results["domain-E.csv"].path == (
+            result_dir / "domain-E.csv"
+        )
+        assert point.run_summary.runtime["present"] is True
+        assert point.run_summary.missing_artifacts == ()
 
 
 class TestDrivenReport:

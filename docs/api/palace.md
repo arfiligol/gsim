@@ -124,6 +124,10 @@
     options:
       show_source: false
 
+::: gsim.palace.load_palace_sweep_summary
+    options:
+      show_source: false
+
 ::: gsim.palace.load_driven_report
     options:
       show_source: false

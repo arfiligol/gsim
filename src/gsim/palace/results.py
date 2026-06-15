@@ -875,6 +875,99 @@ class PalaceRunSummary:
 
 
 @dataclass(frozen=True)
+class PalaceSweepPointSummary:
+    """Reusable summary for one point in a Palace sweep."""
+
+    point_slug: str
+    parameters: dict[str, Any]
+    source: dict[str, Path] | Path
+    run_summary: PalaceRunSummary
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-friendly sweep point summary."""
+        source: dict[str, str] | str
+        if isinstance(self.source, dict):
+            source = {name: str(path) for name, path in self.source.items()}
+        else:
+            source = str(self.source)
+        return {
+            "point_slug": self.point_slug,
+            "parameters": dict(self.parameters),
+            "source": source,
+            "run_summary": self.run_summary.to_dict(),
+            "missing_artifacts": list(self.run_summary.missing_artifacts),
+        }
+
+
+@dataclass(frozen=True)
+class PalaceSweepSummary:
+    """Reusable summary of point-local Palace runs in one sweep folder."""
+
+    sweep_id: str | None
+    source_path: Path
+    points: tuple[PalaceSweepPointSummary, ...]
+    metadata: dict[str, Any] = field(default_factory=dict)
+    parse_warnings: tuple[str, ...] = ()
+
+    @property
+    def point_count(self) -> int:
+        """Number of point rows loaded from ``points.json``."""
+        return len(self.points)
+
+    @property
+    def complete_point_count(self) -> int:
+        """Points with all core handoff artifacts present."""
+        return sum(not point.run_summary.missing_artifacts for point in self.points)
+
+    @property
+    def runtime_present_count(self) -> int:
+        """Points with a runtime metadata sidecar."""
+        return sum(
+            point.run_summary.runtime.get("present") is True for point in self.points
+        )
+
+    @property
+    def problem_types(self) -> tuple[str, ...]:
+        """Sorted Palace problem types observed across point summaries."""
+        return tuple(
+            sorted(
+                {
+                    str(point.run_summary.problem_type)
+                    for point in self.points
+                    if point.run_summary.problem_type is not None
+                }
+            )
+        )
+
+    @property
+    def total_runtime_elapsed_seconds(self) -> float | None:
+        """Sum known point runtime durations, or ``None`` when none are present."""
+        elapsed = [
+            point.run_summary.runtime.get("elapsed_seconds")
+            for point in self.points
+            if point.run_summary.runtime.get("elapsed_seconds") is not None
+        ]
+        if not elapsed:
+            return None
+        return float(sum(float(value) for value in elapsed))
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-friendly sweep summary."""
+        return {
+            "sweep_id": self.sweep_id,
+            "source_path": str(self.source_path),
+            "metadata": dict(self.metadata),
+            "point_count": self.point_count,
+            "complete_point_count": self.complete_point_count,
+            "runtime_present_count": self.runtime_present_count,
+            "problem_types": list(self.problem_types),
+            "total_runtime_elapsed_seconds": self.total_runtime_elapsed_seconds,
+            "parse_warnings": list(self.parse_warnings),
+            "points": [point.to_dict() for point in self.points],
+        }
+
+
+@dataclass(frozen=True)
 class TerminalMatrix:
     """Palace electrostatic terminal matrix with named terminals."""
 
@@ -1793,6 +1886,83 @@ def load_palace_run_summary(
             material_resolution_path
         ),
         runtime=_summarize_runtime_metadata_json(runtime_metadata_path),
+    )
+
+
+def load_palace_sweep_summary(
+    source: str | Path,
+    *,
+    include_hashes: bool = False,
+) -> PalaceSweepSummary:
+    """Load a compact summary for a point-local Palace sweep.
+
+    The sweep root must provide a ``points.json`` file. Each point row may
+    contain ``point_slug``, ``parameters``, ``run_dir``, ``result_dir``,
+    ``config_path``, and ``mesh_path`` fields. Point-local artifact loading
+    reuses :func:`load_palace_run_summary`; this helper does not infer point
+    identity from folder names alone and does not run Palace.
+
+    Args:
+        source: Sweep root directory or direct ``points.json`` path.
+        include_hashes: Include SHA-256 checksums for present point files.
+
+    Returns:
+        :class:`PalaceSweepSummary` with one run summary per sweep point.
+    """
+    source_path = Path(source)
+    points_path = source_path if source_path.is_file() else source_path / "points.json"
+    if not points_path.exists():
+        raise FileNotFoundError(points_path)
+
+    sweep_root = points_path.parent
+    payload = json.loads(points_path.read_text())
+    if isinstance(payload, list):
+        point_specs = payload
+        metadata: dict[str, Any] = {}
+        sweep_id = sweep_root.name
+    else:
+        metadata = {
+            key: value for key, value in _as_mapping(payload).items() if key != "points"
+        }
+        point_specs = payload.get("points", []) if isinstance(payload, dict) else []
+        sweep_id = _optional_str(metadata.get("sweep_id")) or sweep_root.name
+
+    if not isinstance(point_specs, list):
+        msg = "points.json field 'points' must be a list"
+        raise TypeError(msg)
+
+    points: list[PalaceSweepPointSummary] = []
+    parse_warnings: list[str] = []
+    for index, raw_point in enumerate(point_specs):
+        if not isinstance(raw_point, dict):
+            parse_warnings.append(f"Skipping non-object sweep point at index {index}")
+            continue
+        point_slug = _sweep_point_slug(raw_point, index)
+        parameters = _as_mapping(raw_point.get("parameters"))
+        point_source = _palace_sweep_point_source(
+            sweep_root,
+            raw_point,
+            point_slug=point_slug,
+        )
+        run_summary = load_palace_run_summary(
+            point_source,
+            include_hashes=include_hashes,
+        )
+        points.append(
+            PalaceSweepPointSummary(
+                point_slug=point_slug,
+                parameters=dict(parameters),
+                source=point_source,
+                run_summary=run_summary,
+            )
+        )
+
+    return PalaceSweepSummary(
+        sweep_id=sweep_id,
+        source_path=points_path,
+        points=tuple(points),
+        metadata=metadata,
+        parse_warnings=tuple(parse_warnings),
     )
 
 
@@ -4923,6 +5093,151 @@ def _find_file(base: Path, name: str) -> Path | None:
 
     matches = list(base.rglob(name))
     return matches[0] if matches else None
+
+
+def _sweep_point_slug(point_spec: dict[str, Any], index: int) -> str:
+    value = (
+        point_spec.get("point_slug")
+        or point_spec.get("run_id")
+        or point_spec.get("name")
+        or f"point_{index}"
+    )
+    return str(value)
+
+
+def _palace_sweep_point_source(
+    sweep_root: Path,
+    point_spec: dict[str, Any],
+    *,
+    point_slug: str,
+) -> dict[str, Path] | Path:
+    run_dir = _resolve_sweep_path(
+        sweep_root,
+        _first_mapping_value(point_spec, ("run_dir", "point_dir", "output_dir")),
+        default=Path("points") / point_slug,
+    )
+    result_dir = _resolve_sweep_path(
+        sweep_root,
+        _first_mapping_value(
+            point_spec,
+            ("result_dir", "results_dir", "palace_result_dir"),
+        ),
+        default=Path("results") / point_slug / "palace",
+    )
+    source: dict[str, Path] = {}
+
+    _add_sweep_source_file(
+        source,
+        "config.json",
+        _resolve_sweep_path(
+            sweep_root,
+            _first_mapping_value(point_spec, ("config_path", "config_file", "config")),
+        ),
+        run_dir / "config.json",
+        result_dir / "config.json",
+    )
+    _add_sweep_source_file(
+        source,
+        "palace.msh",
+        _resolve_sweep_path(
+            sweep_root,
+            _first_mapping_value(point_spec, ("mesh_path", "mesh_file", "mesh")),
+        ),
+        run_dir / "palace.msh",
+        run_dir / "mesh.msh",
+        result_dir / "palace.msh",
+    )
+    _add_sweep_source_file(
+        source,
+        "mesh_manifest.json",
+        _resolve_sweep_path(
+            sweep_root,
+            _first_mapping_value(point_spec, ("mesh_manifest_path", "manifest_path")),
+        ),
+        run_dir / "mesh_manifest.json",
+        result_dir / "mesh_manifest.json",
+    )
+    _add_sweep_source_file(
+        source,
+        "palace_index_map.json",
+        _resolve_sweep_path(sweep_root, point_spec.get("index_map_path")),
+        run_dir / "palace_index_map.json",
+        result_dir / "palace_index_map.json",
+    )
+    _add_sweep_source_file(
+        source,
+        "palace_material_resolution.json",
+        _resolve_sweep_path(sweep_root, point_spec.get("material_resolution_path")),
+        run_dir / "palace_material_resolution.json",
+        result_dir / "palace_material_resolution.json",
+    )
+    _add_sweep_source_file(
+        source,
+        "palace_run_metadata.json",
+        _resolve_sweep_path(sweep_root, point_spec.get("runtime_metadata_path")),
+        result_dir / "palace_run_metadata.json",
+        run_dir / "palace_run_metadata.json",
+        run_dir / "output" / "palace" / "palace_run_metadata.json",
+        run_dir / "palace" / "palace_run_metadata.json",
+    )
+
+    _add_sweep_result_files(source, result_dir)
+    _add_sweep_result_files(source, run_dir / "output" / "palace")
+    _add_sweep_result_files(source, run_dir / "palace")
+
+    return source or run_dir
+
+
+def _resolve_sweep_path(
+    sweep_root: Path,
+    value: Any,
+    *,
+    default: Path | None = None,
+) -> Path | None:
+    if value is None:
+        if default is None:
+            return None
+        path = default
+    else:
+        path = Path(str(value))
+    return path if path.is_absolute() else sweep_root / path
+
+
+def _first_mapping_value(mapping: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        value = mapping.get(key)
+        if value is not None:
+            return value
+    return None
+
+
+def _add_sweep_source_file(
+    source: dict[str, Path],
+    name: str,
+    *candidates: Path | None,
+) -> None:
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        if candidate.exists() and candidate.is_file():
+            source[name] = candidate
+            return
+    for candidate in candidates:
+        if candidate is not None:
+            source.setdefault(name, candidate)
+            return
+
+
+def _add_sweep_result_files(source: dict[str, Path], result_dir: Path | None) -> None:
+    if result_dir is None or not result_dir.exists() or not result_dir.is_dir():
+        return
+    for child in sorted(result_dir.iterdir()):
+        if (
+            child.is_file()
+            and not child.name.startswith(".")
+            and child.name not in _NON_RESULT_ARTIFACT_NAMES
+        ):
+            source.setdefault(child.name, child)
 
 
 def _find_postprocessing_index_map(source: str | Path | dict) -> Path | None:
