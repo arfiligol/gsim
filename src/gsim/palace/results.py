@@ -2886,7 +2886,7 @@ def load_postprocessing_index_map(
         index_map_path: Optional explicit ``palace_index_map.json`` path.
 
     Returns:
-        :class:`gsim.palace.mesh.PostprocessingIndexMap`.
+        :class:`gsim.palace.mesh.postprocessing.PostprocessingIndexMap`.
     """
     from gsim.palace.mesh.postprocessing import (
         PostprocessingIndexEntry,

@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from gdsfactory.component import Component
 
     from gsim.common import Geometry, LayerStack
-    from gsim.palace.mesh import PostprocessingConfig
+    from gsim.palace.mesh.postprocessing import PostprocessingConfig
     from gsim.palace.results import SParams
 
 logger = logging.getLogger(__name__)

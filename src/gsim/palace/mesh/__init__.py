@@ -32,12 +32,7 @@ Usage:
 
 from __future__ import annotations
 
-from gsim.palace.mesh.generator import (
-    GeometryData,
-    MeshResult,
-    generate_mesh,
-    write_config,
-)
+from gsim.palace.mesh.generator import MeshResult, generate_mesh
 from gsim.palace.mesh.manifest import (
     MeshManifest,
     MeshPhysicalGroup,
@@ -49,44 +44,29 @@ from gsim.palace.mesh.postprocessing import (
     DielectricInterfaceSpec,
     DielectricInterfaceType,
     DielectricMaterialKind,
-    PostprocessingConfig,
-    PostprocessingIndexEntry,
-    PostprocessingIndexMap,
     SurfaceFluxSpec,
     SurfaceFluxType,
     build_dielectric_interface_specs_from_assignments,
     build_dielectric_interface_specs_from_material_kinds,
     build_postprocessing_config_from_manifest,
-    build_surface_current_index_map_from_manifest,
-    build_terminal_index_map_from_manifest,
 )
 from gsim.palace.models.mesh import MeshConfig
-
-from . import gmsh_utils
 
 __all__ = [
     "DielectricInterfaceSelector",
     "DielectricInterfaceSpec",
     "DielectricInterfaceType",
     "DielectricMaterialKind",
-    "GeometryData",
     "MeshConfig",
     "MeshManifest",
     "MeshPhysicalGroup",
     "MeshResult",
     "MeshRole",
-    "PostprocessingConfig",
-    "PostprocessingIndexEntry",
-    "PostprocessingIndexMap",
     "SurfaceFluxSpec",
     "SurfaceFluxType",
     "build_dielectric_interface_specs_from_assignments",
     "build_dielectric_interface_specs_from_material_kinds",
     "build_mesh_manifest",
     "build_postprocessing_config_from_manifest",
-    "build_surface_current_index_map_from_manifest",
-    "build_terminal_index_map_from_manifest",
     "generate_mesh",
-    "gmsh_utils",
-    "write_config",
 ]
