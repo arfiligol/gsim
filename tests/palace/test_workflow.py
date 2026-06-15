@@ -872,6 +872,35 @@ class TestMagnetostaticSimWorkflow:
             if row.get("CoordinateSystem") is not None
         } == {"Cartesian"}
 
+    def test_write_config_rejects_overlapping_multielement_current_source(
+        self, tmp_path, cpw_component
+    ):
+        """Multielement source selectors must not claim the same attribute."""
+        sim = MagnetostaticSim()
+        sim.set_output_dir(str(tmp_path / "overlap"))
+        sim.set_geometry(cpw_component)
+        sim.set_stack(substrate_thickness=2.0)
+        sim.set_airbox(margin_x=50.0, margin_y=50.0, z_above=100.0, z_below=20.0)
+        sim.add_current_source(
+            "loop",
+            elements=(
+                {
+                    "layer": "metal1",
+                    "center": (0, 0),
+                    "direction": "+X",
+                },
+                {
+                    "layer": "metal1",
+                    "center": (0, 0),
+                    "direction": "-X",
+                },
+            ),
+        )
+        sim.mesh(preset="coarse", planar_conductors=True)
+
+        with pytest.raises(ValueError, match="already selected"):
+            sim.write_config()
+
 
 # ---------------------------------------------------------------------------
 # Validation error tests (no gmsh needed)

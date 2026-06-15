@@ -72,7 +72,7 @@ class MagnetostaticSim(PalaceSimMixin, BaseModel):
         *,
         layer: str | None = None,
         center: tuple[float, float] | None = None,
-        direction: str | tuple[float, float, float] | list[float] = "+X",
+        direction: str | tuple[float, float, float] | list[float] | None = None,
         coordinate_system: Literal["Cartesian", "Cylindrical"] | None = None,
         elements: tuple[CurrentSourceElementConfig | dict[str, Any], ...] = (),
     ) -> None:
@@ -94,16 +94,16 @@ class MagnetostaticSim(PalaceSimMixin, BaseModel):
         self.current_sources = [
             source for source in self.current_sources if source.name != name
         ]
-        self.current_sources.append(
-            CurrentSourceConfig(
-                name=name,
-                layer=layer,
-                center=center,
-                direction=direction,
-                coordinate_system=coordinate_system,
-                elements=elements,
-            )
-        )
+        source_kwargs: dict[str, Any] = {
+            "name": name,
+            "layer": layer,
+            "center": center,
+            "coordinate_system": coordinate_system,
+            "elements": elements,
+        }
+        if direction is not None:
+            source_kwargs["direction"] = direction
+        self.current_sources.append(CurrentSourceConfig(**source_kwargs))
         self._configured_sources = True
 
     def set_magnetostatic(

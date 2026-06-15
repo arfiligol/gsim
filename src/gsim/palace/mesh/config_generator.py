@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 import gmsh
 
-from gsim.palace.models.sources import palace_direction
 from gsim.palace.ports.config import PortType
 
 if TYPE_CHECKING:
@@ -26,7 +25,15 @@ if TYPE_CHECKING:
         NumericalConfig,
     )
     from gsim.palace.models.ports import TerminalConfig
+    from gsim.palace.models.sources import CurrentDirection
     from gsim.palace.ports.config import PalacePort
+
+
+def _palace_direction(value: CurrentDirection) -> str | list[float]:
+    """Return the Palace JSON value for a validated current-source direction."""
+    if isinstance(value, str):
+        return value
+    return [float(item) for item in value]
 
 
 def generate_palace_config(
@@ -731,6 +738,7 @@ def _surface_current_entry(
     if source.elements:
         elements: list[dict[str, object]] = []
         all_attrs: list[int] = []
+        selected_attrs: dict[int, int] = {}
         for element_index, element in enumerate(source.elements, start=1):
             attrs, _ = _selector_attributes(
                 groups=groups,
@@ -743,9 +751,18 @@ def _surface_current_entry(
                     f"on layer {element.layer!r} did not match any conductor "
                     "surface attributes."
                 )
+            duplicate_attrs = sorted(attr for attr in attrs if attr in selected_attrs)
+            if duplicate_attrs:
+                raise ValueError(
+                    f"Current source {source.name!r} element {element_index} "
+                    "matched attributes already selected by earlier elements: "
+                    f"{duplicate_attrs}."
+                )
+            for attr in attrs:
+                selected_attrs[attr] = element_index
             element_entry: dict[str, object] = {
                 "Attributes": attrs,
-                "Direction": palace_direction(element.direction),
+                "Direction": _palace_direction(element.direction),
             }
             if element.coordinate_system is not None:
                 element_entry["CoordinateSystem"] = element.coordinate_system
@@ -762,7 +779,7 @@ def _surface_current_entry(
     entry: dict[str, object] = {
         "Index": index,
         "Attributes": attrs,
-        "Direction": palace_direction(source.direction),
+        "Direction": _palace_direction(source.direction),
     }
     if source.coordinate_system is not None:
         entry["CoordinateSystem"] = source.coordinate_system

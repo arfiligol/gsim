@@ -172,6 +172,17 @@ class TestMagnetostaticSimValidation:
         assert sim.current_sources[0].direction == (0.0, 1.0, 0.0)
         assert sim.current_sources[0].coordinate_system == "Cartesian"
 
+    def test_current_source_rejects_coordinate_system_with_string_direction(self):
+        """Palace does not accept CoordinateSystem with string directions."""
+        sim = MagnetostaticSim()
+        with pytest.raises(ValueError, match="Coordinate system"):
+            sim.add_current_source(
+                "signal",
+                layer="metal1",
+                direction="+X",
+                coordinate_system="Cartesian",
+            )
+
     def test_current_source_accepts_radial_direction_keyword(self):
         """Radial Palace direction keywords are normalized at the model boundary."""
         sim = MagnetostaticSim()
@@ -196,12 +207,35 @@ class TestMagnetostaticSimValidation:
         assert len(source.elements) == 2
         assert source.elements[1].direction == (0.0, -1.0, 0.0)
 
+    def test_multielement_current_source_rejects_element_string_coordinate(self):
+        """Element CoordinateSystem is valid only for vector directions."""
+        with pytest.raises(ValueError, match="Coordinate system"):
+            CurrentSourceConfig(
+                name="loop",
+                elements=(
+                    {
+                        "layer": "metal1",
+                        "direction": "+X",
+                        "coordinate_system": "Cartesian",
+                    },
+                ),
+            )
+
     def test_multielement_current_source_rejects_parent_layer(self):
         """A multielement source cannot mix parent and element selectors."""
         with pytest.raises(ValueError, match="Multielement current sources"):
             CurrentSourceConfig(
                 name="loop",
                 layer="metal1",
+                elements=({"layer": "metal1", "direction": "+X"},),
+            )
+
+    def test_multielement_current_source_rejects_parent_direction(self):
+        """Parent direction would be ignored by Palace Elements lowering."""
+        with pytest.raises(ValueError, match="direction fields on each element"):
+            CurrentSourceConfig(
+                name="loop",
+                direction="-X",
                 elements=({"layer": "metal1", "direction": "+X"},),
             )
 
