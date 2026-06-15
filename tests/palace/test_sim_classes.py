@@ -112,6 +112,8 @@ def test_common_stack_viz_cloud_helpers_stay_in_owner_modules() -> None:
     owner_only_names = (
         "MATERIALS_DB",
         "Geometry",
+        "Layer",
+        "LayerStack",
         "Stack",
         "StackLayer",
         "MaterialProperties",
@@ -131,8 +133,6 @@ def test_common_stack_viz_cloud_helpers_stay_in_owner_modules() -> None:
         "run_simulation",
     )
     assert all(not hasattr(palace, name) for name in owner_only_names)
-    assert palace.Layer is stack.Layer
-    assert palace.LayerStack is common.LayerStack
     assert palace.resolve_palace_materials_with_report is (
         materials.resolve_palace_materials_with_report
     )

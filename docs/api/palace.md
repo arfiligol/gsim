@@ -204,17 +204,13 @@ specs live in the postprocessing owner module instead of the
 
 ## Stack
 
-::: gsim.palace.LayerStack
-    options:
-      show_source: false
-      inherited_members: false
-      members: false
+Palace workflows usually resolve stack data through `set_stack()` or the active
+PDK. Manual stack construction uses the shared `gsim.common` owner module
+because stack models are reused across solver front ends.
 
-::: gsim.palace.Layer
-    options:
-      show_source: false
-      inherited_members: false
-      members: false
+Import manual stack models from `gsim.common.LayerStack` and
+`gsim.common.Layer`, or from the deeper `gsim.common.stack` module. The
+canonical API entries live on the Common API page.
 
 ## Materials
 

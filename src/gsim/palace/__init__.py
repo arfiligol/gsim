@@ -30,12 +30,6 @@ Usage:
 
 from __future__ import annotations
 
-from gsim.common import LayerStack
-
-# Stack utilities (from common, shared with FDTD)
-from gsim.common.stack import (
-    Layer,
-)
 from gsim.gcloud import RunResult, register_result_parser
 
 # New simulation classes (composition, no inheritance)
@@ -85,8 +79,6 @@ __all__ = [
     "EigenmodeSim",
     "ElectrostaticReport",
     "ElectrostaticSim",
-    "Layer",
-    "LayerStack",
     "MagnetostaticSim",
     "MeshConfig",
     "SParams",
