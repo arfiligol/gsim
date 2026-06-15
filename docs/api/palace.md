@@ -294,6 +294,21 @@ API.
       show_source: false
       inherited_members: false
 
+::: gsim.palace.results.DrivenReport
+    options:
+      show_source: false
+      inherited_members: false
+
+::: gsim.palace.results.EigenmodeReport
+    options:
+      show_source: false
+      inherited_members: false
+
+::: gsim.palace.results.ElectrostaticReport
+    options:
+      show_source: false
+      inherited_members: false
+
 ::: gsim.palace.results.load_indexed_csv
     options:
       show_source: false

@@ -46,9 +46,6 @@ from gsim.palace.mesh import (
 
 # Results utilities
 from gsim.palace.results import (
-    DrivenReport,
-    EigenmodeReport,
-    ElectrostaticReport,
     SParams,
     load_dielectric_interface_summary,
     load_domain_material_summary,
@@ -62,11 +59,8 @@ from gsim.palace.results import (
 )
 
 __all__ = [
-    "DrivenReport",
     "DrivenSim",
-    "EigenmodeReport",
     "EigenmodeSim",
-    "ElectrostaticReport",
     "ElectrostaticSim",
     "MagnetostaticSim",
     "MeshConfig",

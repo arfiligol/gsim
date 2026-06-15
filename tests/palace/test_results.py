@@ -63,7 +63,10 @@ def test_palace_root_results_api_keeps_notebook_surface_narrow() -> None:
     assert palace.load_fields is results.load_fields
 
     detail_names = (
+        "DrivenReport",
         "Eigenmodes",
+        "EigenmodeReport",
+        "ElectrostaticReport",
         "IndexedCsv",
         "IndexedCsvColumn",
         "SParam",
@@ -2393,10 +2396,12 @@ class TestElectrostaticReport:
         with pytest.raises(ValueError, match="frequency_ghz"):
             load_electrostatic_report(electrostatic_report_dir, frequency_ghz=0.0)
 
-    def test_electrostatic_report_is_publicly_exported(self) -> None:
+    def test_electrostatic_report_loader_stays_root_public(self) -> None:
         import gsim.palace as palace
+        import gsim.palace.results as results
 
-        assert palace.ElectrostaticReport is ElectrostaticReport
+        assert not hasattr(palace, "ElectrostaticReport")
+        assert results.ElectrostaticReport is ElectrostaticReport
         assert palace.load_electrostatic_report is load_electrostatic_report
 
 
