@@ -18,9 +18,8 @@ Usage:
     # Multi-job polling:
     results = gcloud.wait_for_results(id1, id2, id3)
 
-    # Or use solver-specific wrappers:
-    from gsim import palace as pa
-    result = pa.run_simulation("./sim")
+    # Select a solver with job_type:
+    result = gcloud.run_simulation("./sim", job_type="palace")
 """
 
 from __future__ import annotations

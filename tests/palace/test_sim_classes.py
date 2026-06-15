@@ -81,6 +81,63 @@ def test_config_models_stay_in_models_owner_module() -> None:
     assert palace.ValidationResult is models.ValidationResult
 
 
+def test_common_stack_viz_cloud_helpers_stay_in_owner_modules() -> None:
+    import gsim.common as common
+    import gsim.common.stack as stack
+    import gsim.gcloud as gcloud
+    import gsim.palace as palace
+    import gsim.palace.materials as materials
+    import gsim.viz as viz
+
+    assert stack.MATERIALS_DB
+    assert common.Geometry.__name__ == "Geometry"
+    assert common.Stack is common.LayerStack
+    assert stack.StackLayer.__name__ == "StackLayer"
+    assert stack.MaterialProperties.__name__ == "MaterialProperties"
+    assert callable(stack.extract_from_pdk)
+    assert callable(stack.extract_layer_stack)
+    assert callable(stack.get_material_properties)
+    assert callable(stack.get_stack)
+    assert callable(stack.load_stack_yaml)
+    assert callable(stack.parse_layer_stack)
+    assert callable(stack.plot_stack)
+    assert callable(stack.print_stack)
+    assert callable(stack.print_stack_table)
+    assert callable(viz.plot_cross_section)
+    assert callable(viz.plot_mesh)
+    assert callable(gcloud.print_job_summary)
+    assert callable(gcloud.run_simulation)
+    assert callable(materials.resolve_palace_materials_at_frequency)
+
+    owner_only_names = (
+        "MATERIALS_DB",
+        "Geometry",
+        "Stack",
+        "StackLayer",
+        "MaterialProperties",
+        "extract_from_pdk",
+        "extract_layer_stack",
+        "get_material_properties",
+        "get_stack",
+        "load_stack_yaml",
+        "parse_layer_stack",
+        "plot_cross_section",
+        "plot_mesh",
+        "plot_stack",
+        "print_job_summary",
+        "print_stack",
+        "print_stack_table",
+        "resolve_palace_materials_at_frequency",
+        "run_simulation",
+    )
+    assert all(not hasattr(palace, name) for name in owner_only_names)
+    assert palace.Layer is stack.Layer
+    assert palace.LayerStack is common.LayerStack
+    assert palace.resolve_palace_materials_with_report is (
+        materials.resolve_palace_materials_with_report
+    )
+
+
 class TestDrivenSimValidation:
     """Test DrivenSim validation logic."""
 

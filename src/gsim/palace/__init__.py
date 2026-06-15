@@ -30,29 +30,13 @@ Usage:
 
 from __future__ import annotations
 
-from functools import partial
-
-# Common components (shared with FDTD)
-from gsim.common import Geometry, LayerStack, Stack
+from gsim.common import LayerStack
 
 # Stack utilities (from common, shared with FDTD)
 from gsim.common.stack import (
-    MATERIALS_DB,
     Layer,
-    MaterialProperties,
-    StackLayer,
-    extract_from_pdk,
-    extract_layer_stack,
-    get_material_properties,
-    get_stack,
-    load_stack_yaml,
-    parse_layer_stack,
-    plot_stack,
-    print_stack,
-    print_stack_table,
 )
-from gsim.gcloud import RunResult, print_job_summary, register_result_parser
-from gsim.gcloud import run_simulation as _run_simulation
+from gsim.gcloud import RunResult, register_result_parser
 
 # New simulation classes (composition, no inheritance)
 from gsim.palace.driven import DrivenSim
@@ -62,7 +46,6 @@ from gsim.palace.magnetostatic import MagnetostaticSim
 
 # Material resolution with dispersion
 from gsim.palace.materials import (
-    resolve_palace_materials_at_frequency,
     resolve_palace_materials_with_report,
 )
 
@@ -101,34 +84,22 @@ from gsim.palace.results import (
     summarize_surface_loss,
 )
 
-# Visualization
-from gsim.viz import plot_cross_section, plot_mesh
-
 __all__ = [
-    "MATERIALS_DB",
     "DrivenReport",
     "DrivenSim",
     "EigenmodeReport",
     "EigenmodeSim",
     "ElectrostaticReport",
     "ElectrostaticSim",
-    "Geometry",
     "Layer",
     "LayerStack",
     "MagnetostaticSim",
-    "MaterialProperties",
     "MeshConfig",
     "SParams",
     "SimulationResult",
-    "Stack",
-    "StackLayer",
     "TerminalMatrix",
     "ValidationResult",
-    "extract_from_pdk",
-    "extract_layer_stack",
     "generate_mesh",
-    "get_material_properties",
-    "get_stack",
     "load_dielectric_interface_summary",
     "load_domain_energy_summary",
     "load_domain_material_summary",
@@ -138,19 +109,9 @@ __all__ = [
     "load_fields",
     "load_postprocessing_index_map",
     "load_sparams",
-    "load_stack_yaml",
     "load_surface_q_summary",
     "load_terminal_matrix",
-    "parse_layer_stack",
-    "plot_cross_section",
-    "plot_mesh",
-    "plot_stack",
-    "print_job_summary",
-    "print_stack",
-    "print_stack_table",
-    "resolve_palace_materials_at_frequency",
     "resolve_palace_materials_with_report",
-    "run_simulation",
     "summarize_domain_loss",
     "summarize_loss_budget",
     "summarize_surface_loss",
@@ -168,6 +129,3 @@ def _parse_palace_result(run_result: RunResult) -> SParams | dict:
 
 
 register_result_parser("palace", _parse_palace_result)
-
-# Palace-specific run_simulation with job_type preset
-run_simulation = partial(_run_simulation, job_type="palace")
