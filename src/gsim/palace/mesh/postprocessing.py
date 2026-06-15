@@ -365,6 +365,7 @@ def build_dielectric_interface_specs_from_material_kinds(
     manifest: MeshManifest,
     *,
     material_kind_by_name: Mapping[str, DielectricMaterialKind | str],
+    material_name_aliases: Mapping[str, str] | None = None,
     presets: Mapping[str, Mapping[str, Any]],
     preset_by_interface_type: Mapping[str, str | Iterable[str]],
     role: MeshRole | str = "boundary_surface",
@@ -382,6 +383,14 @@ def build_dielectric_interface_specs_from_material_kinds(
         str(name): _normalized_material_kind(kind=kind, material_name=str(name))
         for name, kind in material_kind_by_name.items()
     }
+    alias_map = (
+        {
+            str(name): str(target_name)
+            for name, target_name in material_name_aliases.items()
+        }
+        if material_name_aliases is not None
+        else {}
+    )
     interface_type_map = _interface_type_map(interface_types_by_kind_pair)
     specs: list[DielectricInterfaceSpec] = []
 
@@ -389,8 +398,16 @@ def build_dielectric_interface_specs_from_material_kinds(
         if entry.interface_of is None:
             continue
         left, right = entry.interface_of
-        left_kind = _kind_for_interface_part(kind_map=kind_map, material_name=left)
-        right_kind = _kind_for_interface_part(kind_map=kind_map, material_name=right)
+        left_kind = _kind_for_interface_part(
+            kind_map=kind_map,
+            material_name=left,
+            material_name_aliases=alias_map,
+        )
+        right_kind = _kind_for_interface_part(
+            kind_map=kind_map,
+            material_name=right,
+            material_name_aliases=alias_map,
+        )
         interface_types = interface_type_map.get(frozenset((left_kind, right_kind)), ())
         for interface_type in interface_types:
             preset_names = _preset_names_for_interface_type(
@@ -571,15 +588,28 @@ def _kind_for_interface_part(
     *,
     kind_map: Mapping[str, str],
     material_name: str,
+    material_name_aliases: Mapping[str, str] | None = None,
 ) -> str:
-    try:
+    if material_name in kind_map:
         return kind_map[material_name]
-    except KeyError as error:
+
+    alias_target = (
+        None
+        if material_name_aliases is None
+        else material_name_aliases.get(material_name)
+    )
+    if alias_target is not None and alias_target in kind_map:
+        return kind_map[alias_target]
+
+    if alias_target is not None:
         msg = (
             "Missing dielectric material kind for interface material "
-            f"{material_name!r}."
+            f"{material_name!r} aliased to {alias_target!r}."
         )
-        raise KeyError(msg) from error
+        raise KeyError(msg)
+
+    msg = f"Missing dielectric material kind for interface material {material_name!r}."
+    raise KeyError(msg)
 
 
 def _interface_type_map(

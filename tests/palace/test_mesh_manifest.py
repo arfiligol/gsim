@@ -960,6 +960,44 @@ def test_material_kind_interface_specs_match_kind_pairs_in_either_order() -> Non
     )
 
 
+def test_material_kind_interface_specs_accept_generated_name_aliases() -> None:
+    groups = _minimal_groups()
+    groups["boundary_surfaces"] = {
+        "air___silicon": {"phys_group": 47, "tags": [407], "dim": 2},
+    }
+    manifest = build_mesh_manifest(groups)
+
+    specs = build_dielectric_interface_specs_from_material_kinds(
+        manifest,
+        material_kind_by_name={
+            "vacuum": "vacuum",
+            "Si": "dielectric",
+        },
+        material_name_aliases={
+            "air": "vacuum",
+            "silicon": "Si",
+        },
+        presets={
+            "public_sa": {
+                "interface_type": "SA",
+                "thickness": 0.003,
+                "permittivity": 2.0,
+            },
+        },
+        preset_by_interface_type={"SA": "public_sa"},
+    )
+
+    assert specs == (
+        DielectricInterfaceSpec(
+            interface_type="SA",
+            thickness=0.003,
+            permittivity=2.0,
+            role="boundary_surface",
+            entry_names=("air___silicon",),
+        ),
+    )
+
+
 def test_material_kind_interface_specs_reject_missing_kind() -> None:
     manifest = build_mesh_manifest(_minimal_groups())
 
@@ -975,6 +1013,29 @@ def test_material_kind_interface_specs_reject_missing_kind() -> None:
                 }
             },
             preset_by_interface_type={"MS": "public_ms"},
+        )
+
+
+def test_material_kind_interface_specs_reject_missing_alias_target_kind() -> None:
+    groups = _minimal_groups()
+    groups["boundary_surfaces"] = {
+        "air___silicon": {"phys_group": 47, "tags": [407], "dim": 2},
+    }
+    manifest = build_mesh_manifest(groups)
+
+    with pytest.raises(KeyError, match="aliased to 'Si'"):
+        build_dielectric_interface_specs_from_material_kinds(
+            manifest,
+            material_kind_by_name={"vacuum": "vacuum"},
+            material_name_aliases={"air": "vacuum", "silicon": "Si"},
+            presets={
+                "public_sa": {
+                    "interface_type": "SA",
+                    "thickness": 0.003,
+                    "permittivity": 2.0,
+                },
+            },
+            preset_by_interface_type={"SA": "public_sa"},
         )
 
 
