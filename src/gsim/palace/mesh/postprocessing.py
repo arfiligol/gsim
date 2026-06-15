@@ -194,6 +194,8 @@ class DielectricInterfaceSpec:
     material_name: str | None = None
     role: MeshRole | str = "boundary_surface"
     entry_names: tuple[str, ...] = ()
+    preset_name: str | None = None
+    preset_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -314,7 +316,7 @@ def build_postprocessing_config_from_manifest(
                     section="Boundaries.Postprocessing.Dielectric",
                     index=dielectric_index,
                     entry=entry,
-                    extra={"Type": spec.interface_type},
+                    extra=_dielectric_interface_index_extra(spec),
                 )
             )
             dielectric_index += 1
@@ -697,6 +699,8 @@ def _dielectric_interface_spec_from_preset(
         ),
         "role": role,
         "entry_names": (entry_name,),
+        "preset_name": preset_name,
+        "preset_source": _optional_preset_source(preset.get("source")),
     }
     if has_material_name:
         kwargs["material_name"] = material_name
@@ -707,6 +711,23 @@ def _dielectric_interface_spec_from_preset(
             "permittivity",
         )
     return DielectricInterfaceSpec(**kwargs)
+
+
+def _dielectric_interface_index_extra(
+    spec: DielectricInterfaceSpec,
+) -> dict[str, Any]:
+    extra: dict[str, Any] = {"Type": spec.interface_type}
+    if spec.preset_name is not None:
+        extra["preset_name"] = spec.preset_name
+    if spec.preset_source is not None:
+        extra["preset_source"] = spec.preset_source
+    return extra
+
+
+def _optional_preset_source(value: Any) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    return value
 
 
 def _positive_float(value: Any, preset_name: str, field_name: str) -> float:

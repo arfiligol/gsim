@@ -90,6 +90,8 @@ _DIELECTRIC_INTERFACE_COLUMNS = (
     "attributes",
     "metadata",
     "interface_type",
+    "preset_name",
+    "preset_source",
     "thickness",
     "permittivity",
     "loss_tangent",
@@ -152,6 +154,8 @@ _SURFACE_LOSS_COLUMNS = (
     "role",
     "attributes",
     "interface_type",
+    "preset_name",
+    "preset_source",
     "p_surf",
     "q_surf",
     "inverse_q",
@@ -2064,6 +2068,14 @@ def summarize_surface_loss(
                     if interface_row is None
                     else interface_row.get("surface_attributes", ())
                 ),
+                "preset_name": (
+                    None if interface_row is None else interface_row.get("preset_name")
+                ),
+                "preset_source": (
+                    None
+                    if interface_row is None
+                    else interface_row.get("preset_source")
+                ),
                 "thickness": None
                 if interface_row is None
                 else interface_row.get("thickness"),
@@ -2867,6 +2879,8 @@ def _dielectric_interface_row(
     )
     attributes = surface_attributes
     metadata: dict[str, Any] = {}
+    preset_name = None
+    preset_source = None
     source_name = (
         f"Surface {surface_index}"
         if surface_index is not None
@@ -2884,6 +2898,8 @@ def _dielectric_interface_row(
         )
         source_name = index_entry.primary_physical_name
         metadata = dict(index_entry.metadata)
+        preset_name = _optional_str(index_entry.extra.get("preset_name"))
+        preset_source = _optional_str(index_entry.extra.get("preset_source"))
 
     return {
         "interface_row_index": interface_row_index,
@@ -2898,6 +2914,8 @@ def _dielectric_interface_row(
         "attributes": attributes,
         "metadata": metadata,
         "interface_type": _config_material_value(interface, "Type", "interface_type"),
+        "preset_name": preset_name,
+        "preset_source": preset_source,
         "thickness": _optional_numeric(
             _config_material_value(interface, "Thickness", "thickness")
         ),

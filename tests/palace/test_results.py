@@ -94,6 +94,8 @@ def indexed_report_dir(tmp_path: Path) -> Path:
                 "physical_names": ["MA:D1_TOP_M1___D1_SUBSTRATE"],
                 "dimension": 2,
                 "Type": "MA",
+                "preset_name": "public_ma",
+                "preset_source": "test source",
             },
             {
                 "section": "Boundaries.Postprocessing.SurfaceFlux",
@@ -845,6 +847,14 @@ class TestIndexedCsv:
         assert entry.primary_physical_name == "D1_SUBSTRATE"
         assert entry.metadata == {"material": "silicon"}
 
+        interface_entry = index_map.entry_for_index(
+            "Boundaries.Postprocessing.Dielectric",
+            2,
+        )
+        assert interface_entry is not None
+        assert interface_entry.extra["preset_name"] == "public_ma"
+        assert interface_entry.extra["preset_source"] == "test source"
+
     def test_load_indexed_csv_renames_physical_columns(
         self, indexed_report_dir: Path
     ) -> None:
@@ -908,6 +918,8 @@ class TestIndexedReportSummaries:
         assert by_index.loc[2, "entry_name"] == "ma_interface"
         assert by_index.loc[2, "role"] == "boundary_surface"
         assert by_index.loc[2, "interface_type"] == "MA"
+        assert by_index.loc[2, "preset_name"] == "public_ma"
+        assert by_index.loc[2, "preset_source"] == "test source"
         assert by_index.loc[2, "thickness"] == pytest.approx(0.002)
         assert by_index.loc[2, "permittivity"] == pytest.approx(10.0)
         assert by_index.loc[2, "loss_tangent"] == pytest.approx(0.0033)
@@ -1063,6 +1075,8 @@ class TestIndexedReportSummaries:
         by_index = summary.set_index("surface_index")
         assert by_index.loc[2, "source_name"] == "MA:D1_TOP_M1___D1_SUBSTRATE"
         assert by_index.loc[2, "interface_type"] == "MA"
+        assert by_index.loc[2, "preset_name"] == "public_ma"
+        assert by_index.loc[2, "preset_source"] == "test source"
         assert by_index.loc[2, "thickness"] == pytest.approx(0.002)
         assert by_index.loc[2, "permittivity"] == pytest.approx(10.0)
         assert by_index.loc[2, "loss_tangent"] == pytest.approx(0.0033)

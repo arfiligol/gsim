@@ -468,6 +468,8 @@ def test_build_postprocessing_config_supports_interface_material_reference() -> 
                 interface_type="SA",
                 thickness=0.003,
                 material_name="AlOx_native_generic",
+                preset_name="public_sa",
+                preset_source="test fixture",
             ),
         ),
     )
@@ -482,6 +484,13 @@ def test_build_postprocessing_config_supports_interface_material_reference() -> 
             "_MaterialName": "AlOx_native_generic",
         }
     ]
+    dielectric_rows = [
+        row
+        for row in config.index_map.to_rows()
+        if row["section"] == "Boundaries.Postprocessing.Dielectric"
+    ]
+    assert dielectric_rows[0]["preset_name"] == "public_sa"
+    assert dielectric_rows[0]["preset_source"] == "test fixture"
 
 
 def test_interface_assignment_specs_target_exact_interfaces() -> None:
@@ -492,17 +501,20 @@ def test_interface_assignment_specs_target_exact_interfaces() -> None:
             "thickness": 0.001,
             "material_name": "AlOx_native_generic",
             "loss_tangent": 0.001,
+            "source": "public MA source",
         },
         "public_ms": {
             "interface_type": "MS",
             "thickness": 0.002,
             "permittivity": 10.0,
             "loss_tangent": 0.002,
+            "source": "public MS source",
         },
         "public_sa": {
             "interface_type": "SA",
             "thickness": 0.003,
             "material_name": "AlOx_native_generic",
+            "source": "public SA source",
         },
     }
 
@@ -523,6 +535,8 @@ def test_interface_assignment_specs_target_exact_interfaces() -> None:
             loss_tangent=0.001,
             role="boundary_surface",
             entry_names=("metal___substrate",),
+            preset_name="public_ma",
+            preset_source="public MA source",
         ),
         DielectricInterfaceSpec(
             interface_type="MS",
@@ -531,6 +545,8 @@ def test_interface_assignment_specs_target_exact_interfaces() -> None:
             loss_tangent=0.002,
             role="boundary_surface",
             entry_names=("metal___substrate",),
+            preset_name="public_ms",
+            preset_source="public MS source",
         ),
         DielectricInterfaceSpec(
             interface_type="SA",
@@ -538,6 +554,8 @@ def test_interface_assignment_specs_target_exact_interfaces() -> None:
             material_name="AlOx_native_generic",
             role="boundary_surface",
             entry_names=("legacy__substrate",),
+            preset_name="public_sa",
+            preset_source="public SA source",
         ),
     )
 
@@ -576,6 +594,11 @@ def test_interface_assignment_specs_target_exact_interfaces() -> None:
         "metal___substrate",
         section="Boundaries.Postprocessing.Dielectric",
     ) == (1, 2)
+    by_index = {entry["index"]: entry for entry in config.index_map.to_rows()}
+    assert by_index[1]["preset_name"] == "public_ma"
+    assert by_index[1]["preset_source"] == "public MA source"
+    assert by_index[2]["preset_name"] == "public_ms"
+    assert by_index[2]["preset_source"] == "public MS source"
     assert (
         config.index_map.physical_name_for_index(
             "Boundaries.Postprocessing.Dielectric",
@@ -625,6 +648,7 @@ def test_interface_assignment_specs_allow_explicit_non_interface() -> None:
             permittivity=1.0,
             role="boundary_surface",
             entry_names=("absorbing",),
+            preset_name="public_boundary",
         ),
     )
 
@@ -759,6 +783,7 @@ def test_material_kind_interface_specs_classify_default_pairs() -> None:
             loss_tangent=0.002,
             role="boundary_surface",
             entry_names=("metal___substrate",),
+            preset_name="public_ms",
         ),
         DielectricInterfaceSpec(
             interface_type="MA",
@@ -766,6 +791,7 @@ def test_material_kind_interface_specs_classify_default_pairs() -> None:
             material_name="AlOx_native_generic",
             role="boundary_surface",
             entry_names=("metal___vacuum",),
+            preset_name="public_ma",
         ),
         DielectricInterfaceSpec(
             interface_type="SA",
@@ -773,6 +799,7 @@ def test_material_kind_interface_specs_classify_default_pairs() -> None:
             permittivity=2.0,
             role="boundary_surface",
             entry_names=("substrate___vacuum",),
+            preset_name="public_sa",
         ),
     )
 
@@ -861,6 +888,7 @@ def test_material_kind_interface_specs_allow_kind_pair_override_duplicates() -> 
             permittivity=4.0,
             role="boundary_surface",
             entry_names=("metal___substrate",),
+            preset_name="public_ma",
         ),
         DielectricInterfaceSpec(
             interface_type="MS",
@@ -868,6 +896,7 @@ def test_material_kind_interface_specs_allow_kind_pair_override_duplicates() -> 
             permittivity=10.0,
             role="boundary_surface",
             entry_names=("metal___substrate",),
+            preset_name="public_ms",
         ),
     )
 
@@ -906,6 +935,7 @@ def test_material_kind_interface_specs_preserve_multiple_preset_order() -> None:
             permittivity=8.0,
             role="boundary_surface",
             entry_names=("metal___substrate",),
+            preset_name="public_ms_inner",
         ),
         DielectricInterfaceSpec(
             interface_type="MS",
@@ -913,6 +943,7 @@ def test_material_kind_interface_specs_preserve_multiple_preset_order() -> None:
             permittivity=10.0,
             role="boundary_surface",
             entry_names=("metal___substrate",),
+            preset_name="public_ms_outer",
         ),
     )
 
@@ -957,6 +988,7 @@ def test_material_kind_interface_specs_match_kind_pairs_in_either_order() -> Non
         permittivity=4.0,
         role="boundary_surface",
         entry_names=("vacuum___metal",),
+        preset_name="public_ma",
     )
 
 
@@ -994,6 +1026,7 @@ def test_material_kind_interface_specs_accept_generated_name_aliases() -> None:
             permittivity=2.0,
             role="boundary_surface",
             entry_names=("air___silicon",),
+            preset_name="public_sa",
         ),
     )
 
