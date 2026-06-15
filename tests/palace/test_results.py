@@ -15,6 +15,7 @@ from gsim.palace.results import (
     Eigenmodes,
     ElectrostaticReport,
     PalaceRunSummary,
+    PalaceSweepPointSpec,
     PalaceSweepSummary,
     SParams,
     get_port_map,
@@ -41,6 +42,7 @@ from gsim.palace.results import (
     summarize_surface_loss,
     summarize_surface_q_by_interface,
     summarize_terminal_matrix_history,
+    write_palace_sweep_points,
 )
 
 
@@ -817,6 +819,51 @@ class TestPalaceRunSummary:
 
 class TestPalaceSweepSummary:
     """Tests for reusable point-local Palace sweep summaries."""
+
+    def test_write_palace_sweep_points_round_trips_through_loader(
+        self,
+        indexed_report_dir: Path,
+    ) -> None:
+        sweep_root = indexed_report_dir / "written_sweep"
+        point_root = sweep_root / "points" / "gap_6um"
+        _write_sweep_point_artifacts(indexed_report_dir, point_root)
+
+        points_path = write_palace_sweep_points(
+            sweep_root,
+            [
+                PalaceSweepPointSpec(
+                    point_slug="gap_6um",
+                    parameters={
+                        "gap_um": 6.0,
+                        "solver": {"order": 2},
+                    },
+                    run_dir="points/gap_6um",
+                )
+            ],
+            sweep_id="gap_sweep",
+            metadata={"campaign": "public_fixture"},
+        )
+
+        payload = json.loads(points_path.read_text())
+        assert payload["schema_version"] == 1
+        assert payload["sweep_id"] == "gap_sweep"
+        assert payload["campaign"] == "public_fixture"
+        assert payload["points"][0]["point_slug"] == "gap_6um"
+        assert payload["points"][0]["parameters"]["solver"] == {"order": 2}
+
+        summary = load_palace_sweep_summary(sweep_root)
+        assert summary.sweep_id == "gap_sweep"
+        assert summary.metadata["campaign"] == "public_fixture"
+        assert summary.points[0].point_slug == "gap_6um"
+        assert summary.points[0].parameters["gap_um"] == 6.0
+        assert summary.points[0].run_summary.missing_artifacts == ()
+
+    def test_write_palace_sweep_points_requires_explicit_point_slug(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        with pytest.raises(ValueError, match="point_slug"):
+            write_palace_sweep_points(tmp_path, [{"parameters": {"gap_um": 6.0}}])
 
     def test_load_palace_sweep_summary_uses_points_json_run_dirs(
         self,

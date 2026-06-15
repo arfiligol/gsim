@@ -117,6 +117,7 @@ from gsim.palace.results import (
     IndexedCsvColumn,
     PalaceArtifactStatus,
     PalaceRunSummary,
+    PalaceSweepPointSpec,
     PalaceSweepPointSummary,
     PalaceSweepSummary,
     SParam,
@@ -147,6 +148,7 @@ from gsim.palace.results import (
     summarize_surface_loss,
     summarize_surface_q_by_interface,
     summarize_terminal_matrix_history,
+    write_palace_sweep_points,
 )
 
 # Visualization
@@ -185,6 +187,7 @@ __all__ = [
     "PalaceArtifactStatus",
     "PalacePort",
     "PalaceRunSummary",
+    "PalaceSweepPointSpec",
     "PalaceSweepPointSummary",
     "PalaceSweepSummary",
     "PortConfig",
@@ -247,6 +250,7 @@ __all__ = [
     "summarize_surface_loss",
     "summarize_surface_q_by_interface",
     "summarize_terminal_matrix_history",
+    "write_palace_sweep_points",
 ]
 
 
