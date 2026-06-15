@@ -75,7 +75,10 @@
         - validate_mesh
         - run
 
-## Mesh
+## Mesh Generation
+
+These APIs control mesh construction. They should change generated geometry or
+meshing behavior, not Palace postprocessing/reportability.
 
 ::: gsim.palace.MeshConfig
     options:
@@ -90,11 +93,31 @@
     options:
       show_source: false
 
-::: gsim.palace.build_dielectric_interface_specs_from_assignments
+## Mesh Artifacts And Reportability
+
+These APIs operate on generated mesh artifacts and manifests. Use them when a
+workflow needs auditable physical-name, postprocessing-index, or material
+provenance sidecars without adding new mesh-generation knobs.
+
+::: gsim.palace.mesh.MeshResult
+    options:
+      show_source: false
+      inherited_members: false
+
+::: gsim.palace.mesh.MeshManifest
+    options:
+      show_source: false
+      inherited_members: false
+
+::: gsim.palace.mesh.build_postprocessing_config_from_manifest
     options:
       show_source: false
 
-::: gsim.palace.build_dielectric_interface_specs_from_material_kinds
+::: gsim.palace.mesh.build_dielectric_interface_specs_from_assignments
+    options:
+      show_source: false
+
+::: gsim.palace.mesh.build_dielectric_interface_specs_from_material_kinds
     options:
       show_source: false
 

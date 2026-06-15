@@ -805,6 +805,32 @@ class TestMagnetostaticSimWorkflow:
         assert {row["index"] for row in flux_rows} == {1, 2}
         assert {row["Type"] for row in flux_rows} == {"Magnetic"}
 
+    def test_manifest_postprocessing_preserves_magnetic_flux_rows(
+        self, magnetostatic_sim
+    ):
+        """Manifest postprocessing must not erase solver-owned flux output."""
+        postprocessing = build_postprocessing_config_from_manifest(
+            magnetostatic_sim._last_mesh_result.manifest,
+            include_empty_sections=False,
+        )
+
+        config_path = magnetostatic_sim.write_config(postprocessing=postprocessing)
+        config = json.loads(config_path.read_text())
+
+        energy_rows = config["Domains"]["Postprocessing"]["Energy"]
+        assert energy_rows
+
+        flux_rows = config["Boundaries"]["Postprocessing"]["SurfaceFlux"]
+        assert len(flux_rows) == 2
+        assert {row["Type"] for row in flux_rows} == {"Magnetic"}
+
+        index_map = json.loads(
+            (Path(magnetostatic_sim._output_dir) / "palace_index_map.json").read_text()
+        )
+        sections = {row["section"] for row in index_map["entries"]}
+        assert "Domains.Postprocessing.Energy" in sections
+        assert "Boundaries.Postprocessing.SurfaceFlux" in sections
+
     def test_write_config_supports_multielement_current_source(
         self, tmp_path, cpw_component
     ):

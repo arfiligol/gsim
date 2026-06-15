@@ -484,6 +484,27 @@ def test_build_postprocessing_config_from_manifest_has_stable_indices(
     assert index_map_json["entries"][0]["entry_name"] == "substrate"
 
 
+def test_build_postprocessing_config_can_omit_empty_sections() -> None:
+    """Empty sections can be omitted when merging with solver-owned output."""
+    manifest = build_mesh_manifest(_minimal_groups())
+
+    config = build_postprocessing_config_from_manifest(
+        manifest,
+        include_empty_sections=False,
+    )
+
+    assert config.domains == {
+        "Energy": [
+            {"Index": 1, "Attributes": [11]},
+            {"Index": 2, "Attributes": [13]},
+        ]
+    }
+    assert config.boundaries == {}
+    assert {row["section"] for row in config.index_map.to_rows()} == {
+        "Domains.Postprocessing.Energy"
+    }
+
+
 def test_build_postprocessing_config_supports_interface_material_reference() -> None:
     manifest = build_mesh_manifest(_minimal_groups())
 

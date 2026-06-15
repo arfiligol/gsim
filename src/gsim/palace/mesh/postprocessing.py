@@ -223,14 +223,27 @@ def build_postprocessing_config_from_manifest(
     ),
     surface_flux: tuple[SurfaceFluxSpec, ...] = (),
     dielectric_interfaces: tuple[DielectricInterfaceSpec, ...] = (),
+    include_empty_sections: bool = True,
 ) -> PostprocessingConfig:
     """Build Palace postprocessing config from manifest roles.
 
     This builder keeps public workflow notebooks out of private naming schemes:
     callers select physical roles or public manifest entry names, and the
     builder emits Palace ``Index`` values plus an audit-friendly index map.
-    It configures Palace's existing postprocessing domains only; masked surface
-    EPR output remains a Palace-side capability rather than a Python replay.
+    It emits Palace's existing domain and boundary postprocessing fragments
+    only; masked surface EPR output remains a Palace-side capability rather
+    than a Python replay.
+
+    Args:
+        manifest: Mesh manifest with role-tagged physical groups.
+        energy_roles: Domain roles that should receive Palace energy
+            postprocessing indices.
+        surface_flux: Boundary surface-flux requests.
+        dielectric_interfaces: Boundary dielectric-interface requests.
+        include_empty_sections: Keep empty Palace postprocessing sections in
+            the returned config. Disable this when the config will be merged
+            with problem-generated boundary postprocessing and empty sections
+            should not override existing solver-owned entries.
     """
     domains: dict[str, list[dict[str, Any]]] = {"Energy": [], "Probe": []}
     boundaries: dict[str, list[dict[str, Any]]] = {
@@ -321,11 +334,22 @@ def build_postprocessing_config_from_manifest(
             )
             dielectric_index += 1
 
+    if not include_empty_sections:
+        domains = _drop_empty_postprocessing_sections(domains)
+        boundaries = _drop_empty_postprocessing_sections(boundaries)
+
     return PostprocessingConfig(
         domains=domains,
         boundaries=boundaries,
         index_map=PostprocessingIndexMap(entries=tuple(index_entries)),
     )
+
+
+def _drop_empty_postprocessing_sections(
+    sections: Mapping[str, list[dict[str, Any]]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Return only non-empty Palace postprocessing sections."""
+    return {name: entries for name, entries in sections.items() if entries}
 
 
 def build_dielectric_interface_specs_from_assignments(
