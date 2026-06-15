@@ -85,6 +85,57 @@ class PalaceSlurmResourceSpec:
 
 
 @dataclass(frozen=True)
+class PalaceSlurmLauncherSpec:
+    """Optional launch hints attached to a caller-supplied Slurm profile."""
+
+    palace_executable: str | None = None
+    command_style: Literal["binary", "wrapper"] | None = None
+    setup_commands: tuple[str, ...] | None = None
+    petsc_options: tuple[str, ...] | None = None
+    srun_args: tuple[str, ...] | None = None
+
+    def __post_init__(self) -> None:
+        if self.palace_executable is not None and (
+            not self.palace_executable or "\n" in self.palace_executable
+        ):
+            raise ValueError("palace_executable must be single-line text")
+        if self.command_style is not None and self.command_style not in {
+            "binary",
+            "wrapper",
+        }:
+            raise ValueError("command_style must be 'binary' or 'wrapper'")
+        if self.setup_commands is not None:
+            _validate_setup_commands(self.setup_commands)
+        if self.petsc_options is not None:
+            _validate_shell_tokens("petsc_options", self.petsc_options)
+        if self.srun_args is not None:
+            _validate_shell_tokens("srun_args", self.srun_args)
+
+    def to_sbatch_kwargs(self) -> dict[str, Any]:
+        """Return kwargs that can be passed to Slurm handoff spec classes."""
+        payload: dict[str, Any] = {}
+        if self.palace_executable is not None:
+            payload["palace_executable"] = self.palace_executable
+        if self.command_style is not None:
+            payload["command_style"] = self.command_style
+        if self.setup_commands is not None:
+            payload["setup_commands"] = self.setup_commands
+        if self.petsc_options is not None:
+            payload["petsc_options"] = self.petsc_options
+        if self.srun_args is not None:
+            payload["srun_args"] = self.srun_args
+        return payload
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-ready launcher-hint record."""
+        payload = self.to_sbatch_kwargs()
+        for key, value in list(payload.items()):
+            if isinstance(value, tuple):
+                payload[key] = list(value)
+        return payload
+
+
+@dataclass(frozen=True)
 class PalaceSlurmProfileSpec:
     """Caller-supplied Slurm profile with explicit Palace resources."""
 
@@ -92,6 +143,8 @@ class PalaceSlurmProfileSpec:
     resources: PalaceSlurmResourceSpec
     source: str = "caller-supplied"
     description: str | None = None
+    launcher: PalaceSlurmLauncherSpec = field(default_factory=PalaceSlurmLauncherSpec)
+    solver: Mapping[str, Any] = field(default_factory=dict)
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -101,6 +154,9 @@ class PalaceSlurmProfileSpec:
         _validate_single_line_text("profile source", self.source)
         if self.description is not None:
             _validate_single_line_text("profile description", self.description)
+        if not isinstance(self.launcher, PalaceSlurmLauncherSpec):
+            raise TypeError("launcher must be a PalaceSlurmLauncherSpec")
+        _validate_profile_solver(self.solver)
         if not isinstance(self.metadata, Mapping):
             raise TypeError("metadata must be a mapping")
 
@@ -116,6 +172,10 @@ class PalaceSlurmProfileSpec:
         }
         if self.description is not None:
             payload["description"] = self.description
+        if launcher := self.launcher.to_dict():
+            payload["launcher"] = launcher
+        if self.solver:
+            payload["solver"] = dict(self.solver)
         if self.metadata:
             payload["metadata"] = dict(self.metadata)
         if resource_overrides:
@@ -129,6 +189,8 @@ class PalaceSlurmProfileResolution:
 
     name: str
     resources: PalaceSlurmResourceSpec
+    launcher: PalaceSlurmLauncherSpec
+    solver: Mapping[str, Any]
     profile: Mapping[str, Any]
     resource_overrides: Mapping[str, Any] = field(default_factory=dict)
 
@@ -389,6 +451,8 @@ def resolve_palace_slurm_profile(
     return PalaceSlurmProfileResolution(
         name=profile.name,
         resources=resources,
+        launcher=profile.launcher,
+        solver=profile.solver,
         profile=profile.to_profile_metadata(resource_overrides=overrides),
         resource_overrides=overrides,
     )
@@ -861,7 +925,15 @@ def _normalize_slurm_profile_spec(
     if not isinstance(profile, Mapping):
         raise TypeError("profile must be a PalaceSlurmProfileSpec or mapping")
 
-    allowed_fields = {"description", "metadata", "name", "resources", "source"}
+    allowed_fields = {
+        "description",
+        "launcher",
+        "metadata",
+        "name",
+        "resources",
+        "solver",
+        "source",
+    }
     unknown_fields = sorted(set(profile) - allowed_fields)
     if unknown_fields:
         msg = "Unknown Slurm profile field(s): "
@@ -874,6 +946,8 @@ def _normalize_slurm_profile_spec(
     if "resources" not in profile:
         raise ValueError("profile must include resources")
     resources = _normalize_slurm_profile_resources(profile["resources"])
+    launcher = _normalize_slurm_profile_launcher(profile.get("launcher", {}))
+    solver = _normalize_slurm_profile_solver(profile.get("solver", {}))
     metadata = profile.get("metadata", {})
     if not isinstance(metadata, Mapping):
         raise TypeError("profile metadata must be a mapping")
@@ -884,6 +958,8 @@ def _normalize_slurm_profile_spec(
         resources=resources,
         source=source,
         description=None if description is None else str(description),
+        launcher=launcher,
+        solver=solver,
         metadata=metadata,
     )
 
@@ -904,6 +980,52 @@ def _normalize_slurm_profile_resources(
         msg += ", ".join(str(field) for field in unknown_fields)
         raise ValueError(msg)
     return PalaceSlurmResourceSpec(**dict(resources))
+
+
+def _normalize_slurm_profile_launcher(
+    launcher: PalaceSlurmLauncherSpec | Mapping[str, Any],
+) -> PalaceSlurmLauncherSpec:
+    if isinstance(launcher, PalaceSlurmLauncherSpec):
+        return launcher
+    if not isinstance(launcher, Mapping):
+        raise TypeError("profile launcher must be a PalaceSlurmLauncherSpec or mapping")
+    allowed_fields = {
+        "command_style",
+        "palace_executable",
+        "petsc_options",
+        "setup_commands",
+        "srun_args",
+    }
+    unknown_fields = sorted(set(launcher) - allowed_fields)
+    if unknown_fields:
+        msg = "Unknown Slurm launcher field(s): "
+        msg += ", ".join(str(field) for field in unknown_fields)
+        raise ValueError(msg)
+    return PalaceSlurmLauncherSpec(
+        palace_executable=_optional_string(launcher.get("palace_executable")),
+        command_style=_optional_string(launcher.get("command_style")),
+        setup_commands=_optional_tuple(launcher.get("setup_commands")),
+        petsc_options=_optional_tuple(launcher.get("petsc_options")),
+        srun_args=_optional_tuple(launcher.get("srun_args")),
+    )
+
+
+def _normalize_slurm_profile_solver(solver: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(solver, Mapping):
+        raise TypeError("profile solver must be a mapping")
+    allowed_fields = {"backend", "device"}
+    unknown_fields = sorted(set(solver) - allowed_fields)
+    if unknown_fields:
+        msg = "Unknown Slurm profile solver field(s): "
+        msg += ", ".join(str(field) for field in unknown_fields)
+        raise ValueError(msg)
+    normalized: dict[str, Any] = {}
+    for key, value in solver.items():
+        if value is None:
+            continue
+        normalized[key] = str(value)
+        _validate_single_line_text(f"solver {key}", normalized[key])
+    return normalized
 
 
 def _slurm_profile_catalog_profiles(
@@ -1050,6 +1172,26 @@ def _validate_single_line_text(label: str, value: str) -> None:
         raise ValueError(f"{label} must not be empty")
     if "\n" in value or "\r" in value:
         raise ValueError(f"{label} must be single-line text")
+
+
+def _optional_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
+def _optional_tuple(value: Any) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return (value,)
+    if not isinstance(value, Sequence):
+        raise TypeError("launcher tuple fields must be strings or sequences")
+    return tuple(str(item) for item in value)
+
+
+def _validate_profile_solver(value: Mapping[str, Any]) -> None:
+    _normalize_slurm_profile_solver(value)
 
 
 def _validate_shell_tokens(label: str, values: Sequence[str]) -> None:

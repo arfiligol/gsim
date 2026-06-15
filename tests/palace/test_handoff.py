@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from gsim.palace import (
+    PalaceSlurmLauncherSpec,
     PalaceSlurmProfileSpec,
     PalaceSlurmResourceSpec,
     PalaceSlurmSbatchSpec,
@@ -39,6 +40,12 @@ def test_resolve_palace_slurm_profile_accepts_mapping_and_overrides() -> None:
             "public-slurm:cpu": {
                 "source": "caller-supplied test fixture",
                 "description": "Public CPU dry-run profile",
+                "launcher": {
+                    "setup_commands": ["module load palace"],
+                    "srun_args": ["--mpi=pmix"],
+                    "petsc_options": [],
+                },
+                "solver": {"device": "CPU"},
                 "metadata": {"cluster": "public"},
                 "resources": {
                     "account": "public_alloc",
@@ -59,10 +66,22 @@ def test_resolve_palace_slurm_profile_accepts_mapping_and_overrides() -> None:
     assert resolution.resources.num_threads == 4
     assert resolution.resources.memory_mb == 64000
     assert resolution.resources.wall_time == "01:00:00"
+    assert resolution.launcher.to_sbatch_kwargs() == {
+        "setup_commands": ("module load palace",),
+        "srun_args": ("--mpi=pmix",),
+        "petsc_options": (),
+    }
+    assert resolution.solver == {"device": "CPU"}
     assert resolution.profile == {
         "name": "public-slurm:cpu",
         "source": "caller-supplied test fixture",
         "description": "Public CPU dry-run profile",
+        "launcher": {
+            "setup_commands": ["module load palace"],
+            "srun_args": ["--mpi=pmix"],
+            "petsc_options": [],
+        },
+        "solver": {"device": "CPU"},
         "metadata": {"cluster": "public"},
         "resource_overrides": {
             "memory_mb": 64000,
@@ -81,15 +100,18 @@ def test_resolve_palace_slurm_profile_accepts_spec_objects() -> None:
                     partition="cpu",
                     wall_time="00:30:00",
                 ),
+                launcher=PalaceSlurmLauncherSpec(srun_args=("--mpi=pmix",)),
             )
         },
         "public-slurm:cpu",
     )
 
     assert resolution.resources.account == "public_alloc"
+    assert resolution.launcher.to_sbatch_kwargs() == {"srun_args": ("--mpi=pmix",)}
     assert resolution.profile == {
         "name": "public-slurm:cpu",
         "source": "caller-supplied",
+        "launcher": {"srun_args": ["--mpi=pmix"]},
     }
 
 
@@ -105,6 +127,11 @@ def test_load_palace_slurm_profile_catalog_accepts_envelope(
                 "profiles": {
                     "public-slurm:cpu": {
                         "source": "caller-supplied test catalog",
+                        "launcher": {
+                            "command_style": "binary",
+                            "srun_args": ["--mpi=pmix"],
+                        },
+                        "solver": {"device": "GPU", "backend": "cuda"},
                         "resources": {
                             "account": "public_alloc",
                             "partition": "cpu",
@@ -128,9 +155,19 @@ def test_load_palace_slurm_profile_catalog_accepts_envelope(
     assert set(catalog) == {"public-slurm:cpu"}
     assert catalog["public-slurm:cpu"].resources.wall_time == "00:30:00"
     assert resolution.resources.num_processes == 4
+    assert resolution.launcher.to_sbatch_kwargs() == {
+        "command_style": "binary",
+        "srun_args": ("--mpi=pmix",),
+    }
+    assert resolution.solver == {"device": "GPU", "backend": "cuda"}
     assert resolution.profile == {
         "name": "public-slurm:cpu",
         "source": "caller-supplied test catalog",
+        "launcher": {
+            "command_style": "binary",
+            "srun_args": ["--mpi=pmix"],
+        },
+        "solver": {"device": "GPU", "backend": "cuda"},
         "resource_overrides": {"ntasks_per_node": 4},
     }
 
@@ -180,6 +217,44 @@ def test_load_palace_slurm_profile_catalog_validates_inputs(
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="Unknown Slurm profile catalog field"):
+        load_palace_slurm_profile_catalog(catalog_path)
+
+    catalog_path.write_text(
+        json.dumps(
+            {
+                "public-slurm:cpu": {
+                    "resources": {
+                        "account": "public_alloc",
+                        "partition": "cpu",
+                        "wall_time": "00:30:00",
+                    },
+                    "launcher": {"mpi": "pmix"},
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="Unknown Slurm launcher field"):
+        load_palace_slurm_profile_catalog(catalog_path)
+
+    catalog_path.write_text(
+        json.dumps(
+            {
+                "public-slurm:cpu": {
+                    "resources": {
+                        "account": "public_alloc",
+                        "partition": "cpu",
+                        "wall_time": "00:30:00",
+                    },
+                    "solver": {"device": "GPU", "runtime": "cuda"},
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="Unknown Slurm profile solver field"):
         load_palace_slurm_profile_catalog(catalog_path)
 
     catalog_path.write_text(
@@ -235,6 +310,11 @@ def test_write_palace_slurm_sbatch_handoff_round_trips_summary(
         {
             "public-slurm:cpu": {
                 "source": "caller-supplied test fixture",
+                "launcher": {
+                    "setup_commands": ["module load palace"],
+                    "srun_args": ["--mpi=pmix"],
+                    "petsc_options": [],
+                },
                 "resources": {
                     "account": "public_alloc",
                     "partition": "cpu",
@@ -251,10 +331,8 @@ def test_write_palace_slurm_sbatch_handoff_round_trips_summary(
     spec = PalaceSlurmSbatchSpec(
         job_name="palace_public",
         resources=resolution.resources,
-        setup_commands=("module load palace",),
-        petsc_options=("-log_view",),
-        srun_args=("--mpi=pmix",),
         mail_user="user@example.org",
+        **resolution.launcher.to_sbatch_kwargs(),
     )
 
     result = write_palace_slurm_sbatch_handoff(
@@ -296,6 +374,11 @@ def test_write_palace_slurm_sbatch_handoff_round_trips_summary(
     assert summary.handoff["present"] is True
     assert summary.handoff["status"] == "scripted"
     assert summary.handoff["profile"]["name"] == "public-slurm:cpu"
+    assert summary.handoff["profile"]["launcher"] == {
+        "setup_commands": ["module load palace"],
+        "srun_args": ["--mpi=pmix"],
+        "petsc_options": [],
+    }
     assert summary.handoff["profile"]["resource_overrides"] == {"memory_mb": 64000}
     assert summary.handoff["script_present"] is True
     assert summary.handoff["archive_present"] is False
