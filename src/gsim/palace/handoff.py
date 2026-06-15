@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import re
 import shlex
@@ -11,7 +12,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from gsim.palace.results import write_palace_handoff_metadata
+from gsim.palace.results import (
+    PalaceArtifactStatus,
+    PalaceRunSummary,
+    load_palace_run_summary,
+    load_palace_sweep_summary,
+    write_palace_handoff_metadata,
+)
 
 _SBATCH_TOKEN_FORBIDDEN = set(" \t\r\n\"'`$;&|<>")
 _SBATCH_JOB_NAME_FORBIDDEN = set(" \t\r\n\"'`$;&|<>/#")
@@ -293,6 +300,17 @@ class PalaceSlurmSweepHandoffResult:
     messages: tuple[str, ...] = field(default_factory=tuple)
 
 
+@dataclass(frozen=True)
+class PalaceHandoffArchiveManifestResult:
+    """Files and counts written for a generated handoff archive manifest."""
+
+    manifest_path: Path
+    metadata_path: Path | None
+    file_count: int
+    total_bytes: int
+    messages: tuple[str, ...] = field(default_factory=tuple)
+
+
 def write_palace_slurm_sbatch_handoff(
     source: str | Path,
     spec: PalaceSlurmSbatchSpec,
@@ -435,6 +453,158 @@ def write_palace_slurm_sweep_array_handoff(
         metadata_path=sidecar_path,
         points_csv_path=points_csv_path,
         messages=(f"Wrote Palace Slurm sweep handoff: {output_script_path}",),
+    )
+
+
+def write_palace_run_handoff_archive_manifest(
+    source: str | Path,
+    *,
+    manifest_path: str | Path = "palace_handoff_archive_manifest.json",
+    archive_path: str | Path | None = None,
+    metadata: Mapping[str, Any] | None = None,
+    include_results: bool = False,
+    include_hashes: bool = True,
+    update_handoff_metadata: bool = True,
+    handoff_metadata_filename: str = "palace_handoff_metadata.json",
+) -> PalaceHandoffArchiveManifestResult:
+    """Write a reviewable manifest for a Palace run handoff archive.
+
+    The helper records which generated files would be packaged. It does not
+    create an archive, submit a job, or infer site policy.
+    """
+    run_dir = Path(source)
+    if run_dir.suffix:
+        raise ValueError("source must be a run directory")
+    _validate_relative_path("manifest_path", str(manifest_path))
+    output_manifest_path = run_dir / manifest_path
+    metadata_path = (
+        _record_handoff_archive_manifest(
+            run_dir,
+            filename=handoff_metadata_filename,
+            manifest_path=manifest_path,
+            archive_path=archive_path,
+        )
+        if update_handoff_metadata
+        else _existing_handoff_metadata_path(run_dir, handoff_metadata_filename)
+    )
+
+    summary = load_palace_run_summary(run_dir, include_hashes=include_hashes)
+    files = _run_archive_manifest_entries(
+        run_dir,
+        summary,
+        include_results=include_results,
+        include_hashes=include_hashes,
+    )
+    payload = _archive_manifest_payload(
+        source_kind="run",
+        files=files,
+        include_results=include_results,
+        archive_path=archive_path,
+        metadata=metadata,
+    )
+    _write_json(output_manifest_path, payload)
+    return PalaceHandoffArchiveManifestResult(
+        manifest_path=output_manifest_path,
+        metadata_path=metadata_path,
+        file_count=int(payload["file_count"]),
+        total_bytes=int(payload["total_bytes"]),
+        messages=(f"Wrote Palace handoff archive manifest: {output_manifest_path}",),
+    )
+
+
+def write_palace_sweep_handoff_archive_manifest(
+    source: str | Path,
+    *,
+    manifest_path: str | Path = "palace_sweep_handoff_archive_manifest.json",
+    archive_path: str | Path | None = None,
+    metadata: Mapping[str, Any] | None = None,
+    include_point_files: bool = True,
+    include_results: bool = False,
+    include_hashes: bool = True,
+    update_handoff_metadata: bool = True,
+    handoff_metadata_filename: str = "palace_sweep_handoff_metadata.json",
+) -> PalaceHandoffArchiveManifestResult:
+    """Write a reviewable manifest for a Palace sweep handoff archive."""
+    source_path = Path(source)
+    points_path = source_path if source_path.is_file() else source_path / "points.json"
+    if not points_path.is_file():
+        raise FileNotFoundError(points_path)
+    sweep_root = points_path.parent
+    _validate_relative_path("manifest_path", str(manifest_path))
+    output_manifest_path = sweep_root / manifest_path
+    metadata_path = (
+        _record_handoff_archive_manifest(
+            sweep_root,
+            filename=handoff_metadata_filename,
+            manifest_path=manifest_path,
+            archive_path=archive_path,
+        )
+        if update_handoff_metadata
+        else _existing_handoff_metadata_path(sweep_root, handoff_metadata_filename)
+    )
+
+    summary = load_palace_sweep_summary(
+        points_path,
+        include_hashes=include_hashes,
+        include_report_metrics=False,
+    )
+    files: list[dict[str, Any]] = []
+    _append_manifest_entry(
+        files,
+        sweep_root,
+        points_path,
+        role="sweep_points",
+        name=points_path.name,
+        include_hashes=include_hashes,
+    )
+    handoff = _as_dict(summary.handoff)
+    metadata_payload = _as_dict(handoff.get("metadata"))
+    points_csv_path = metadata_payload.get("points_csv_path")
+    if points_csv_path is not None:
+        _append_manifest_entry(
+            files,
+            sweep_root,
+            _resolve_sidecar_reference(points_path, points_csv_path),
+            role="sweep_points_table",
+            name=Path(str(points_csv_path)).name,
+            include_hashes=include_hashes,
+        )
+    _extend_handoff_reference_entries(
+        files,
+        sweep_root,
+        handoff,
+        include_hashes=include_hashes,
+        role_prefix="sweep_",
+    )
+    if include_point_files:
+        for point in summary.points:
+            files.extend(
+                _run_archive_manifest_entries(
+                    sweep_root,
+                    point.run_summary,
+                    include_results=include_results,
+                    include_hashes=include_hashes,
+                    point_slug=point.point_slug,
+                )
+            )
+    files = _deduplicate_manifest_entries(files)
+    payload = _archive_manifest_payload(
+        source_kind="sweep",
+        files=files,
+        include_results=include_results,
+        archive_path=archive_path,
+        metadata={
+            "include_point_files": include_point_files,
+            **dict(metadata or {}),
+        },
+    )
+    _write_json(output_manifest_path, payload)
+    return PalaceHandoffArchiveManifestResult(
+        manifest_path=output_manifest_path,
+        metadata_path=metadata_path,
+        file_count=int(payload["file_count"]),
+        total_bytes=int(payload["total_bytes"]),
+        messages=(f"Wrote Palace sweep archive manifest: {output_manifest_path}",),
     )
 
 
@@ -727,3 +897,279 @@ def _validate_positive_int(label: str, value: int) -> None:
 def _require_file(path: Path, label: str) -> None:
     if not path.is_file():
         raise FileNotFoundError(f"Missing {label}: {path}")
+
+
+def _record_handoff_archive_manifest(
+    source: Path,
+    *,
+    filename: str,
+    manifest_path: str | Path,
+    archive_path: str | Path | None,
+) -> Path:
+    existing_path = _existing_handoff_metadata_path(source, filename)
+    existing = (
+        json.loads(existing_path.read_text(encoding="utf-8"))
+        if existing_path is not None
+        else {}
+    )
+    script = _as_dict(existing.get("script"))
+    archive = _as_dict(existing.get("archive"))
+    return write_palace_handoff_metadata(
+        source,
+        status=str(existing.get("status") or "manifested"),
+        launcher=_optional_dict(existing.get("launcher")),
+        profile=_optional_dict(existing.get("profile")),
+        resources=_optional_dict(existing.get("resources")),
+        script_path=script.get("path"),
+        archive_path=archive_path if archive_path is not None else archive.get("path"),
+        archive_manifest_path=manifest_path,
+        command=_optional_dict(existing.get("command")),
+        metadata=_optional_dict(existing.get("metadata")),
+        filename=filename,
+    )
+
+
+def _existing_handoff_metadata_path(source: Path, filename: str) -> Path | None:
+    path = source / filename
+    return path if path.is_file() else None
+
+
+def _run_archive_manifest_entries(
+    root: Path,
+    summary: PalaceRunSummary,
+    *,
+    include_results: bool,
+    include_hashes: bool,
+    point_slug: str | None = None,
+) -> list[dict[str, Any]]:
+    files: list[dict[str, Any]] = []
+    for artifact in summary.artifacts.values():
+        _append_status_manifest_entry(
+            files,
+            root,
+            artifact,
+            role="core_artifact",
+            include_hashes=include_hashes,
+            point_slug=point_slug,
+        )
+    if include_results:
+        for artifact in summary.results.values():
+            _append_status_manifest_entry(
+                files,
+                root,
+                artifact,
+                role="result_artifact",
+                include_hashes=include_hashes,
+                point_slug=point_slug,
+            )
+    handoff = _as_dict(summary.handoff)
+    _extend_handoff_reference_entries(
+        files,
+        root,
+        handoff,
+        include_hashes=include_hashes,
+        point_slug=point_slug,
+    )
+    runtime = _as_dict(summary.runtime)
+    runtime_path = runtime.get("path")
+    if runtime.get("present") is True and runtime_path is not None:
+        _append_manifest_entry(
+            files,
+            root,
+            Path(str(runtime_path)),
+            role="runtime_metadata",
+            name="palace_run_metadata.json",
+            include_hashes=include_hashes,
+            point_slug=point_slug,
+        )
+    return _deduplicate_manifest_entries(files)
+
+
+def _extend_handoff_reference_entries(
+    files: list[dict[str, Any]],
+    root: Path,
+    handoff: Mapping[str, Any],
+    *,
+    include_hashes: bool,
+    role_prefix: str = "",
+    point_slug: str | None = None,
+) -> None:
+    handoff_path_value = handoff.get("path")
+    if handoff.get("present") is not True or handoff_path_value is None:
+        return
+    handoff_path = Path(str(handoff_path_value))
+    _append_manifest_entry(
+        files,
+        root,
+        handoff_path,
+        role=f"{role_prefix}handoff_metadata",
+        name=handoff_path.name,
+        include_hashes=include_hashes,
+        point_slug=point_slug,
+    )
+    script = _as_dict(handoff.get("script"))
+    if handoff.get("script_present") is True and script.get("path") is not None:
+        script_path = _resolve_sidecar_reference(handoff_path, script["path"])
+        _append_manifest_entry(
+            files,
+            root,
+            script_path,
+            role=f"{role_prefix}handoff_script",
+            name=Path(str(script["path"])).name,
+            include_hashes=include_hashes,
+            point_slug=point_slug,
+        )
+
+
+def _append_status_manifest_entry(
+    files: list[dict[str, Any]],
+    root: Path,
+    artifact: PalaceArtifactStatus,
+    *,
+    role: str,
+    include_hashes: bool,
+    point_slug: str | None = None,
+) -> None:
+    if not artifact.present or artifact.path is None:
+        return
+    entry = _manifest_entry(
+        root,
+        artifact.path,
+        role=role,
+        name=artifact.name,
+        include_hashes=include_hashes,
+        point_slug=point_slug,
+    )
+    if include_hashes and artifact.sha256 is not None:
+        entry["sha256"] = artifact.sha256
+    files.append(entry)
+
+
+def _append_manifest_entry(
+    files: list[dict[str, Any]],
+    root: Path,
+    path: Path,
+    *,
+    role: str,
+    name: str,
+    include_hashes: bool,
+    point_slug: str | None = None,
+) -> None:
+    if path.is_file():
+        files.append(
+            _manifest_entry(
+                root,
+                path,
+                role=role,
+                name=name,
+                include_hashes=include_hashes,
+                point_slug=point_slug,
+            )
+        )
+
+
+def _manifest_entry(
+    root: Path,
+    path: Path,
+    *,
+    role: str,
+    name: str,
+    include_hashes: bool,
+    point_slug: str | None,
+) -> dict[str, Any]:
+    resolved_path = path.resolve()
+    root_path = root.resolve()
+    try:
+        relative_path = resolved_path.relative_to(root_path).as_posix()
+    except ValueError as exc:
+        raise ValueError(
+            "archive manifest entries must live under the run or sweep root"
+        ) from exc
+    entry: dict[str, Any] = {
+        "role": role,
+        "name": name,
+        "path": relative_path,
+        "bytes": int(path.stat().st_size),
+    }
+    if point_slug is not None:
+        entry["point_slug"] = point_slug
+    if include_hashes:
+        entry["sha256"] = _sha256_file(path)
+    return entry
+
+
+def _archive_manifest_payload(
+    *,
+    source_kind: Literal["run", "sweep"],
+    files: Sequence[Mapping[str, Any]],
+    include_results: bool,
+    archive_path: str | Path | None,
+    metadata: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    archive = {}
+    if archive_path is not None:
+        archive["path"] = str(archive_path)
+    return {
+        "schema_version": 1,
+        "kind": "palace_handoff_archive_manifest",
+        "source_kind": source_kind,
+        "status": "manifested",
+        "root": ".",
+        "include_results": include_results,
+        "archive": archive,
+        "file_count": len(files),
+        "total_bytes": sum(int(row.get("bytes", 0) or 0) for row in files),
+        "files": list(files),
+        "metadata": _json_ready(dict(metadata or {})),
+    }
+
+
+def _deduplicate_manifest_entries(
+    files: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    deduplicated: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    for row in files:
+        path = str(row.get("path"))
+        if path in seen_paths:
+            continue
+        seen_paths.add(path)
+        deduplicated.append(dict(row))
+    return deduplicated
+
+
+def _resolve_sidecar_reference(sidecar_path: Path, value: Any) -> Path:
+    path = Path(str(value))
+    return path if path.is_absolute() else sidecar_path.parent / path
+
+
+def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _optional_dict(value: Any) -> dict[str, Any] | None:
+    data = _as_dict(value)
+    return data or None
+
+
+def _json_ready(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Mapping):
+        return {str(key): _json_ready(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(item) for item in value]
+    return value

@@ -59,13 +59,16 @@ from gsim.palace.eigenmode import EigenmodeSim
 from gsim.palace.electrostatic import ElectrostaticSim
 from gsim.palace.handoff import (
     DEFAULT_PALACE_PETSC_OPTIONS,
+    PalaceHandoffArchiveManifestResult,
     PalaceSlurmHandoffResult,
     PalaceSlurmResourceSpec,
     PalaceSlurmSbatchSpec,
     PalaceSlurmSweepArraySpec,
     PalaceSlurmSweepHandoffResult,
+    write_palace_run_handoff_archive_manifest,
     write_palace_slurm_sbatch_handoff,
     write_palace_slurm_sweep_array_handoff,
+    write_palace_sweep_handoff_archive_manifest,
 )
 
 # Material resolution with dispersion
@@ -197,6 +200,7 @@ __all__ = [
     "NumericalConfig",
     "PECBlockConfig",
     "PalaceArtifactStatus",
+    "PalaceHandoffArchiveManifestResult",
     "PalacePort",
     "PalaceRunSummary",
     "PalaceSlurmHandoffResult",
@@ -268,8 +272,10 @@ __all__ = [
     "summarize_surface_q_by_interface",
     "summarize_terminal_matrix_history",
     "write_palace_handoff_metadata",
+    "write_palace_run_handoff_archive_manifest",
     "write_palace_slurm_sbatch_handoff",
     "write_palace_slurm_sweep_array_handoff",
+    "write_palace_sweep_handoff_archive_manifest",
     "write_palace_sweep_points",
 ]
 

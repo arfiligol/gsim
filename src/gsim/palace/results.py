@@ -60,6 +60,8 @@ _NON_RESULT_ARTIFACT_NAMES = (
     "palace_handoff_metadata.json",
     "palace_sweep_handoff_metadata.json",
     "palace_run_metadata.json",
+    "palace_handoff_archive_manifest.json",
+    "palace_sweep_handoff_archive_manifest.json",
     "port_information.json",
     "run_palace.sbatch",
     "run_sweep_array.sbatch",
@@ -964,6 +966,7 @@ class PalaceSweepPointSummary:
             "handoff_profile_name": handoff_profile.get("name"),
             "handoff_script_present": handoff.get("script_present"),
             "handoff_archive_present": handoff.get("archive_present"),
+            "handoff_archive_manifest_present": handoff.get("archive_manifest_present"),
             "config_material_count": summary.config.get("material_count"),
             "mesh_manifest_entry_count": summary.mesh_manifest.get("entry_count"),
             "index_map_entry_count": summary.index_map.get("entry_count"),
@@ -2030,6 +2033,7 @@ def write_palace_handoff_metadata(
     resources: Mapping[str, Any] | None = None,
     script_path: str | Path | None = None,
     archive_path: str | Path | None = None,
+    archive_manifest_path: str | Path | None = None,
     command: Mapping[str, Any] | None = None,
     metadata: Mapping[str, Any] | None = None,
     filename: str = "palace_handoff_metadata.json",
@@ -2049,6 +2053,7 @@ def write_palace_handoff_metadata(
         resources: Requested or resolved resources.
         script_path: Optional path to a generated batch script.
         archive_path: Optional path to a generated handoff archive.
+        archive_manifest_path: Optional path to a generated archive manifest.
         command: Redacted command shape for local review.
         metadata: Additional JSON-friendly metadata.
         filename: File name when ``source`` is a directory.
@@ -2069,8 +2074,13 @@ def write_palace_handoff_metadata(
         payload["resources"] = _json_ready(dict(resources))
     if script_path is not None:
         payload["script"] = {"path": _path_value(script_path)}
-    if archive_path is not None:
-        payload["archive"] = {"path": _path_value(archive_path)}
+    if archive_path is not None or archive_manifest_path is not None:
+        archive = {}
+        if archive_path is not None:
+            archive["path"] = _path_value(archive_path)
+        if archive_manifest_path is not None:
+            archive["manifest_path"] = _path_value(archive_manifest_path)
+        payload["archive"] = archive
     if command is not None:
         payload["command"] = _json_ready(dict(command))
     if metadata is not None:
@@ -6036,6 +6046,7 @@ def _summarize_handoff_metadata_json(path: Path | None) -> dict[str, Any]:
     archive = _as_mapping(data.get("archive"))
     script_path = _referenced_sidecar_path(path, script.get("path"))
     archive_path = _referenced_sidecar_path(path, archive.get("path"))
+    archive_manifest_path = _referenced_sidecar_path(path, archive.get("manifest_path"))
     return {
         "present": True,
         "schema_version": data.get("schema_version"),
@@ -6047,6 +6058,9 @@ def _summarize_handoff_metadata_json(path: Path | None) -> dict[str, Any]:
         "script_present": script_path is not None and script_path.exists(),
         "archive": archive,
         "archive_present": archive_path is not None and archive_path.exists(),
+        "archive_manifest_present": (
+            archive_manifest_path is not None and archive_manifest_path.exists()
+        ),
         "command": _as_mapping(data.get("command")),
         "metadata": _as_mapping(data.get("metadata")),
         "path": str(path),
