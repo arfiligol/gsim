@@ -186,14 +186,6 @@ provenance sidecars without adding new mesh-generation knobs.
     options:
       show_source: false
 
-::: gsim.palace.load_palace_run_summary
-    options:
-      show_source: false
-
-::: gsim.palace.load_palace_sweep_summary
-    options:
-      show_source: false
-
 ::: gsim.palace.load_driven_report
     options:
       show_source: false
@@ -239,5 +231,74 @@ provenance sidecars without adding new mesh-generation knobs.
       show_source: false
 
 ::: gsim.palace.load_dielectric_interface_summary
+    options:
+      show_source: false
+
+## Advanced Runtime, Sweep, And Handoff Records
+
+These helpers operate on runtime sidecars, sweep metadata, dry-run handoff
+artifacts, and resource records. They are reusable workflow APIs, but they live
+in their owning modules rather than the root notebook-facing simulation API.
+
+::: gsim.palace.results.load_palace_run_summary
+    options:
+      show_source: false
+
+::: gsim.palace.results.load_palace_sweep_summary
+    options:
+      show_source: false
+
+::: gsim.palace.results.PalaceSweepPointSpec
+    options:
+      show_source: false
+      inherited_members: false
+
+::: gsim.palace.results.write_palace_sweep_points
+    options:
+      show_source: false
+
+::: gsim.palace.results.write_palace_resource_record
+    options:
+      show_source: false
+
+::: gsim.palace.results.write_palace_resource_record_from_log
+    options:
+      show_source: false
+
+::: gsim.palace.results.write_palace_sweep_resource_index
+    options:
+      show_source: false
+
+::: gsim.palace.handoff.PalaceSlurmSbatchSpec
+    options:
+      show_source: false
+      inherited_members: false
+
+::: gsim.palace.handoff.PalaceSlurmSweepArraySpec
+    options:
+      show_source: false
+      inherited_members: false
+
+::: gsim.palace.handoff.load_palace_slurm_profile_catalog
+    options:
+      show_source: false
+
+::: gsim.palace.handoff.resolve_palace_slurm_profile
+    options:
+      show_source: false
+
+::: gsim.palace.handoff.write_palace_slurm_sbatch_handoff
+    options:
+      show_source: false
+
+::: gsim.palace.handoff.write_palace_slurm_sweep_array_handoff
+    options:
+      show_source: false
+
+::: gsim.palace.handoff.write_palace_run_handoff_archive_manifest
+    options:
+      show_source: false
+
+::: gsim.palace.handoff.write_palace_sweep_handoff_archive_manifest
     options:
       show_source: false
