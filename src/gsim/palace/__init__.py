@@ -82,8 +82,6 @@ from gsim.palace.mesh import (
 # Models (new submodule)
 from gsim.palace.models import (
     CPWPortConfig,
-    CurrentSourceConfig,
-    CurrentSourceElementConfig,
     DrivenConfig,
     EigenmodeConfig,
     ElectrostaticConfig,
@@ -140,8 +138,6 @@ from gsim.viz import plot_cross_section, plot_mesh
 __all__ = [
     "MATERIALS_DB",
     "CPWPortConfig",
-    "CurrentSourceConfig",
-    "CurrentSourceElementConfig",
     "DielectricInterfaceSelector",
     "DielectricInterfaceSpec",
     "DielectricInterfaceType",

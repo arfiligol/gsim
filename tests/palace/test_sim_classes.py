@@ -7,7 +7,21 @@ from types import SimpleNamespace
 import pytest
 
 from gsim.palace import DrivenSim, EigenmodeSim, ElectrostaticSim, MagnetostaticSim
-from gsim.palace.models import CurrentSourceConfig, MeshConfig
+from gsim.palace.models import (
+    CurrentSourceConfig,
+    CurrentSourceElementConfig,
+    MeshConfig,
+)
+
+
+def test_current_source_models_stay_in_models_owner_module() -> None:
+    import gsim.palace as palace
+    import gsim.palace.models as models
+
+    assert models.CurrentSourceConfig is CurrentSourceConfig
+    assert models.CurrentSourceElementConfig is CurrentSourceElementConfig
+    assert not hasattr(palace, "CurrentSourceConfig")
+    assert not hasattr(palace, "CurrentSourceElementConfig")
 
 
 class TestDrivenSimValidation:
