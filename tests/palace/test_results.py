@@ -38,6 +38,7 @@ from gsim.palace.results import (
     load_terminal_matrix,
     load_terminal_matrix_history,
     parse_palace_resource_log,
+    parse_slurm_scontrol_job,
     summarize_domain_loss,
     summarize_eigenmode_history,
     summarize_loss_budget,
@@ -49,6 +50,20 @@ from gsim.palace.results import (
     write_palace_resource_record_from_log,
     write_palace_sweep_points,
 )
+
+SLURM_SCONTROL = """
+JobId=12345 JobName=private_layout_run
+   UserId=private-user(1000) GroupId=private-group(1000)
+   Account=private_account JobState=COMPLETED
+   SubmitTime=2026-05-21T18:16:44 StartTime=2026-05-21T18:24:47
+   EndTime=2026-05-21T18:26:48
+   Partition=public_cpu NodeList=private-node BatchHost=private-node
+   NumNodes=1 NumCPUs=112 NumTasks=4 CPUs/Task=28 TimeLimit=00:10:00 RunTime=00:02:01
+   TRES=cpu=112,mem=482496M,node=1,billing=112
+   Command=/private/work/run_palace.sbatch
+   WorkDir=/private/work
+   StdOut=/private/work/slurm.out StdErr=/private/work/slurm.err
+"""
 
 PALACE_RESOURCE_LOG = (
     dedent(
@@ -814,6 +829,53 @@ class TestPalaceRunSummary:
         assert "private-user" not in serialized
         assert "/opt/private-palace" not in serialized
 
+    def test_parse_slurm_scontrol_job_extracts_sanitized_allocation(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        scontrol_path = tmp_path / "scontrol-job-12345.txt"
+        scontrol_path.write_text(SLURM_SCONTROL)
+
+        record = parse_slurm_scontrol_job(scontrol_path)
+
+        assert record["scheduler"] == {
+            "kind": "slurm",
+            "job_id": 12345,
+            "job_state": "COMPLETED",
+            "partition": "public_cpu",
+            "submit_time": "2026-05-21T18:16:44",
+            "start_time": "2026-05-21T18:24:47",
+            "end_time": "2026-05-21T18:26:48",
+            "time_limit": "00:10:00",
+            "time_limit_seconds": 600,
+            "run_time": "00:02:01",
+            "run_time_seconds": 121,
+        }
+        assert record["allocation"]["nodes"] == 1
+        assert record["allocation"]["num_cpus"] == 112
+        assert record["allocation"]["num_tasks"] == 4
+        assert record["allocation"]["cpus_per_task"] == 28
+        assert record["allocation"]["num_processes"] == 4
+        assert record["allocation"]["num_threads"] == 28
+        assert record["allocation"]["cores"] == 112
+        assert record["allocation"]["requested_memory"] == "482496M"
+        assert record["allocation"]["requested_memory_bytes"] == pytest.approx(
+            482496 * 1024**2
+        )
+        serialized = json.dumps(record)
+        for forbidden in (
+            "private_layout_run",
+            "private-user",
+            "private_account",
+            "private-node",
+            "/private/work",
+            "Command",
+            "WorkDir",
+            "StdOut",
+            "StdErr",
+        ):
+            assert forbidden not in serialized
+
     def test_load_palace_run_summary_records_handoff_and_results(
         self,
         indexed_report_dir: Path,
@@ -1022,11 +1084,14 @@ class TestPalaceRunSummary:
         log_path = indexed_report_dir / "logs" / "palace-public.log"
         log_path.parent.mkdir()
         log_path.write_text(PALACE_RESOURCE_LOG)
+        scontrol_path = indexed_report_dir / "metadata" / "scontrol-job-12345.txt"
+        scontrol_path.parent.mkdir(parents=True, exist_ok=True)
+        scontrol_path.write_text(SLURM_SCONTROL)
 
         record_path = write_palace_resource_record_from_log(
             indexed_report_dir,
             log_path,
-            launcher={"kind": "slurm"},
+            scontrol_path=scontrol_path,
             allocation={"nodes": 1},
             metadata={"workflow": "public-test"},
         )
@@ -1048,20 +1113,28 @@ class TestPalaceRunSummary:
         assert summary.resource["present"] is True
         assert summary.resource["status"] == "completed"
         assert summary.resource["launcher"] == {"kind": "slurm"}
+        assert summary.resource["scheduler"]["kind"] == "slurm"
+        assert summary.resource["scheduler"]["job_id"] == 12345
+        assert summary.resource["scheduler"]["job_state"] == "COMPLETED"
+        assert summary.resource["scheduler"]["partition"] == "public_cpu"
         assert summary.resource["solver"]["palace_git_changeset"] == "v0.16.1"
         assert summary.resource["solver"]["petsc_version"] == "3.24.3"
         assert summary.resource["allocation"]["nodes"] == 1
         assert summary.resource["allocation"]["num_processes"] == 4
         assert summary.resource["allocation"]["num_threads"] == 28
+        assert summary.resource["allocation"]["cores"] == 112
         assert summary.resource["runtime"]["wall_time_seconds"] == pytest.approx(121.0)
         assert summary.resource["runtime"]["core_hours"] == pytest.approx(
             121.0 * 112 / 3600
         )
         assert summary.resource["model_size"]["global_unknowns"] == 10718029
         assert summary.resource["memory"]["peak_total_hwm_gib"] == pytest.approx(20.8)
-        assert summary.resource["source_count"] == 1
+        assert summary.resource["source_count"] == 2
         assert summary.resource["sources"]["palace_log"]["path"] == (
             "logs/palace-public.log"
+        )
+        assert summary.resource["sources"]["slurm_scontrol"]["path"] == (
+            "metadata/scontrol-job-12345.txt"
         )
         assert summary.resource["table_count"] == 3
         assert summary.resource["tables"]["stage_timing"]["path"] == (
@@ -1071,6 +1144,9 @@ class TestPalaceRunSummary:
         serialized = json.dumps(summary.resource)
         assert "private-node" not in serialized
         assert "private-user" not in serialized
+        assert "private_account" not in serialized
+        assert "private_layout_run" not in serialized
+        assert "/private/work" not in serialized
         assert "/opt/private-palace" not in serialized
 
 
@@ -1262,6 +1338,12 @@ class TestPalaceSweepSummary:
         write_palace_resource_record(
             point_root,
             status="completed",
+            scheduler={
+                "kind": "slurm",
+                "job_id": 12345,
+                "job_state": "COMPLETED",
+                "partition": "public_cpu",
+            },
             allocation={"nodes": 1, "num_processes": 2, "num_threads": 8},
             runtime={"wall_time_seconds": 90.0},
             model_size={"global_unknowns": 654321},
@@ -1302,6 +1384,10 @@ class TestPalaceSweepSummary:
         assert record["resource_num_threads"] == 8
         assert record["resource_global_unknowns"] == 654321
         assert record["resource_peak_total_hwm_gib"] == pytest.approx(1.0)
+        assert record["resource_scheduler_kind"] == "slurm"
+        assert record["resource_scheduler_job_id"] == 12345
+        assert record["resource_scheduler_job_state"] == "COMPLETED"
+        assert record["resource_scheduler_partition"] == "public_cpu"
         assert summary.to_dict()["resource_present_count"] == 1
 
     def test_load_palace_sweep_summary_reports_duplicate_point_slugs(

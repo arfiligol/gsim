@@ -90,6 +90,8 @@ _PALACE_PETSC_TIME_RE = re.compile(
     rf"Time \(sec\):\s+(?P<max>{_RESOURCE_NUMBER_RE})\s+"
     rf"(?P<max_min>{_RESOURCE_NUMBER_RE})\s+(?P<avg>{_RESOURCE_NUMBER_RE})"
 )
+_SLURM_KEY_VALUE_RE = re.compile(r"(?P<key>[A-Za-z0-9_:/]+)=(?P<value>\S+)")
+_SLURM_TRES_VALUE_RE = re.compile(r"(?P<key>[A-Za-z0-9_:/]+)=(?P<value>[^,]+)")
 _RESOURCE_TABLE_ROW_RE = re.compile(
     rf"^(?P<stage>[A-Za-z][A-Za-z ]*[A-Za-z])\s+"
     rf"(?P<a>{_RESOURCE_NUMBER_RE}[KMGTPE]?)\s+"
@@ -1039,6 +1041,7 @@ class PalaceSweepPointSummary:
         resource_runtime = _as_mapping(resource.get("runtime"))
         model_size = _as_mapping(resource.get("model_size"))
         memory = _as_mapping(resource.get("memory"))
+        scheduler = _as_mapping(resource.get("scheduler"))
         handoff_profile = _as_mapping(handoff.get("profile"))
         record = {
             "point_slug": self.point_slug,
@@ -1071,6 +1074,10 @@ class PalaceSweepPointSummary:
             "resource_num_threads": allocation.get("num_threads"),
             "resource_peak_total_hwm_gib": memory.get("peak_total_hwm_gib"),
             "resource_global_unknowns": model_size.get("global_unknowns"),
+            "resource_scheduler_kind": scheduler.get("kind"),
+            "resource_scheduler_job_id": scheduler.get("job_id"),
+            "resource_scheduler_job_state": scheduler.get("job_state"),
+            "resource_scheduler_partition": scheduler.get("partition"),
             "config_material_count": summary.config.get("material_count"),
             "mesh_manifest_entry_count": summary.mesh_manifest.get("entry_count"),
             "index_map_entry_count": summary.index_map.get("entry_count"),
@@ -2144,6 +2151,7 @@ def write_palace_resource_record(
     status: str = "completed",
     sources: Mapping[str, Any] | None = None,
     launcher: Mapping[str, Any] | None = None,
+    scheduler: Mapping[str, Any] | None = None,
     solver: Mapping[str, Any] | None = None,
     allocation: Mapping[str, Any] | None = None,
     runtime: Mapping[str, Any] | None = None,
@@ -2168,6 +2176,7 @@ def write_palace_resource_record(
         "status": str(status),
         "sources": _json_ready(dict(sources or {})),
         "launcher": _json_ready(dict(launcher or {})),
+        "scheduler": _json_ready(dict(scheduler or {})),
         "solver": _json_ready(dict(solver or {})),
         "allocation": _json_ready(dict(allocation or {})),
         "runtime": _json_ready(dict(runtime or {})),
@@ -2383,12 +2392,75 @@ def parse_palace_resource_log(log_path: str | Path) -> dict[str, Any]:
     }
 
 
+def parse_slurm_scontrol_job(path: str | Path) -> dict[str, Any]:
+    """Parse sanitized Slurm ``scontrol show job`` evidence.
+
+    The returned payload intentionally excludes raw scheduler text, account,
+    user, node, job-name, command, stdout/stderr, and working-directory fields.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(path)
+
+    raw_text = path.read_text(encoding="utf-8", errors="replace")
+    values = {
+        match.group("key"): match.group("value")
+        for match in _SLURM_KEY_VALUE_RE.finditer(raw_text)
+    }
+    tres = _parse_slurm_tres(values.get("TRES"))
+
+    scheduler = {
+        "kind": "slurm",
+        "job_id": _optional_int(values.get("JobId")),
+        "job_state": values.get("JobState"),
+        "partition": values.get("Partition"),
+        "submit_time": values.get("SubmitTime"),
+        "start_time": values.get("StartTime"),
+        "end_time": values.get("EndTime"),
+        "time_limit": values.get("TimeLimit"),
+        "time_limit_seconds": _parse_slurm_duration_seconds(values.get("TimeLimit")),
+        "run_time": values.get("RunTime"),
+        "run_time_seconds": _parse_slurm_duration_seconds(values.get("RunTime")),
+    }
+    scheduler = {key: value for key, value in scheduler.items() if value is not None}
+
+    allocation = {
+        "nodes": _optional_int(values.get("NumNodes") or tres.get("node")),
+        "num_cpus": _optional_int(values.get("NumCPUs") or tres.get("cpu")),
+        "num_tasks": _optional_int(values.get("NumTasks")),
+        "cpus_per_task": _optional_int(values.get("CPUs/Task")),
+    }
+    allocation["num_processes"] = allocation.get("num_tasks")
+    allocation["num_threads"] = allocation.get("cpus_per_task")
+    allocation["cores"] = allocation.get("num_cpus")
+    requested_memory = tres.get("mem") or values.get("MinMemoryNode")
+    if requested_memory is not None:
+        allocation["requested_memory"] = requested_memory
+        allocation["requested_memory_bytes"] = _parse_resource_memory_bytes(
+            requested_memory
+        )
+    allocation = {key: value for key, value in allocation.items() if value is not None}
+
+    return {
+        "schema_version": 1,
+        "source": {
+            "path": str(path),
+            "sha256": _sha256_file(path),
+            "bytes": int(path.stat().st_size),
+        },
+        "scheduler": scheduler,
+        "allocation": allocation,
+    }
+
+
 def write_palace_resource_record_from_log(
     source: str | Path,
     log_path: str | Path,
     *,
+    scontrol_path: str | Path | None = None,
     status: str = "completed",
     launcher: Mapping[str, Any] | None = None,
+    scheduler: Mapping[str, Any] | None = None,
     allocation: Mapping[str, Any] | None = None,
     runtime: Mapping[str, Any] | None = None,
     model_size: Mapping[str, Any] | None = None,
@@ -2400,9 +2472,9 @@ def write_palace_resource_record_from_log(
 ) -> Path:
     """Parse a Palace log and write a resource record plus CSV table sidecars.
 
-    Caller-supplied ``allocation``, ``runtime``, ``model_size``, and ``memory``
-    values override parser-derived values so local runners can add scheduler or
-    launcher facts without changing the log parser.
+    Caller-supplied ``scheduler``, ``allocation``, ``runtime``, ``model_size``,
+    and ``memory`` values override parser-derived values so local runners can
+    add scheduler or launcher facts without changing the log parser.
     """
     run_root = Path(source)
     record_path = _resource_record_path(run_root, filename=filename)
@@ -2410,6 +2482,9 @@ def write_palace_resource_record_from_log(
     records_dir.mkdir(parents=True, exist_ok=True)
 
     parsed = parse_palace_resource_log(log_path)
+    parsed_scontrol = (
+        parse_slurm_scontrol_job(scontrol_path) if scontrol_path is not None else None
+    )
     table_specs = {
         "amr_passes": (
             records_dir / "palace_amr_passes.csv",
@@ -2436,19 +2511,50 @@ def write_palace_resource_record_from_log(
         }
 
     parsed_source = _as_mapping(parsed.get("source"))
-    source_ref = {
-        "path": _relative_path_or_name(Path(log_path), run_root),
-        "sha256": parsed_source.get("sha256"),
-        "bytes": parsed_source.get("bytes"),
+    sources = {
+        "palace_log": {
+            "path": _relative_path_or_name(Path(log_path), run_root),
+            "sha256": parsed_source.get("sha256"),
+            "bytes": parsed_source.get("bytes"),
+        }
+    }
+    if scontrol_path is not None and parsed_scontrol is not None:
+        scontrol_source = _as_mapping(parsed_scontrol.get("source"))
+        sources["slurm_scontrol"] = {
+            "path": _relative_path_or_name(Path(scontrol_path), run_root),
+            "sha256": scontrol_source.get("sha256"),
+            "bytes": scontrol_source.get("bytes"),
+        }
+
+    parsed_scheduler = (
+        _as_mapping(parsed_scontrol.get("scheduler"))
+        if parsed_scontrol is not None
+        else {}
+    )
+    if parsed_scontrol is not None and launcher is None:
+        launcher = {"kind": "slurm"}
+    merged_scheduler = {
+        **parsed_scheduler,
+        **dict(scheduler or {}),
+    }
+    merged_allocation = {
+        **_as_mapping(parsed.get("allocation")),
+        **(
+            _as_mapping(parsed_scontrol.get("allocation"))
+            if parsed_scontrol is not None
+            else {}
+        ),
+        **dict(allocation or {}),
     }
 
     return write_palace_resource_record(
         record_path,
         status=status,
-        sources={"palace_log": source_ref},
+        sources=sources,
         launcher=launcher,
+        scheduler=merged_scheduler,
         solver=parsed["solver"],
-        allocation={**_as_mapping(parsed.get("allocation")), **dict(allocation or {})},
+        allocation=merged_allocation,
         runtime={**_as_mapping(parsed.get("runtime")), **dict(runtime or {})},
         model_size={**_as_mapping(parsed.get("model_size")), **dict(model_size or {})},
         memory={**_as_mapping(parsed.get("memory")), **dict(memory or {})},
@@ -5870,6 +5976,39 @@ def _parse_resource_memory_bytes(value: Any) -> float | None:
     return numeric * scale
 
 
+def _parse_slurm_tres(value: Any) -> dict[str, str]:
+    if value is None:
+        return {}
+    return {
+        match.group("key"): match.group("value")
+        for match in _SLURM_TRES_VALUE_RE.finditer(str(value))
+    }
+
+
+def _parse_slurm_duration_seconds(value: Any) -> int | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text in {"", "UNLIMITED", "NOT_SET", "Unknown"}:
+        return None
+    day_part = 0
+    if "-" in text:
+        days, text = text.split("-", 1)
+        day_part = _optional_int(days) or 0
+    parts = text.split(":")
+    try:
+        if len(parts) == 3:
+            hours, minutes, seconds = (int(part) for part in parts)
+        elif len(parts) == 2:
+            hours = 0
+            minutes, seconds = (int(part) for part in parts)
+        else:
+            return None
+    except ValueError:
+        return None
+    return ((day_part * 24 + hours) * 60 + minutes) * 60 + seconds
+
+
 def _sweep_point_spec_row(
     point: PalaceSweepPointSpec | Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -6613,6 +6752,7 @@ def _summarize_resource_record_json(path: Path | None) -> dict[str, Any]:
     tables = _as_mapping(data.get("tables"))
     runtime = _as_mapping(data.get("runtime"))
     allocation = _as_mapping(data.get("allocation"))
+    scheduler = _as_mapping(data.get("scheduler"))
     model_size = _as_mapping(data.get("model_size"))
     memory = _as_mapping(data.get("memory"))
     _normalize_resource_runtime(runtime, allocation)
@@ -6625,6 +6765,7 @@ def _summarize_resource_record_json(path: Path | None) -> dict[str, Any]:
         "created_at_utc": data.get("created_at_utc"),
         "status": data.get("status"),
         "launcher": _as_mapping(data.get("launcher")),
+        "scheduler": scheduler,
         "solver": _as_mapping(data.get("solver")),
         "allocation": allocation,
         "runtime": runtime,
