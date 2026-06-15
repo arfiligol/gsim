@@ -17,6 +17,7 @@ from gsim.palace.results import (
     ElectrostaticReport,
     PalaceRunSummary,
     PalaceSweepPointSpec,
+    PalaceSweepResourceIndexResult,
     PalaceSweepSummary,
     SParams,
     get_port_map,
@@ -49,6 +50,7 @@ from gsim.palace.results import (
     write_palace_resource_record,
     write_palace_resource_record_from_log,
     write_palace_sweep_points,
+    write_palace_sweep_resource_index,
 )
 
 SLURM_SCONTROL = """
@@ -1389,6 +1391,40 @@ class TestPalaceSweepSummary:
         assert record["resource_scheduler_job_state"] == "COMPLETED"
         assert record["resource_scheduler_partition"] == "public_cpu"
         assert summary.to_dict()["resource_present_count"] == 1
+
+        index_result = write_palace_sweep_resource_index(sweep_root)
+        assert isinstance(index_result, PalaceSweepResourceIndexResult)
+        assert index_result.point_count == 1
+        assert index_result.resource_present_count == 1
+        assert index_result.summary_path == (
+            sweep_root / "metadata" / "records" / "sweep_resource_index.json"
+        )
+        assert index_result.point_records_csv_path.is_file()
+        assert index_result.resource_records_csv_path.is_file()
+        assert index_result.benchmark_jsonl_path.is_file()
+
+        index_payload = json.loads(index_result.summary_path.read_text())
+        assert index_payload["schema_version"] == 1
+        assert index_payload["sweep_id"] == "resource_sweep"
+        assert index_payload["point_count"] == 1
+        assert index_payload["resource_present_count"] == 1
+        assert index_payload["records"] == {
+            "benchmark_jsonl": "metadata/records/sweep_benchmark_index.jsonl",
+            "point_records_csv": "metadata/records/sweep_point_records.csv",
+            "resource_records_csv": "metadata/records/sweep_resource_records.csv",
+        }
+
+        point_csv = index_result.point_records_csv_path.read_text()
+        resource_csv = index_result.resource_records_csv_path.read_text()
+        assert "resource_core_hours" in point_csv
+        assert "resource_scheduler_job_id" in point_csv
+        assert "gap_6um" in resource_csv
+        jsonl_rows = index_result.benchmark_jsonl_path.read_text().splitlines()
+        assert len(jsonl_rows) == 1
+        jsonl_record = json.loads(jsonl_rows[0])
+        assert jsonl_record["point_slug"] == "gap_6um"
+        assert jsonl_record["resource_scheduler_partition"] == "public_cpu"
+        assert index_result.to_dict()["resource_present_count"] == 1
 
     def test_load_palace_sweep_summary_reports_duplicate_point_slugs(
         self,

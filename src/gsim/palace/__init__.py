@@ -132,6 +132,7 @@ from gsim.palace.results import (
     PalaceRunSummary,
     PalaceSweepPointSpec,
     PalaceSweepPointSummary,
+    PalaceSweepResourceIndexResult,
     PalaceSweepSummary,
     SParam,
     SParams,
@@ -167,6 +168,7 @@ from gsim.palace.results import (
     write_palace_resource_record,
     write_palace_resource_record_from_log,
     write_palace_sweep_points,
+    write_palace_sweep_resource_index,
 )
 
 # Visualization
@@ -214,6 +216,7 @@ __all__ = [
     "PalaceSlurmSweepHandoffResult",
     "PalaceSweepPointSpec",
     "PalaceSweepPointSummary",
+    "PalaceSweepResourceIndexResult",
     "PalaceSweepSummary",
     "PortConfig",
     "PortGeometry",
@@ -285,6 +288,7 @@ __all__ = [
     "write_palace_slurm_sweep_array_handoff",
     "write_palace_sweep_handoff_archive_manifest",
     "write_palace_sweep_points",
+    "write_palace_sweep_resource_index",
 ]
 
 

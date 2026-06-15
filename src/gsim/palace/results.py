@@ -1220,6 +1220,29 @@ class PalaceSweepSummary:
 
 
 @dataclass(frozen=True)
+class PalaceSweepResourceIndexResult:
+    """Written sweep-level resource and benchmark index artifacts."""
+
+    summary_path: Path
+    point_records_csv_path: Path
+    resource_records_csv_path: Path
+    benchmark_jsonl_path: Path
+    point_count: int
+    resource_present_count: int
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-friendly result summary."""
+        return {
+            "summary_path": str(self.summary_path),
+            "point_records_csv_path": str(self.point_records_csv_path),
+            "resource_records_csv_path": str(self.resource_records_csv_path),
+            "benchmark_jsonl_path": str(self.benchmark_jsonl_path),
+            "point_count": self.point_count,
+            "resource_present_count": self.resource_present_count,
+        }
+
+
+@dataclass(frozen=True)
 class TerminalMatrix:
     """Palace electrostatic terminal matrix with named terminals."""
 
@@ -2673,6 +2696,85 @@ def write_palace_sweep_points(
     points_path.parent.mkdir(parents=True, exist_ok=True)
     points_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     return points_path
+
+
+def write_palace_sweep_resource_index(
+    source: str | Path,
+    *,
+    include_hashes: bool = False,
+    include_report_metrics: bool = False,
+    records_dir: str | Path = "metadata/records",
+    summary_filename: str = "sweep_resource_index.json",
+    point_records_filename: str = "sweep_point_records.csv",
+    resource_records_filename: str = "sweep_resource_records.csv",
+    benchmark_jsonl_filename: str = "sweep_benchmark_index.jsonl",
+) -> PalaceSweepResourceIndexResult:
+    """Write sweep-level point/resource records and a benchmark JSONL index.
+
+    This writer is artifact-only: it loads existing point-local run summaries
+    from explicit ``points.json`` metadata, then writes table-friendly records
+    under ``metadata/records`` by default. It does not run Palace, submit jobs,
+    parse private profile catalogs, or infer sweep identity from folders.
+    """
+    source_path = Path(source)
+    points_path = source_path if source_path.is_file() else source_path / "points.json"
+    sweep_root = points_path.parent
+    summary = load_palace_sweep_summary(
+        points_path,
+        include_hashes=include_hashes,
+        include_report_metrics=include_report_metrics,
+    )
+    records_root = sweep_root / records_dir
+    records_root.mkdir(parents=True, exist_ok=True)
+
+    point_records = summary.to_point_records()
+    resource_records = [
+        record for record in point_records if record.get("resource_present") is True
+    ]
+    point_records_csv_path = records_root / point_records_filename
+    resource_records_csv_path = records_root / resource_records_filename
+    benchmark_jsonl_path = records_root / benchmark_jsonl_filename
+    summary_path = records_root / summary_filename
+
+    _write_records_csv(point_records_csv_path, point_records)
+    _write_records_csv(resource_records_csv_path, resource_records)
+    _write_records_jsonl(benchmark_jsonl_path, point_records)
+
+    payload = {
+        "schema_version": 1,
+        "sweep_id": summary.sweep_id,
+        "source_path": _relative_path_or_name(points_path, sweep_root),
+        "point_count": summary.point_count,
+        "resource_present_count": summary.resource_present_count,
+        "runtime_present_count": summary.runtime_present_count,
+        "complete_point_count": summary.complete_point_count,
+        "problem_types": list(summary.problem_types),
+        "parse_warnings": list(summary.parse_warnings),
+        "metadata": dict(summary.metadata),
+        "records": {
+            "point_records_csv": _relative_path_or_name(
+                point_records_csv_path,
+                sweep_root,
+            ),
+            "resource_records_csv": _relative_path_or_name(
+                resource_records_csv_path,
+                sweep_root,
+            ),
+            "benchmark_jsonl": _relative_path_or_name(
+                benchmark_jsonl_path,
+                sweep_root,
+            ),
+        },
+    }
+    summary_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return PalaceSweepResourceIndexResult(
+        summary_path=summary_path,
+        point_records_csv_path=point_records_csv_path,
+        resource_records_csv_path=resource_records_csv_path,
+        benchmark_jsonl_path=benchmark_jsonl_path,
+        point_count=summary.point_count,
+        resource_present_count=summary.resource_present_count,
+    )
 
 
 def load_palace_sweep_summary(
@@ -5939,6 +6041,20 @@ def _write_resource_record_csv(
     frame = pd.DataFrame.from_records(rows, columns=columns)
     path.parent.mkdir(parents=True, exist_ok=True)
     frame.to_csv(path, index=False)
+
+
+def _write_records_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    import pandas as pd
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame.from_records(rows).to_csv(path, index=False)
+
+
+def _write_records_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as stream:
+        for row in rows:
+            stream.write(json.dumps(_json_ready(row), sort_keys=True) + "\n")
 
 
 def _relative_path_or_name(path: Path, root: Path) -> str:
