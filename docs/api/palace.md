@@ -190,6 +190,18 @@ provenance sidecars without adding new mesh-generation knobs.
     options:
       show_source: false
 
+## Advanced Mesh Postprocessing Authoring
+
+Notebook workflows should usually create dielectric-interface requests through
+the assignment or material-kind builders above. Manual dielectric-interface
+specs live in the postprocessing owner module instead of the
+`gsim.palace.mesh` package root.
+
+::: gsim.palace.mesh.postprocessing.DielectricInterfaceSpec
+    options:
+      show_source: false
+      inherited_members: false
+
 ## Stack
 
 ::: gsim.palace.LayerStack

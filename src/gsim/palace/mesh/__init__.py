@@ -39,7 +39,6 @@ from gsim.palace.mesh.manifest import (
     MeshManifest,
 )
 from gsim.palace.mesh.postprocessing import (
-    DielectricInterfaceSpec,
     SurfaceFluxSpec,
     build_dielectric_interface_specs_from_assignments,
     build_dielectric_interface_specs_from_material_kinds,
@@ -48,7 +47,6 @@ from gsim.palace.mesh.postprocessing import (
 from gsim.palace.models.mesh import MeshConfig
 
 __all__ = [
-    "DielectricInterfaceSpec",
     "MeshConfig",
     "MeshManifest",
     "MeshResult",

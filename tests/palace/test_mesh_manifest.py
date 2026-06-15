@@ -1209,7 +1209,6 @@ def test_manifest_row_builders_and_type_aliases_stay_in_owner_modules() -> None:
 
     assert mesh.MeshManifest is manifest.MeshManifest
     assert mesh.SurfaceFluxSpec is postprocessing.SurfaceFluxSpec
-    assert mesh.DielectricInterfaceSpec is postprocessing.DielectricInterfaceSpec
     assert (
         mesh.build_postprocessing_config_from_manifest
         is postprocessing.build_postprocessing_config_from_manifest
@@ -1226,6 +1225,7 @@ def test_manifest_row_builders_and_type_aliases_stay_in_owner_modules() -> None:
     assert not hasattr(mesh, "MeshPhysicalGroup")
     assert not hasattr(mesh, "MeshRole")
     assert not hasattr(mesh, "build_mesh_manifest")
+    assert not hasattr(mesh, "DielectricInterfaceSpec")
     assert not hasattr(mesh, "SurfaceFluxType")
     assert not hasattr(mesh, "DielectricInterfaceSelector")
     assert not hasattr(mesh, "DielectricInterfaceType")
