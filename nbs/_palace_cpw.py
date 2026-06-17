@@ -220,7 +220,7 @@ results_waveport = sim_waveport.run()
 # %%
 import matplotlib.pyplot as plt
 
-from gsim.palace import load_sparams
+from gsim.palace.results.driven import load_sparams
 
 sp_lumped = load_sparams(results_lumped.files)
 sp_waveport = load_sparams(results_waveport.files)

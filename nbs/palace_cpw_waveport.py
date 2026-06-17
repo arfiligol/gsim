@@ -5,7 +5,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.2
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: .venv
 #     language: python
@@ -121,6 +121,23 @@ sim.plot_mesh(
     transparent_groups=["air__None", "SiO2__None", "SiO2__passive", "air__passive"],
     interactive=True,
 )
+
+# %% [markdown]
+# ### Generate handoff package
+#
+# This writes the canonical Palace run folder and packages it as a `.tar.gz`
+# archive that can be transferred to an HPC system before solver execution.
+
+# %%
+from pathlib import Path
+
+run_dir = sim.output_dir
+assert run_dir is not None
+HANDOFF_PACKAGE_DIR = Path(".")
+handoff_archive = HANDOFF_PACKAGE_DIR / f"{run_dir.name}-palace.tar.gz"
+
+handoff_bundle = sim.generate_handoff_package(archive_path=handoff_archive)
+handoff_archive
 
 # %% [markdown] papermill={"duration": 0.003419, "end_time": "2026-04-17T08:35:52.823583", "exception": false, "start_time": "2026-04-17T08:35:52.820164", "status": "completed"}
 # ### Run simulation

@@ -9,6 +9,8 @@ from numbers import Integral
 from pathlib import Path
 from typing import Any, Literal
 
+from gsim.palace._shared import int_tuple
+
 MeshRole = Literal[
     "dielectric_volume",
     "via_volume",
@@ -179,7 +181,7 @@ def build_mesh_manifest(groups: Mapping[str, Any]) -> MeshManifest:
                 MeshPhysicalGroup(
                     name=str(name),
                     role="via_boundary_surface",
-                    attributes=_as_int_tuple(attributes),
+                    attributes=int_tuple(attributes),
                     physical_names=(str(name),),
                     dimension=_ROLE_DIMENSION["via_boundary_surface"],
                 )
@@ -205,8 +207,8 @@ def _append_entry(
         MeshPhysicalGroup(
             name=str(name),
             role=role,
-            attributes=_as_int_tuple(info.get("phys_group")),
-            entity_tags=_as_int_tuple(info.get("tags")),
+            attributes=int_tuple(info.get("phys_group")),
+            entity_tags=int_tuple(info.get("tags")),
             physical_names=physical_names,
             dimension=_dimension(role=role, info=info),
             source=str(info.get("source", "gsim_gmsh")),
@@ -232,19 +234,6 @@ def _metadata(info: Mapping[str, Any]) -> dict[str, Any]:
         if key
         not in {"phys_group", "tags", "elements", "physical_name", "physical_names"}
     }
-
-
-def _as_int_tuple(value: Any) -> tuple[int, ...]:
-    if isinstance(value, Integral) and not isinstance(value, bool):
-        return (int(value),)
-    if isinstance(value, (str, bytes)) or not isinstance(value, Iterable):
-        return ()
-
-    return tuple(
-        int(item)
-        for item in value
-        if isinstance(item, Integral) and not isinstance(item, bool)
-    )
 
 
 def _physical_names(*, name: str, info: Mapping[str, Any]) -> tuple[str, ...]:

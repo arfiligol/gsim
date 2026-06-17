@@ -223,44 +223,158 @@ overlay provenance should use the Palace materials owner module instead of the
     options:
       show_source: false
 
-## Results
+## Palace Run Folder
+
+Palace workflows use one canonical run folder. `run()`, `run_local()`, and
+`generate_handoff_package()` create this structure by default:
+
+```text
+my_run/
+  config.json
+  palace.msh
+  run_palace.sbatch
+  geometry/
+    design.gds
+  metadata/
+    mesh_manifest.json
+    palace_index_map.json
+    palace_material_resolution.json
+    port_information.json
+    palace_handoff_metadata.json
+    palace_handoff_archive_manifest.json
+    palace_run_metadata.json
+    palace_resource_record.json
+  logs/
+  results/
+    palace/
+```
+
+Root files are Palace execution inputs or launchers. `metadata/` stores gsim
+semantic sidecars. `results/palace/` stores raw Palace solver outputs and
+exists even before Palace runs. `geometry/design.gds` is an optional review
+snapshot only; it is not a Palace execution input and Resolve does not load it
+into reports.
+
+`generate_handoff_package()` writes a tarball beside the run folder by default:
+
+```text
+my_run-palace.tar.gz
+```
+
+The archive root is `my_run/`, so post-run result archives can be extracted
+over the same folder to fill `logs/` and `results/palace/`. AEDT/HFSS export
+and result packaging are public-PDK responsibilities, not `gsim.palace`
+responsibilities.
+
+`generate_handoff_package()` is a Run Stage API. It returns
+`PalaceRunHandle`, which records the packaged run folder and optional launcher
+or archive paths. It does not load typed reports. Review/report loading starts
+in the Resolve Stage:
+
+```python
+handle = sim.generate_handoff_package()
+resolved = resolve_palace_result(handle.run_folder, problem_type="Driven")
+bundle = resolved.load_report()
+```
+
+`run_local()` is also a Run Stage API. For direct local Palace execution,
+callers may pass `setup_commands` to activate the runtime in the same shell
+session as Palace, for example `source .../spack/setup-env.sh` followed by
+`spack load palace`. These commands are caller-owned environment setup; `gsim`
+uses them only to launch Palace and does not interpret site policy.
+
+::: gsim.palace.PalaceRunHandle
+    options:
+      show_source: false
+      inherited_members: false
+
+## Resolve Pipeline
+
+Palace result presentation has one pipeline entry point:
+
+```python
+from gsim.palace import resolve_palace_result
+
+resolved = resolve_palace_result("build/my_run", problem_type="Driven")
+bundle = resolved.load_report(require_report=True)
+report = bundle.require_report()
+report.show_all_results()
+```
+
+`gsim.palace.resolve` loads Palace artifacts and orchestrates report assembly.
+`gsim.palace.results` owns semantic Typed Data and Problem Type Report models:
+S-parameters, Eigenmodes, terminal matrices, loss, benchmark data, and the
+report objects that aggregate them. `gsim.palace.display` owns only general
+table/plot helper primitives.
+
+Pass a literal `problem_type` when review code needs concrete static typing.
+For example, `problem_type="Driven"` lets type checkers follow
+`bundle.require_report()` to `DrivenReport`, then to typed data such as
+`report.sparams`. When the problem type is inferred from files or stored in a
+dynamic `str | None`, static tools can only prove the common report contract.
+
+::: gsim.palace.resolve_palace_result
+    options:
+      show_source: false
+
+::: gsim.palace.PalaceResolvedResult
+    options:
+      show_source: false
+      inherited_members: false
+
+::: gsim.palace.PalaceResultBundle
+    options:
+      show_source: false
+      inherited_members: false
+
+## Typed Data
 
 ::: gsim.palace.SParams
     options:
       show_source: false
       inherited_members: false
 
-::: gsim.palace.load_sparams
+::: gsim.palace.results.Eigenmodes
     options:
       show_source: false
+      inherited_members: false
 
-::: gsim.palace.load_fields
+::: gsim.palace.results.TerminalMatrix
     options:
       show_source: false
+      inherited_members: false
 
-::: gsim.palace.load_driven_report
+::: gsim.palace.results.ReportLoss
     options:
       show_source: false
+      inherited_members: false
 
-::: gsim.palace.load_eigenmode_report
+::: gsim.palace.results.SimulationPerformance
     options:
       show_source: false
+      inherited_members: false
 
-::: gsim.palace.load_electrostatic_report
+::: gsim.palace.results.SimulationBenchmark
     options:
       show_source: false
+      inherited_members: false
 
-::: gsim.palace.load_postprocessing_index_map
-    options:
-      show_source: false
+## Problem Type Reports
 
-::: gsim.palace.load_terminal_matrix
+::: gsim.palace.DrivenReport
     options:
       show_source: false
+      inherited_members: false
 
-::: gsim.palace.load_domain_material_summary
+::: gsim.palace.EigenmodeReport
     options:
       show_source: false
+      inherited_members: false
+
+::: gsim.palace.ElectrostaticReport
+    options:
+      show_source: false
+      inherited_members: false
 
 ## Advanced Return Models
 
@@ -278,86 +392,72 @@ values should use the owner module, not the root `gsim.palace` import surface.
       show_source: false
       inherited_members: false
 
-::: gsim.palace.load_dielectric_interface_summary
+::: gsim.palace.resolve.derived.materials.load_dielectric_interface_summary
     options:
       show_source: false
 
 ## Advanced Result Details
 
 These helpers expose lower-level Palace result tables, pass histories, return
-models, and indexed CSV provenance. They are reusable result APIs, but they
-live in `gsim.palace.results` rather than the root notebook-facing simulation
-API.
+models, and indexed CSV provenance. They are reusable implementation APIs, but
+they live in the `resolve.loaders` and `resolve.derived` owner modules rather
+than the root notebook-facing simulation API or the high-level
+`gsim.palace.resolve` facade.
 
 ::: gsim.palace.results.TerminalMatrix
     options:
       show_source: false
       inherited_members: false
 
-::: gsim.palace.results.DrivenReport
-    options:
-      show_source: false
-      inherited_members: false
-
-::: gsim.palace.results.EigenmodeReport
-    options:
-      show_source: false
-      inherited_members: false
-
-::: gsim.palace.results.ElectrostaticReport
-    options:
-      show_source: false
-      inherited_members: false
-
-::: gsim.palace.results.load_indexed_csv
+::: gsim.palace.resolve.loaders.indexed_csv.load_indexed_csv
     options:
       show_source: false
 
-::: gsim.palace.results.load_domain_energy_summary
+::: gsim.palace.resolve.derived.participation.load_domain_energy_summary
     options:
       show_source: false
 
-::: gsim.palace.results.load_surface_q_summary
+::: gsim.palace.resolve.derived.participation.load_surface_q_summary
     options:
       show_source: false
 
-::: gsim.palace.results.summarize_domain_loss
+::: gsim.palace.resolve.derived.loss.summarize_domain_loss
     options:
       show_source: false
 
-::: gsim.palace.results.summarize_surface_loss
+::: gsim.palace.resolve.derived.loss.summarize_surface_loss
     options:
       show_source: false
 
-::: gsim.palace.results.summarize_loss_budget
+::: gsim.palace.resolve.derived.loss.summarize_loss_budget
     options:
       show_source: false
 
-::: gsim.palace.results.load_eigenmodes
+::: gsim.palace.resolve.loaders.eigenmodes.load_eigenmodes
     options:
       show_source: false
 
-::: gsim.palace.results.load_eigenmode_history
+::: gsim.palace.resolve.loaders.eigenmodes.load_eigenmode_history
     options:
       show_source: false
 
-::: gsim.palace.results.summarize_eigenmode_history
+::: gsim.palace.resolve.loaders.eigenmodes.summarize_eigenmode_history
     options:
       show_source: false
 
-::: gsim.palace.results.load_terminal_matrix_history
+::: gsim.palace.resolve.derived.terminal_matrices.load_terminal_matrix_history
     options:
       show_source: false
 
-::: gsim.palace.results.summarize_terminal_matrix_history
+::: gsim.palace.resolve.derived.terminal_matrices.summarize_terminal_matrix_history
     options:
       show_source: false
 
-::: gsim.palace.results.load_port_epr_summary
+::: gsim.palace.resolve.derived.participation.load_port_epr_summary
     options:
       show_source: false
 
-::: gsim.palace.results.summarize_surface_q_by_interface
+::: gsim.palace.resolve.derived.participation.summarize_surface_q_by_interface
     options:
       show_source: false
 
@@ -367,32 +467,32 @@ These helpers operate on runtime sidecars, sweep metadata, dry-run handoff
 artifacts, and resource records. They are reusable workflow APIs, but they live
 in their owning modules rather than the root notebook-facing simulation API.
 
-::: gsim.palace.results.load_palace_run_summary
+::: gsim.palace.resolve.sources.run_summary.load_palace_run_summary
     options:
       show_source: false
 
-::: gsim.palace.results.load_palace_sweep_summary
+::: gsim.palace.resolve.sweeps.load_palace_sweep_summary
     options:
       show_source: false
 
-::: gsim.palace.results.PalaceSweepPointSpec
+::: gsim.palace.resolve.PalaceSweepPointSpec
     options:
       show_source: false
       inherited_members: false
 
-::: gsim.palace.results.write_palace_sweep_points
+::: gsim.palace.resolve.sources.sidecars.write_palace_sweep_points
     options:
       show_source: false
 
-::: gsim.palace.results.write_palace_resource_record
+::: gsim.palace.resolve.sources.resources.write_palace_resource_record
     options:
       show_source: false
 
-::: gsim.palace.results.write_palace_resource_record_from_log
+::: gsim.palace.resolve.sources.resources.write_palace_resource_record_from_log
     options:
       show_source: false
 
-::: gsim.palace.results.write_palace_sweep_resource_index
+::: gsim.palace.resolve.sweeps.write_palace_sweep_resource_index
     options:
       show_source: false
 

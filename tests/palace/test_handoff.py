@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from gsim.palace import EigenmodeSim
 from gsim.palace.handoff import (
     PalaceSlurmLauncherSpec,
     PalaceSlurmProfileSpec,
@@ -13,6 +14,7 @@ from gsim.palace.handoff import (
     PalaceSlurmSbatchSpec,
     PalaceSlurmSweepArraySpec,
     load_palace_slurm_profile_catalog,
+    package_palace_run_handoff_archive,
     palace_slurm_solver_config_hints,
     resolve_palace_slurm_profile,
     write_palace_run_handoff_archive_manifest,
@@ -20,12 +22,12 @@ from gsim.palace.handoff import (
     write_palace_slurm_sweep_array_handoff,
     write_palace_sweep_handoff_archive_manifest,
 )
-from gsim.palace.results import (
+from gsim.palace.resolve import (
     PalaceSweepPointSpec,
     load_palace_run_summary,
     load_palace_sweep_summary,
-    write_palace_sweep_points,
 )
+from gsim.palace.resolve.sources.sidecars import write_palace_sweep_points
 
 
 def _write_minimal_palace_run(run_dir: Path) -> None:
@@ -76,6 +78,11 @@ def test_resolve_palace_slurm_profile_accepts_mapping_and_overrides() -> None:
     }
     assert resolution.solver == {"device": "CPU"}
     assert resolution.to_palace_config_hints() == {"Solver": {"Device": "CPU"}}
+    sbatch_spec = resolution.to_sbatch_spec(job_name="public-slurm-cpu")
+    assert isinstance(sbatch_spec, PalaceSlurmSbatchSpec)
+    assert sbatch_spec.resources is resolution.resources
+    assert sbatch_spec.setup_commands == ("module load palace",)
+    assert sbatch_spec.srun_args == ("--mpi=pmix",)
     assert resolution.profile == {
         "name": "public-slurm:cpu",
         "source": "caller-supplied test fixture",
@@ -92,6 +99,44 @@ def test_resolve_palace_slurm_profile_accepts_mapping_and_overrides() -> None:
             "wall_time": "01:00:00",
         },
     }
+
+
+def test_sim_write_slurm_sbatch_handoff_uses_resolved_profile(tmp_path: Path) -> None:
+    """Simulation method keeps notebooks on the sim Run Stage pipeline."""
+    _write_minimal_palace_run(tmp_path)
+    sim = EigenmodeSim()
+    sim.set_output_dir(tmp_path)
+    profile = resolve_palace_slurm_profile(
+        {
+            "public-slurm:cpu": {
+                "source": "caller-supplied test fixture",
+                "launcher": {"setup_commands": ["module load palace"]},
+                "resources": {
+                    "account": "public_alloc",
+                    "partition": "cpu",
+                    "wall_time": "00:30:00",
+                    "nodes": 1,
+                    "ntasks_per_node": 2,
+                    "cpus_per_task": 4,
+                },
+            }
+        },
+        "public-slurm:cpu",
+    )
+
+    handoff = sim.write_slurm_sbatch_handoff(
+        profile,
+        job_name="public-slurm-cpu",
+        metadata={"workflow": "unit"},
+    )
+
+    script = handoff.script_path.read_text(encoding="utf-8")
+    assert "#SBATCH --job-name=public-slurm-cpu" in script
+    assert "#SBATCH --ntasks-per-node=2" in script
+    assert "module load palace" in script
+    summary = load_palace_run_summary(tmp_path)
+    assert summary.handoff["script"] == {"path": "run_palace.sbatch"}
+    assert summary.handoff["profile"]["name"] == "public-slurm:cpu"
 
 
 def test_palace_slurm_solver_config_hints_maps_solver_metadata() -> None:
@@ -450,7 +495,10 @@ def test_write_palace_run_handoff_archive_manifest_round_trips_summary(
     )
 
     assert result.manifest_path.name == "palace_handoff_archive_manifest.json"
-    assert result.metadata_path == tmp_path / "palace_handoff_metadata.json"
+    assert result.manifest_path.parent == tmp_path / "metadata"
+    assert (
+        result.metadata_path == tmp_path / "metadata" / "palace_handoff_metadata.json"
+    )
     payload = json.loads(result.manifest_path.read_text(encoding="utf-8"))
     assert payload["schema_version"] == 1
     assert payload["source_kind"] == "run"
@@ -462,7 +510,7 @@ def test_write_palace_run_handoff_archive_manifest_round_trips_summary(
     assert {row["path"] for row in payload["files"]} == {
         "config.json",
         "palace.msh",
-        "palace_handoff_metadata.json",
+        "metadata/palace_handoff_metadata.json",
         "run_palace.sbatch",
     }
     assert {row["role"] for row in payload["files"]} == {
@@ -474,11 +522,41 @@ def test_write_palace_run_handoff_archive_manifest_round_trips_summary(
 
     summary = load_palace_run_summary(tmp_path)
     assert summary.handoff["archive"] == {
-        "manifest_path": "palace_handoff_archive_manifest.json"
+        "manifest_path": "metadata/palace_handoff_archive_manifest.json"
     }
     assert summary.handoff["archive_present"] is False
     assert summary.handoff["archive_manifest_present"] is True
     assert "palace_handoff_archive_manifest.json" not in summary.results
+
+
+def test_package_palace_run_handoff_archive_writes_tar_with_empty_result_dirs(
+    tmp_path: Path,
+) -> None:
+    _write_minimal_palace_run(tmp_path)
+    (tmp_path / "results" / "palace").mkdir(parents=True)
+    (tmp_path / "results" / "palace" / "stale.csv").write_text("x\n")
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "stale.log").write_text("log\n")
+
+    result = package_palace_run_handoff_archive(tmp_path)
+
+    assert result.archive_path == tmp_path.parent / f"{tmp_path.name}-palace.tar.gz"
+    assert result.archive_path.exists()
+    assert result.manifest_path == (
+        tmp_path / "metadata" / "palace_handoff_archive_manifest.json"
+    )
+
+    import tarfile
+
+    with tarfile.open(result.archive_path, "r:gz") as archive:
+        names = set(archive.getnames())
+
+    assert f"{tmp_path.name}/config.json" in names
+    assert f"{tmp_path.name}/palace.msh" in names
+    assert f"{tmp_path.name}/results/palace" in names
+    assert f"{tmp_path.name}/logs" in names
+    assert f"{tmp_path.name}/results/palace/stale.csv" not in names
+    assert f"{tmp_path.name}/logs/stale.log" not in names
 
 
 def test_write_palace_slurm_sbatch_handoff_validates_inputs(

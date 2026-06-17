@@ -5,7 +5,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.2
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: gsim
 #     language: python
@@ -102,6 +102,23 @@ sim.plot_mesh(
     transparent_groups=["air__None", "air__passive", "SiO2__passive"],
 )
 
+# %% [markdown]
+# ### Generate handoff package
+#
+# This writes the canonical Palace run folder and packages it as a `.tar.gz`
+# archive that can be transferred to an HPC system before solver execution.
+
+# %%
+from pathlib import Path
+
+run_dir = sim.output_dir
+assert run_dir is not None
+HANDOFF_PACKAGE_DIR = Path(".")
+handoff_archive = HANDOFF_PACKAGE_DIR / f"{run_dir.name}-palace.tar.gz"
+
+handoff_bundle = sim.generate_handoff_package(archive_path=handoff_archive)
+handoff_archive
+
 # %% papermill={"duration": 186.931123, "end_time": "2026-05-18T13:26:29.209716", "exception": false, "start_time": "2026-05-18T13:23:22.278593", "status": "completed"}
 results = sim.run()
 
@@ -113,7 +130,7 @@ import numpy as np
 import pyvista as pv
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
-from gsim.palace import load_fields
+from gsim.palace.resolve.loaders.fields import load_fields
 from gsim.viz import plot_cross_section, plot_topview
 
 pv.OFF_SCREEN = True

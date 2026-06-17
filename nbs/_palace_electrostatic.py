@@ -5,7 +5,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.2
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: .venv
 #     language: python
@@ -151,6 +151,23 @@ print(
 print(
     f"Analytical (d=vmim_bottom-metal5_top={d_vmim_um:.3f} um):      {C_analytical_vmim * 1e15:.1f} fF"
 )
+
+# %% [markdown]
+# ### Generate handoff package
+#
+# This writes the canonical Palace run folder and packages it as a `.tar.gz`
+# archive that can be transferred to an HPC system before solver execution.
+
+# %%
+from pathlib import Path
+
+run_dir = sim.output_dir
+assert run_dir is not None
+HANDOFF_PACKAGE_DIR = Path(".")
+handoff_archive = HANDOFF_PACKAGE_DIR / f"{run_dir.name}-palace.tar.gz"
+
+handoff_bundle = sim.generate_handoff_package(archive_path=handoff_archive)
+handoff_archive
 
 # %% [markdown]
 # ### Run on cloud

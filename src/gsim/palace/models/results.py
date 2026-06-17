@@ -10,6 +10,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from gsim.palace.mesh.manifest import MeshManifest
+
 
 def _supports_color_output() -> bool:
     """Return True when stdout is an interactive terminal supporting ANSI."""
@@ -61,6 +63,7 @@ class SimulationResult(BaseModel):
         mesh_path: Path to the generated mesh file
         output_dir: Output directory path
         config_path: Path to the Palace config file
+        manifest: Mesh manifest with physical names, roles, and tags
         results: Dictionary mapping result filenames to paths
         conductor_groups: Physical group info for conductors
         dielectric_groups: Physical group info for dielectrics
@@ -74,6 +77,7 @@ class SimulationResult(BaseModel):
     mesh_path: Path
     output_dir: Path
     config_path: Path | None = None
+    manifest: MeshManifest | None = None
     results: dict[str, Path] = Field(default_factory=dict)
 
     # Physical group info for Palace

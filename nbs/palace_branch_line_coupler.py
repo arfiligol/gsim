@@ -5,7 +5,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.2
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: gsim
 #     language: python
@@ -253,6 +253,23 @@ sim.mesh(preset="default")
 # %% papermill={"duration": 1.02794, "end_time": "2026-04-04T06:14:42.007639", "exception": false, "start_time": "2026-04-04T06:14:40.979699", "status": "completed"}
 # Static PNG
 sim.plot_mesh(show_groups=["metal", "P"])
+
+# %% [markdown]
+# ### Generate handoff package
+#
+# This writes the canonical Palace run folder and packages it as a `.tar.gz`
+# archive that can be transferred to an HPC system before solver execution.
+
+# %%
+from pathlib import Path
+
+run_dir = sim.output_dir
+assert run_dir is not None
+HANDOFF_PACKAGE_DIR = Path(".")
+handoff_archive = HANDOFF_PACKAGE_DIR / f"{run_dir.name}-palace.tar.gz"
+
+handoff_bundle = sim.generate_handoff_package(archive_path=handoff_archive)
+handoff_archive
 
 # %% [markdown] papermill={"duration": 0.002874, "end_time": "2026-04-04T06:14:42.013971", "exception": false, "start_time": "2026-04-04T06:14:42.011097", "status": "completed"}
 # ### Run simulation on GDSFactory+ Cloud

@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from gsim.palace._shared import int_tuple
+
 from .manifest import MeshManifest, MeshPhysicalGroup, MeshRole
 
 SurfaceFluxType = Literal["Electric", "Magnetic", "Power"]
@@ -494,7 +496,7 @@ def build_terminal_index_map_from_manifest(
             if 0 <= index - 1 < len(terminal_names)
             else f"T{index}"
         )
-        attributes = _as_int_tuple(terminal_entry.get("Attributes", ()))
+        attributes = int_tuple(terminal_entry.get("Attributes", ()))
         for attribute in attributes:
             entry = manifest_entries.get(attribute)
             if entry is None:
@@ -591,8 +593,7 @@ def _surface_current_attribute_extras(
 ) -> tuple[tuple[int, dict[str, Any]], ...]:
     """Return SurfaceCurrent attributes with row-level element metadata."""
     rows: list[tuple[int, dict[str, Any]]] = [
-        (attribute, {})
-        for attribute in _as_int_tuple(current_entry.get("Attributes", ()))
+        (attribute, {}) for attribute in int_tuple(current_entry.get("Attributes", ()))
     ]
     elements = current_entry.get("Elements")
     if isinstance(elements, list):
@@ -609,7 +610,7 @@ def _surface_current_attribute_extras(
                     element_extra["CoordinateSystem"] = coordinate_system
                 rows.extend(
                     (attribute, element_extra)
-                    for attribute in _as_int_tuple(element.get("Attributes", ()))
+                    for attribute in int_tuple(element.get("Attributes", ()))
                 )
 
     # Preserve one row per physical attribute while carrying the element-local
@@ -909,18 +910,6 @@ def _index_entry(
         exterior_of=entry.exterior_of,
         metadata=entry.metadata,
         extra={} if extra is None else dict(extra),
-    )
-
-
-def _as_int_tuple(value: Any) -> tuple[int, ...]:
-    if isinstance(value, bool):
-        return ()
-    if isinstance(value, int):
-        return (value,)
-    if isinstance(value, (str, bytes)) or not isinstance(value, Iterable):
-        return ()
-    return tuple(
-        item for item in value if isinstance(item, int) and not isinstance(item, bool)
     )
 
 

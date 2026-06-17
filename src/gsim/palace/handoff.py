@@ -1,23 +1,44 @@
-"""Dry-run Palace handoff helpers."""
+"""Palace handoff helpers for Run Stage packaging.
+
+Responsibility:
+Owns Slurm profile resolution, sbatch rendering, handoff metadata writing, and
+archive manifest/package creation for prepared Palace run folders.
+
+Does not own:
+Resolve-stage result auditing, typed result parsing, or report construction.
+"""
 
 from __future__ import annotations
 
 import csv
-import hashlib
 import json
+import os
 import re
 import shlex
+import tarfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Literal
 
-from gsim.palace.results import (
-    PalaceArtifactStatus,
-    PalaceRunSummary,
-    load_palace_run_summary,
-    load_palace_sweep_summary,
-    write_palace_handoff_metadata,
+from gsim.palace._shared import (
+    as_mapping as _as_mapping,
+)
+from gsim.palace._shared import (
+    json_ready as _json_ready,
+)
+from gsim.palace._shared import (
+    optional_str as _optional_string,
+)
+from gsim.palace._shared import (
+    path_value as _path_value,
+)
+from gsim.palace._shared import (
+    sha256_file as _sha256_file,
+)
+from gsim.palace.run_folder import (
+    default_palace_handoff_archive_path,
+    prepare_palace_run_folder,
 )
 
 _SBATCH_TOKEN_FORBIDDEN = set(" \t\r\n\"'`$;&|<>")
@@ -30,6 +51,57 @@ DEFAULT_PALACE_PETSC_OPTIONS = (
     "-eps_converged_reason",
     "-log_view",
 )
+
+
+def write_palace_handoff_metadata(
+    source: str | Path,
+    *,
+    status: str = "planned",
+    launcher: Mapping[str, Any] | None = None,
+    profile: Mapping[str, Any] | None = None,
+    resources: Mapping[str, Any] | None = None,
+    script_path: str | Path | None = None,
+    archive_path: str | Path | None = None,
+    archive_manifest_path: str | Path | None = None,
+    command: Mapping[str, Any] | None = None,
+    metadata: Mapping[str, Any] | None = None,
+    filename: str = "palace_handoff_metadata.json",
+) -> Path:
+    """Write Run Stage handoff metadata beside a Palace run or sweep point."""
+    source_path = Path(source)
+    if source_path.suffix.lower() == ".json":
+        sidecar_path = source_path
+    elif filename == "palace_handoff_metadata.json":
+        sidecar_path = source_path / "metadata" / filename
+    else:
+        sidecar_path = source_path / filename
+
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "status": str(status),
+    }
+    if launcher is not None:
+        payload["launcher"] = _json_ready(dict(launcher))
+    if profile is not None:
+        payload["profile"] = _json_ready(dict(profile))
+    if resources is not None:
+        payload["resources"] = _json_ready(dict(resources))
+    if script_path is not None:
+        payload["script"] = {"path": _path_value(script_path)}
+    if archive_path is not None or archive_manifest_path is not None:
+        archive = {}
+        if archive_path is not None:
+            archive["path"] = _path_value(archive_path)
+        if archive_manifest_path is not None:
+            archive["manifest_path"] = _path_value(archive_manifest_path)
+        payload["archive"] = archive
+    if command is not None:
+        payload["command"] = _json_ready(dict(command))
+    if metadata is not None:
+        payload["metadata"] = _json_ready(dict(metadata))
+
+    _write_json(sidecar_path, payload)
+    return sidecar_path
 
 
 @dataclass(frozen=True)
@@ -198,6 +270,20 @@ class PalaceSlurmProfileResolution:
         """Return Palace config hints derived from profile solver metadata."""
         solver_hints = palace_slurm_solver_config_hints(self.solver)
         return {"Solver": solver_hints} if solver_hints else {}
+
+    def to_sbatch_spec(
+        self,
+        *,
+        job_name: str,
+        **sbatch_kwargs: Any,
+    ) -> PalaceSlurmSbatchSpec:
+        """Return a render-ready sbatch spec for this resolved profile."""
+        return PalaceSlurmSbatchSpec(
+            job_name=job_name,
+            resources=self.resources,
+            **self.launcher.to_sbatch_kwargs(),
+            **sbatch_kwargs,
+        )
 
 
 @dataclass(frozen=True)
@@ -424,6 +510,7 @@ class PalaceHandoffArchiveManifestResult:
     metadata_path: Path | None
     file_count: int
     total_bytes: int
+    archive_path: Path | None = None
     messages: tuple[str, ...] = field(default_factory=tuple)
 
 
@@ -529,6 +616,7 @@ def write_palace_slurm_sbatch_handoff(
     run_dir = Path(source)
     if run_dir.suffix:
         raise ValueError("source must be a run directory")
+    run_dir = prepare_palace_run_folder(run_dir).root
     _validate_relative_path("script_path", str(script_path))
     output_script_path = run_dir / script_path
     if validate_inputs:
@@ -650,7 +738,7 @@ def write_palace_slurm_sweep_array_handoff(
 def write_palace_run_handoff_archive_manifest(
     source: str | Path,
     *,
-    manifest_path: str | Path = "palace_handoff_archive_manifest.json",
+    manifest_path: str | Path = "metadata/palace_handoff_archive_manifest.json",
     archive_path: str | Path | None = None,
     metadata: Mapping[str, Any] | None = None,
     include_results: bool = False,
@@ -666,6 +754,7 @@ def write_palace_run_handoff_archive_manifest(
     run_dir = Path(source)
     if run_dir.suffix:
         raise ValueError("source must be a run directory")
+    run_dir = prepare_palace_run_folder(run_dir).root
     _validate_relative_path("manifest_path", str(manifest_path))
     output_manifest_path = run_dir / manifest_path
     metadata_path = (
@@ -679,10 +768,8 @@ def write_palace_run_handoff_archive_manifest(
         else _existing_handoff_metadata_path(run_dir, handoff_metadata_filename)
     )
 
-    summary = load_palace_run_summary(run_dir, include_hashes=include_hashes)
-    files = _run_archive_manifest_entries(
+    files = _run_archive_manifest_entries_from_folder(
         run_dir,
-        summary,
         include_results=include_results,
         include_hashes=include_hashes,
     )
@@ -699,7 +786,65 @@ def write_palace_run_handoff_archive_manifest(
         metadata_path=metadata_path,
         file_count=int(payload["file_count"]),
         total_bytes=int(payload["total_bytes"]),
+        archive_path=None if archive_path is None else Path(archive_path),
         messages=(f"Wrote Palace handoff archive manifest: {output_manifest_path}",),
+    )
+
+
+def package_palace_run_handoff_archive(
+    source: str | Path,
+    *,
+    archive_path: str | Path | None = None,
+    manifest_path: str | Path = "metadata/palace_handoff_archive_manifest.json",
+    metadata: Mapping[str, Any] | None = None,
+    include_results: bool = False,
+    include_hashes: bool = True,
+) -> PalaceHandoffArchiveManifestResult:
+    """Write the manifest and package a canonical Palace run folder as tar.gz.
+
+    The archive root is the run-folder name. By default, existing result and
+    log contents are excluded while the ``results/palace`` and ``logs``
+    directories remain present for HPC handoff.
+    """
+    run_folder = prepare_palace_run_folder(source)
+    output_archive_path = _resolve_handoff_archive_path(
+        run_folder.root,
+        archive_path,
+    )
+    archive_reference = _archive_path_reference(
+        run_folder.root,
+        output_archive_path,
+    )
+    manifest_result = write_palace_run_handoff_archive_manifest(
+        run_folder.root,
+        manifest_path=manifest_path,
+        archive_path=archive_reference,
+        metadata=metadata,
+        include_results=include_results,
+        include_hashes=include_hashes,
+    )
+    output_archive_path.parent.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(output_archive_path, "w:gz") as archive:
+        archive.add(
+            run_folder.root,
+            arcname=run_folder.root.name,
+            recursive=True,
+            filter=lambda info: _filter_run_handoff_tarinfo(
+                info,
+                run_folder.root.name,
+                include_results=include_results,
+            ),
+        )
+    return PalaceHandoffArchiveManifestResult(
+        manifest_path=manifest_result.manifest_path,
+        metadata_path=manifest_result.metadata_path,
+        file_count=manifest_result.file_count,
+        total_bytes=manifest_result.total_bytes,
+        archive_path=output_archive_path,
+        messages=(
+            *manifest_result.messages,
+            f"Wrote Palace handoff archive: {output_archive_path}",
+        ),
     )
 
 
@@ -734,11 +879,9 @@ def write_palace_sweep_handoff_archive_manifest(
         else _existing_handoff_metadata_path(sweep_root, handoff_metadata_filename)
     )
 
-    summary = load_palace_sweep_summary(
-        points_path,
-        include_hashes=include_hashes,
-        include_report_metrics=False,
-    )
+    points_payload = json.loads(points_path.read_text(encoding="utf-8"))
+    point_specs = _sweep_point_specs(points_payload)
+    point_rows = _sweep_array_rows(sweep_root, point_specs)
     files: list[dict[str, Any]] = []
     _append_manifest_entry(
         files,
@@ -748,34 +891,40 @@ def write_palace_sweep_handoff_archive_manifest(
         name=points_path.name,
         include_hashes=include_hashes,
     )
-    handoff = _as_dict(summary.handoff)
-    metadata_payload = _as_dict(handoff.get("metadata"))
-    points_csv_path = metadata_payload.get("points_csv_path")
-    if points_csv_path is not None:
-        _append_manifest_entry(
+    if metadata_path is not None:
+        handoff_payload = _read_json_mapping(metadata_path)
+        handoff = {
+            "present": True,
+            "path": metadata_path,
+            **handoff_payload,
+        }
+        metadata_payload = _as_mapping(handoff.get("metadata"))
+        points_csv_path = metadata_payload.get("points_csv_path")
+        if points_csv_path is not None:
+            _append_manifest_entry(
+                files,
+                sweep_root,
+                _resolve_sidecar_reference(points_path, points_csv_path),
+                role="sweep_points_table",
+                name=Path(str(points_csv_path)).name,
+                include_hashes=include_hashes,
+            )
+        _extend_handoff_reference_entries(
             files,
             sweep_root,
-            _resolve_sidecar_reference(points_path, points_csv_path),
-            role="sweep_points_table",
-            name=Path(str(points_csv_path)).name,
+            handoff,
             include_hashes=include_hashes,
+            role_prefix="sweep_",
         )
-    _extend_handoff_reference_entries(
-        files,
-        sweep_root,
-        handoff,
-        include_hashes=include_hashes,
-        role_prefix="sweep_",
-    )
     if include_point_files:
-        for point in summary.points:
+        for point in point_rows:
             files.extend(
-                _run_archive_manifest_entries(
-                    sweep_root,
-                    point.run_summary,
+                _run_archive_manifest_entries_from_folder(
+                    sweep_root / str(point["run_dir"]),
                     include_results=include_results,
                     include_hashes=include_hashes,
-                    point_slug=point.point_slug,
+                    manifest_root=sweep_root,
+                    point_slug=str(point["point_slug"]),
                 )
             )
     files = _deduplicate_manifest_entries(files)
@@ -1194,12 +1343,6 @@ def _validate_single_line_text(label: str, value: str) -> None:
         raise ValueError(f"{label} must be single-line text")
 
 
-def _optional_string(value: Any) -> str | None:
-    if value is None:
-        return None
-    return str(value)
-
-
 def _optional_tuple(value: Any) -> tuple[str, ...] | None:
     if value is None:
         return None
@@ -1265,8 +1408,8 @@ def _record_handoff_archive_manifest(
         if existing_path is not None
         else {}
     )
-    script = _as_dict(existing.get("script"))
-    archive = _as_dict(existing.get("archive"))
+    script = _as_mapping(existing.get("script"))
+    archive = _as_mapping(existing.get("archive"))
     return write_palace_handoff_metadata(
         source,
         status=str(existing.get("status") or "manifested"),
@@ -1283,13 +1426,92 @@ def _record_handoff_archive_manifest(
 
 
 def _existing_handoff_metadata_path(source: Path, filename: str) -> Path | None:
-    path = source / filename
-    return path if path.is_file() else None
+    candidates = [source / "metadata" / filename, source / filename]
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+def _run_archive_manifest_entries_from_folder(
+    root: Path,
+    *,
+    include_results: bool,
+    include_hashes: bool,
+    manifest_root: Path | None = None,
+    point_slug: str | None = None,
+) -> list[dict[str, Any]]:
+    files: list[dict[str, Any]] = []
+    entry_root = root if manifest_root is None else manifest_root
+    _append_manifest_entry(
+        files,
+        entry_root,
+        root / "config.json",
+        role="core_artifact",
+        name="config.json",
+        include_hashes=include_hashes,
+        point_slug=point_slug,
+    )
+    _append_manifest_entry(
+        files,
+        entry_root,
+        root / "palace.msh",
+        role="core_artifact",
+        name="palace.msh",
+        include_hashes=include_hashes,
+        point_slug=point_slug,
+    )
+    if include_results:
+        for path in sorted((root / "results" / "palace").glob("*")):
+            if path.is_file() and not path.name.startswith("."):
+                _append_manifest_entry(
+                    files,
+                    entry_root,
+                    path,
+                    role="result_artifact",
+                    name=path.name,
+                    include_hashes=include_hashes,
+                    point_slug=point_slug,
+                )
+    handoff_path = _existing_handoff_metadata_path(root, "palace_handoff_metadata.json")
+    if handoff_path is not None:
+        _append_manifest_entry(
+            files,
+            entry_root,
+            handoff_path,
+            role="handoff_metadata",
+            name=handoff_path.name,
+            include_hashes=include_hashes,
+            point_slug=point_slug,
+        )
+        handoff = _read_json_mapping(handoff_path)
+        _extend_handoff_reference_entries(
+            files,
+            entry_root,
+            {
+                "present": True,
+                "path": handoff_path,
+                **handoff,
+            },
+            include_hashes=include_hashes,
+            point_slug=point_slug,
+        )
+    runtime_path = root / "metadata" / "palace_run_metadata.json"
+    _append_manifest_entry(
+        files,
+        entry_root,
+        runtime_path,
+        role="runtime_metadata",
+        name=runtime_path.name,
+        include_hashes=include_hashes,
+        point_slug=point_slug,
+    )
+    return _deduplicate_manifest_entries(files)
 
 
 def _run_archive_manifest_entries(
     root: Path,
-    summary: PalaceRunSummary,
+    summary: Any,
     *,
     include_results: bool,
     include_hashes: bool,
@@ -1315,7 +1537,7 @@ def _run_archive_manifest_entries(
                 include_hashes=include_hashes,
                 point_slug=point_slug,
             )
-    handoff = _as_dict(summary.handoff)
+    handoff = _as_mapping(summary.handoff)
     _extend_handoff_reference_entries(
         files,
         root,
@@ -1323,7 +1545,7 @@ def _run_archive_manifest_entries(
         include_hashes=include_hashes,
         point_slug=point_slug,
     )
-    runtime = _as_dict(summary.runtime)
+    runtime = _as_mapping(summary.runtime)
     runtime_path = runtime.get("path")
     if runtime.get("present") is True and runtime_path is not None:
         _append_manifest_entry(
@@ -1360,8 +1582,8 @@ def _extend_handoff_reference_entries(
         include_hashes=include_hashes,
         point_slug=point_slug,
     )
-    script = _as_dict(handoff.get("script"))
-    if handoff.get("script_present") is True and script.get("path") is not None:
+    script = _as_mapping(handoff.get("script"))
+    if script.get("path") is not None:
         script_path = _resolve_sidecar_reference(handoff_path, script["path"])
         _append_manifest_entry(
             files,
@@ -1377,7 +1599,7 @@ def _extend_handoff_reference_entries(
 def _append_status_manifest_entry(
     files: list[dict[str, Any]],
     root: Path,
-    artifact: PalaceArtifactStatus,
+    artifact: Any,
     *,
     role: str,
     include_hashes: bool,
@@ -1451,6 +1673,53 @@ def _manifest_entry(
     return entry
 
 
+def _resolve_handoff_archive_path(
+    run_dir: Path,
+    archive_path: str | Path | None,
+) -> Path:
+    path = (
+        default_palace_handoff_archive_path(run_dir)
+        if archive_path is None
+        else Path(archive_path)
+    )
+    if not path.is_absolute() and archive_path is not None:
+        path = run_dir.parent / path
+    resolved_path = path.resolve()
+    resolved_run_dir = run_dir.resolve()
+    try:
+        resolved_path.relative_to(resolved_run_dir)
+    except ValueError:
+        return path
+    raise ValueError("archive_path must be outside the Palace run directory")
+
+
+def _archive_path_reference(run_dir: Path, archive_path: Path) -> str:
+    return Path(
+        os.path.relpath(archive_path.resolve(), start=run_dir.resolve())
+    ).as_posix()
+
+
+def _filter_run_handoff_tarinfo(
+    info: tarfile.TarInfo,
+    archive_root_name: str,
+    *,
+    include_results: bool,
+) -> tarfile.TarInfo | None:
+    if include_results:
+        return info
+    parts = Path(info.name).parts
+    relative_parts = parts[1:] if parts and parts[0] == archive_root_name else parts
+    if len(relative_parts) > 1 and relative_parts[0] == "logs":
+        return None
+    if (
+        len(relative_parts) > 2
+        and relative_parts[0] == "results"
+        and relative_parts[1] == "palace"
+    ):
+        return None
+    return info
+
+
 def _archive_manifest_payload(
     *,
     source_kind: Literal["run", "sweep"],
@@ -1493,7 +1762,26 @@ def _deduplicate_manifest_entries(
 
 def _resolve_sidecar_reference(sidecar_path: Path, value: Any) -> Path:
     path = Path(str(value))
-    return path if path.is_absolute() else sidecar_path.parent / path
+    if path.is_absolute():
+        return path
+    reference_root = (
+        sidecar_path.parent.parent
+        if sidecar_path.parent.name == "metadata"
+        else sidecar_path.parent
+    )
+    return reference_root / path
+
+
+def _read_json_mapping(path: Path) -> dict[str, Any]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return dict(data) if isinstance(data, Mapping) else {}
+
+
+def _relative_path(root: Path, path: Path) -> str:
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return path.as_posix()
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -1501,28 +1789,6 @@ def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _as_dict(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, dict) else {}
-
-
 def _optional_dict(value: Any) -> dict[str, Any] | None:
-    data = _as_dict(value)
+    data = _as_mapping(value)
     return data or None
-
-
-def _json_ready(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, Mapping):
-        return {str(key): _json_ready(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_ready(item) for item in value]
-    return value

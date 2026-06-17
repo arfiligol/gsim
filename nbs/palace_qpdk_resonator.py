@@ -5,7 +5,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.2
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -193,6 +193,23 @@ sim.set_driven(fmin=7.75e9, fmax=7.8e9, num_points=300, save_fields_at=[7.78e9])
 sim.set_output_dir("./sim_qpdk_resonator")
 sim.mesh(preset="default")
 sim.plot_mesh(show_groups=["superconductor", "P", "sapphire", "vacuum"])
+
+# %% [markdown]
+# ### Generate handoff package
+#
+# This writes the canonical Palace run folder and packages it as a `.tar.gz`
+# archive that can be transferred to an HPC system before solver execution.
+
+# %%
+from pathlib import Path
+
+run_dir = sim.output_dir
+assert run_dir is not None
+HANDOFF_PACKAGE_DIR = Path(".")
+handoff_archive = HANDOFF_PACKAGE_DIR / f"{run_dir.name}-palace.tar.gz"
+
+handoff_bundle = sim.generate_handoff_package(archive_path=handoff_archive)
+handoff_archive
 
 # %% papermill={"duration": 536.401462, "end_time": "2026-04-04T12:05:49.805289", "exception": false, "start_time": "2026-04-04T11:56:53.403827", "status": "completed"}
 sim.write_config()

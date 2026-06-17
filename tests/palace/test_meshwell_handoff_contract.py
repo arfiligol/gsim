@@ -13,7 +13,7 @@ from gsim.palace.mesh.postprocessing import (
     build_dielectric_interface_specs_from_material_kinds,
     build_postprocessing_config_from_manifest,
 )
-from gsim.palace.results import load_postprocessing_index_map
+from gsim.palace.resolve.loaders.index_maps import load_postprocessing_index_map
 
 FIXTURE_DIR = Path(__file__).with_name("test_meshwell_handoff_contract")
 MSH_FIXTURE = FIXTURE_DIR / "physical_name_contract.msh"
@@ -194,7 +194,9 @@ def test_meshwell_handoff_material_kind_specs_build_index_map(tmp_path: Path) ->
         }
     ]
 
-    index_map_path = config.index_map.write_json(tmp_path / "palace_index_map.json")
+    metadata_dir = tmp_path / "metadata"
+    metadata_dir.mkdir()
+    index_map_path = config.index_map.write_json(metadata_dir / "palace_index_map.json")
     loaded = load_postprocessing_index_map(tmp_path, index_map_path=index_map_path)
 
     assert (

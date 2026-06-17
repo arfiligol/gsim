@@ -1,15 +1,33 @@
-"""Palace API module for EM simulation with gdsfactory.
+"""Notebook-friendly Palace simulation facade.
 
-This module provides a comprehensive API for setting up and running
-electromagnetic simulations using the Palace solver with gdsfactory components.
+The package root exposes the small public surface users need for notebooks:
+problem-specific simulation classes, mesh generation entrypoints, the Resolve
+entrypoint, report bundle models, concrete report models, and selected Typed
+Data classes.
 
-Features:
-    - Problem-specific simulation classes
-      (DrivenSim, EigenmodeSim, ElectrostaticSim, MagnetostaticSim)
-    - Layer stack extraction from PDK
-    - Port configuration (inplane, via, CPW)
-    - Mesh generation with quality presets
-    - Palace config file generation
+Implementation responsibility is intentionally below the root:
+
+* ``gsim.palace.run_folder`` owns the canonical Palace-only run folder:
+  root execution inputs, ``metadata/`` sidecars, ``logs/``, optional
+  ``geometry/design.gds``, and raw ``results/palace/`` solver outputs.
+* ``gsim.palace.run_stage`` owns lightweight run-stage handles returned by
+  package/execution APIs before Resolve starts.
+* ``gsim.palace.run`` owns concrete execution implementations, such as local
+  Palace process execution. ``PalaceSimBase`` keeps notebook-facing method
+  entrypoints and delegates execution details to this package.
+* ``gsim.palace.handoff`` owns Palace archive/script packaging around that
+  run folder. AEDT/HFSS export and result packaging belong to public PDK code,
+  not to this package.
+* ``gsim.palace.resolve`` adapts Palace run folders/cloud mappings into
+  resolved source-audit objects and report bundles.
+* ``gsim.palace.results`` owns semantic Typed Data and Problem Type Reports.
+* ``gsim.palace.display`` owns generic table/plot primitives used by Typed
+  Data visualizers.
+* ``gsim.palace.mesh`` owns mesh and postprocessing config generation.
+
+The root does not expose direct problem-specific report loaders. Review code
+should use ``resolve_palace_result(...).load_report()`` so the source audit,
+typed report construction, and concrete report type remain visible.
 
 Usage:
     from gsim.palace import DrivenSim
@@ -26,61 +44,63 @@ Usage:
     sim.set_output_dir("./sim")
     sim.mesh(preset="fine")
     results = sim.run()
+
+    # Generate a reviewable handoff package
+    handle = sim.generate_handoff_package()
+
+    # Or resolve artifacts first, then compose a typed report explicitly
+    resolved = resolve_palace_result("./sim", problem_type="Driven")
+    report_bundle = resolved.load_report(require_report=True)
+    report = report_bundle.require_report()
 """
 
 from __future__ import annotations
 
 from gsim.gcloud import RunResult, register_result_parser
-
-# New simulation classes (composition, no inheritance)
 from gsim.palace.driven import DrivenSim
 from gsim.palace.eigenmode import EigenmodeSim
 from gsim.palace.electrostatic import ElectrostaticSim
 from gsim.palace.magnetostatic import MagnetostaticSim
-
-# Mesh utilities
 from gsim.palace.mesh import (
     MeshConfig,
     generate_mesh,
 )
-
-# Results utilities
-from gsim.palace.results import (
-    SParams,
-    load_dielectric_interface_summary,
-    load_domain_material_summary,
-    load_driven_report,
-    load_eigenmode_report,
-    load_electrostatic_report,
-    load_fields,
-    load_postprocessing_index_map,
-    load_sparams,
-    load_terminal_matrix,
+from gsim.palace.resolve import (
+    PalaceResolvedResult,
+    PalaceResultBundle,
+    PalaceRunArtifacts,
+    PalaceRunSummary,
+    resolve_palace_result,
 )
+from gsim.palace.results.driven import SParams
+from gsim.palace.results.reports.driven import DrivenReport
+from gsim.palace.results.reports.eigenmode import EigenmodeReport
+from gsim.palace.results.reports.electrostatic import ElectrostaticReport
+from gsim.palace.run_stage import PalaceRunHandle
 
 __all__ = [
+    "DrivenReport",
     "DrivenSim",
+    "EigenmodeReport",
     "EigenmodeSim",
+    "ElectrostaticReport",
     "ElectrostaticSim",
     "MagnetostaticSim",
     "MeshConfig",
+    "PalaceResolvedResult",
+    "PalaceResultBundle",
+    "PalaceRunArtifacts",
+    "PalaceRunHandle",
+    "PalaceRunSummary",
     "SParams",
     "generate_mesh",
-    "load_dielectric_interface_summary",
-    "load_domain_material_summary",
-    "load_driven_report",
-    "load_eigenmode_report",
-    "load_electrostatic_report",
-    "load_fields",
-    "load_postprocessing_index_map",
-    "load_sparams",
-    "load_terminal_matrix",
+    "resolve_palace_result",
 ]
 
 
 def _parse_palace_result(run_result: RunResult) -> SParams | dict:
     """Parse Palace cloud results into SParams."""
-    from gsim.palace.results import load_sparams
+    from gsim.palace.results.driven import load_sparams
 
     try:
         return load_sparams(run_result.files)

@@ -1,4 +1,4 @@
-"""Tests for gsim.palace.results — S-parameter loading with port-name mapping."""
+"""Tests for Palace result loaders, report models, and runtime artifacts."""
 
 from __future__ import annotations
 
@@ -10,63 +10,111 @@ from textwrap import dedent
 import numpy as np
 import pytest
 
+from gsim.palace.handoff import write_palace_handoff_metadata
+from gsim.palace.resolve import (
+    PalaceResolvedResult,
+    PalaceRunSummary,
+    PalaceSweepPointSpec,
+    PalaceSweepResourceIndexResult,
+    PalaceSweepSummary,
+    load_palace_run_summary,
+    load_palace_sweep_summary,
+)
+from gsim.palace.resolve.assembly import (
+    load_driven_report,
+    load_eigenmode_report,
+    load_electrostatic_report,
+)
+from gsim.palace.resolve.derived.loss import (
+    summarize_domain_loss,
+    summarize_loss_budget,
+    summarize_surface_loss,
+)
+from gsim.palace.resolve.derived.materials import (
+    load_dielectric_interface_summary,
+    load_domain_material_summary,
+)
+from gsim.palace.resolve.derived.participation import (
+    load_domain_energy_summary,
+    load_port_epr_summary,
+    load_surface_q_summary,
+    summarize_surface_q_by_interface,
+)
+from gsim.palace.resolve.derived.terminal_matrices import (
+    load_terminal_matrix,
+    load_terminal_matrix_history,
+    summarize_terminal_matrix_history,
+)
+from gsim.palace.resolve.loaders.eigenmodes import (
+    load_eigenmode_history,
+    load_eigenmodes,
+    summarize_eigenmode_history,
+)
+from gsim.palace.resolve.loaders.index_maps import load_postprocessing_index_map
+from gsim.palace.resolve.loaders.indexed_csv import load_indexed_csv
+from gsim.palace.resolve.sources.resource_log import parse_palace_resource_log
+from gsim.palace.resolve.sources.resources import (
+    write_palace_resource_record,
+    write_palace_resource_record_from_log,
+)
+from gsim.palace.resolve.sources.sidecars import write_palace_sweep_points
+from gsim.palace.resolve.sources.slurm import parse_slurm_scontrol_job
+from gsim.palace.resolve.sweeps import write_palace_sweep_resource_index
 from gsim.palace.results import (
     DrivenReport,
     EigenmodeReport,
     Eigenmodes,
     ElectrostaticReport,
-    PalaceRunSummary,
-    PalaceSweepPointSpec,
-    PalaceSweepResourceIndexResult,
-    PalaceSweepSummary,
     SParams,
-    get_port_map,
-    load_dielectric_interface_summary,
-    load_domain_energy_summary,
-    load_domain_material_summary,
-    load_driven_report,
-    load_eigenmode_history,
-    load_eigenmode_report,
-    load_eigenmodes,
-    load_electrostatic_report,
-    load_indexed_csv,
-    load_palace_run_summary,
-    load_palace_sweep_summary,
-    load_port_epr_summary,
-    load_postprocessing_index_map,
-    load_sparams,
-    load_surface_q_summary,
-    load_terminal_matrix,
-    load_terminal_matrix_history,
-    parse_palace_resource_log,
-    parse_slurm_scontrol_job,
-    summarize_domain_loss,
-    summarize_eigenmode_history,
-    summarize_loss_budget,
-    summarize_surface_loss,
-    summarize_surface_q_by_interface,
-    summarize_terminal_matrix_history,
-    write_palace_handoff_metadata,
-    write_palace_resource_record,
-    write_palace_resource_record_from_log,
-    write_palace_sweep_points,
-    write_palace_sweep_resource_index,
 )
+from gsim.palace.results.driven import get_port_map, load_sparams
+from gsim.palace.results.loss import DomainLoss, LossBudget, ReportLoss, SurfaceLoss
 
 
 def test_palace_root_results_api_keeps_notebook_surface_narrow() -> None:
     import gsim.palace as palace
+    import gsim.palace.resolve as resolve
     import gsim.palace.results as results
 
     assert palace.SParams is SParams
-    assert palace.load_sparams is load_sparams
-    assert palace.load_fields is results.load_fields
+    assert palace.PalaceResolvedResult is PalaceResolvedResult
+    assert palace.DrivenReport is DrivenReport
+    assert palace.EigenmodeReport is EigenmodeReport
+    assert palace.ElectrostaticReport is ElectrostaticReport
+    assert palace.resolve_palace_result is resolve.resolve_palace_result
+    assert not hasattr(palace, "load_dielectric_interface_summary")
+    assert not hasattr(palace, "load_domain_material_summary")
+    assert not hasattr(palace, "load_driven_report")
+    assert not hasattr(palace, "load_eigenmode_report")
+    assert not hasattr(palace, "load_electrostatic_report")
+    assert not hasattr(palace, "load_fields")
+    assert not hasattr(palace, "load_report_for_resolved_result")
+    assert not hasattr(palace, "load_palace_run_summary")
+    assert not hasattr(palace, "load_postprocessing_index_map")
+    assert not hasattr(palace, "load_sparams")
+    assert not hasattr(palace, "load_terminal_matrix")
+    assert not hasattr(palace, "BasePalaceReport")
+    assert not hasattr(resolve, "load_driven_report")
+    assert not hasattr(resolve, "load_eigenmode_report")
+    assert not hasattr(resolve, "load_electrostatic_report")
+    assert resolve.load_palace_run_summary is load_palace_run_summary
+    assert resolve.load_palace_sweep_summary is load_palace_sweep_summary
+    assert not hasattr(resolve, "load_dielectric_interface_summary")
+    assert not hasattr(resolve, "load_domain_material_summary")
+    assert not hasattr(resolve, "load_fields")
+    assert not hasattr(resolve, "load_indexed_csv")
+    assert not hasattr(resolve, "load_postprocessing_index_map")
+    assert not hasattr(resolve, "load_sparams")
+    assert not hasattr(resolve, "load_terminal_matrix")
+    assert not hasattr(resolve, "summarize_domain_loss")
+    assert not hasattr(results, "resolve_palace_result")
+    assert not hasattr(results, "load_fields")
+    assert not hasattr(results, "PalaceRunSummary")
+    assert not hasattr(results, "PalaceSweepPointSpec")
+    assert not hasattr(results, "BasePalaceReport")
 
     detail_names = (
-        "DrivenReport",
         "Eigenmodes",
-        "EigenmodeReport",
-        "ElectrostaticReport",
         "IndexedCsv",
         "IndexedCsvColumn",
         "SParam",
@@ -86,9 +134,22 @@ def test_palace_root_results_api_keeps_notebook_surface_narrow() -> None:
         "summarize_surface_q_by_interface",
         "summarize_terminal_matrix_history",
     )
+    result_owned_names = {
+        "Eigenmodes",
+        "IndexedCsv",
+        "IndexedCsvColumn",
+        "PostprocessingTable",
+        "SParam",
+        "SurfaceQ",
+        "TerminalMatrix",
+    }
     for name in detail_names:
         assert not hasattr(palace, name)
-        assert hasattr(results, name)
+        if name in result_owned_names:
+            assert hasattr(results, name)
+            continue
+        assert not hasattr(results, name)
+        assert not hasattr(resolve, name)
 
 
 SLURM_SCONTROL = """
@@ -187,8 +248,10 @@ Time (sec):           1.029e+03     1.000   1.029e+03
 @pytest.fixture
 def sim_dir(tmp_path: Path) -> Path:
     """Create a minimal Palace output directory."""
-    palace_dir = tmp_path / "output" / "palace"
+    palace_dir = tmp_path / "results" / "palace"
     palace_dir.mkdir(parents=True)
+    metadata_dir = tmp_path / "metadata"
+    metadata_dir.mkdir()
 
     port_info = {
         "ports": [
@@ -199,7 +262,7 @@ def sim_dir(tmp_path: Path) -> Path:
         "unit": 1e-6,
         "name": "palace",
     }
-    (tmp_path / "port_information.json").write_text(json.dumps(port_info))
+    (metadata_dir / "port_information.json").write_text(json.dumps(port_info))
 
     csv_content = (
         "f (GHz), |S[1][1]| (dB), arg(S[1][1]) (deg.),"
@@ -216,8 +279,10 @@ def sim_dir(tmp_path: Path) -> Path:
 @pytest.fixture
 def indexed_report_dir(tmp_path: Path) -> Path:
     """Create a minimal Palace indexed-report output with an index map."""
-    palace_dir = tmp_path / "output" / "palace"
+    palace_dir = tmp_path / "results" / "palace"
     palace_dir.mkdir(parents=True)
+    metadata_dir = tmp_path / "metadata"
+    metadata_dir.mkdir()
 
     index_map = {
         "schema_version": 1,
@@ -256,7 +321,7 @@ def indexed_report_dir(tmp_path: Path) -> Path:
             },
         ],
     }
-    (tmp_path / "palace_index_map.json").write_text(json.dumps(index_map))
+    (metadata_dir / "palace_index_map.json").write_text(json.dumps(index_map))
     config = {
         "Domains": {
             "Materials": [
@@ -377,7 +442,7 @@ def indexed_report_dir(tmp_path: Path) -> Path:
             }
         ],
     }
-    (tmp_path / "palace_material_resolution.json").write_text(
+    (tmp_path / "metadata" / "palace_material_resolution.json").write_text(
         json.dumps(material_resolution)
     )
     (palace_dir / "domain-E.csv").write_text(
@@ -398,14 +463,16 @@ def _write_sweep_point_artifacts(
     mesh_name: str = "palace.msh",
 ) -> None:
     run_dir.mkdir(parents=True)
-    result_dir = result_dir or run_dir / "output" / "palace"
+    result_dir = result_dir or run_dir / "results" / "palace"
     result_dir.mkdir(parents=True)
+    metadata_dir = run_dir / "metadata"
+    metadata_dir.mkdir(parents=True)
 
     config = json.loads((source / "config.json").read_text())
     config["Problem"] = {"Type": "Eigenmode"}
     (run_dir / "config.json").write_text(json.dumps(config))
     (run_dir / mesh_name).write_text("$MeshFormat\n")
-    (run_dir / "mesh_manifest.json").write_text(
+    (metadata_dir / "mesh_manifest.json").write_text(
         json.dumps(
             {
                 "schema_version": 1,
@@ -421,8 +488,8 @@ def _write_sweep_point_artifacts(
         )
     )
     for name in ("palace_index_map.json", "palace_material_resolution.json"):
-        shutil.copy(source / name, run_dir / name)
-    (result_dir / "palace_run_metadata.json").write_text(
+        shutil.copy(source / "metadata" / name, metadata_dir / name)
+    (metadata_dir / "palace_run_metadata.json").write_text(
         json.dumps(
             {
                 "schema_version": 1,
@@ -435,7 +502,7 @@ def _write_sweep_point_artifacts(
             }
         )
     )
-    for csv_path in (source / "output" / "palace").glob("*.csv"):
+    for csv_path in (source / "results" / "palace").glob("*.csv"):
         shutil.copy(csv_path, result_dir / csv_path.name)
 
 
@@ -472,7 +539,7 @@ def _single_point_report_sweep(
 @pytest.fixture
 def driven_report_dir(indexed_report_dir: Path) -> Path:
     """Create a Palace driven report output with S-parameters and port EPR."""
-    palace_dir = indexed_report_dir / "output" / "palace"
+    palace_dir = indexed_report_dir / "results" / "palace"
     port_info = {
         "ports": [
             {"portnumber": 1, "name": "readout", "Z0": 50.0, "type": "cpw"},
@@ -480,7 +547,9 @@ def driven_report_dir(indexed_report_dir: Path) -> Path:
         "unit": 1e-6,
         "name": "palace",
     }
-    (indexed_report_dir / "port_information.json").write_text(json.dumps(port_info))
+    (indexed_report_dir / "metadata" / "port_information.json").write_text(
+        json.dumps(port_info)
+    )
     (palace_dir / "port-S.csv").write_text(
         "f (GHz), |S[1][1]| (dB), arg(S[1][1]) (deg.)\n"
         "5.0, -12.0, -33.0\n"
@@ -492,7 +561,7 @@ def driven_report_dir(indexed_report_dir: Path) -> Path:
 @pytest.fixture
 def eigenmode_report_dir(indexed_report_dir: Path) -> Path:
     """Create a Palace eigenmode report output with AMR and EPR tables."""
-    palace_dir = indexed_report_dir / "output" / "palace"
+    palace_dir = indexed_report_dir / "results" / "palace"
     iteration01 = palace_dir / "iteration01"
     iteration01.mkdir()
     _write_eig_csv(
@@ -515,8 +584,10 @@ def eigenmode_report_dir(indexed_report_dir: Path) -> Path:
 @pytest.fixture
 def terminal_matrix_dir(tmp_path: Path) -> Path:
     """Create a minimal Palace electrostatic matrix output with an index map."""
-    palace_dir = tmp_path / "output" / "palace"
+    palace_dir = tmp_path / "results" / "palace"
     palace_dir.mkdir(parents=True)
+    metadata_dir = tmp_path / "metadata"
+    metadata_dir.mkdir()
 
     index_map = {
         "schema_version": 1,
@@ -543,7 +614,7 @@ def terminal_matrix_dir(tmp_path: Path) -> Path:
             },
         ],
     }
-    (tmp_path / "palace_index_map.json").write_text(json.dumps(index_map))
+    (metadata_dir / "palace_index_map.json").write_text(json.dumps(index_map))
     _write_terminal_matrix_csv(
         palace_dir / "terminal-C.csv",
         "C",
@@ -574,8 +645,8 @@ def terminal_matrix_dir(tmp_path: Path) -> Path:
 @pytest.fixture
 def electrostatic_report_dir(terminal_matrix_dir: Path) -> Path:
     """Create a Palace electrostatic matrix output with EPR report tables."""
-    palace_dir = terminal_matrix_dir / "output" / "palace"
-    index_map_path = terminal_matrix_dir / "palace_index_map.json"
+    palace_dir = terminal_matrix_dir / "results" / "palace"
+    index_map_path = terminal_matrix_dir / "metadata" / "palace_index_map.json"
     index_map = json.loads(index_map_path.read_text())
     index_map["entries"].extend(
         [
@@ -641,7 +712,7 @@ def electrostatic_report_dir(terminal_matrix_dir: Path) -> Path:
 @pytest.fixture
 def eigenmode_dir(tmp_path: Path) -> Path:
     """Create a minimal Palace eigenmode output directory."""
-    palace_dir = tmp_path / "output" / "palace"
+    palace_dir = tmp_path / "results" / "palace"
     palace_dir.mkdir(parents=True)
     (palace_dir / "eig.csv").write_text(
         "m, Re{f} (GHz), Im{f} (GHz), Q, Error (Bkwd.), Error (Abs.)\n"
@@ -654,8 +725,10 @@ def eigenmode_dir(tmp_path: Path) -> Path:
 @pytest.fixture
 def sim_dir_no_names(tmp_path: Path) -> Path:
     """Sim dir with port_information.json without name fields."""
-    palace_dir = tmp_path / "output" / "palace"
+    palace_dir = tmp_path / "results" / "palace"
     palace_dir.mkdir(parents=True)
+    metadata_dir = tmp_path / "metadata"
+    metadata_dir.mkdir()
 
     port_info = {
         "ports": [
@@ -665,7 +738,7 @@ def sim_dir_no_names(tmp_path: Path) -> Path:
         "unit": 1e-6,
         "name": "palace",
     }
-    (tmp_path / "port_information.json").write_text(json.dumps(port_info))
+    (metadata_dir / "port_information.json").write_text(json.dumps(port_info))
 
     csv_content = (
         "f (GHz), |S[1][1]| (dB), arg(S[1][1]) (deg.),"
@@ -802,12 +875,12 @@ class TestLoadSparamsSource:
         assert len(sp.freq) == 2
 
     def test_accepts_palace_subdir(self, sim_dir: Path) -> None:
-        sp = load_sparams(sim_dir / "output" / "palace")
+        sp = load_sparams(sim_dir / "results" / "palace")
         assert len(sp.freq) == 2
 
     def test_accepts_results_dict(self, sim_dir: Path) -> None:
         results = {
-            "port-S.csv": sim_dir / "output" / "palace" / "port-S.csv",
+            "port-S.csv": sim_dir / "results" / "palace" / "port-S.csv",
         }
         sp = load_sparams(results)
         assert sp["o1", "o1"].db[0] == pytest.approx(-20.0)
@@ -926,7 +999,7 @@ class TestPalaceRunSummary:
         config_path.write_text(json.dumps(config))
 
         (indexed_report_dir / "palace.msh").write_text("$MeshFormat\n")
-        (indexed_report_dir / "mesh_manifest.json").write_text(
+        (indexed_report_dir / "metadata" / "mesh_manifest.json").write_text(
             json.dumps(
                 {
                     "schema_version": 1,
@@ -950,7 +1023,7 @@ class TestPalaceRunSummary:
                 }
             )
         )
-        (indexed_report_dir / "palace_run_metadata.json").write_text(
+        (indexed_report_dir / "metadata" / "palace_run_metadata.json").write_text(
             json.dumps(
                 {
                     "schema_version": 1,
@@ -1013,10 +1086,13 @@ class TestPalaceRunSummary:
         config["Problem"] = {"Type": "Eigenmode"}
         config_path.write_text(json.dumps(config))
         results = {
-            "domain-E.csv": indexed_report_dir / "output" / "palace" / "domain-E.csv",
+            "domain-E.csv": indexed_report_dir / "results" / "palace" / "domain-E.csv",
             "config.json": config_path,
-            "palace_index_map.json": indexed_report_dir / "palace_index_map.json",
+            "palace_index_map.json": indexed_report_dir
+            / "metadata"
+            / "palace_index_map.json",
             "palace_material_resolution.json": indexed_report_dir
+            / "metadata"
             / "palace_material_resolution.json",
         }
 
@@ -1051,6 +1127,9 @@ class TestPalaceRunSummary:
             metadata={"campaign": "public_fixture"},
         )
 
+        assert sidecar_path == (
+            indexed_report_dir / "metadata" / "palace_handoff_metadata.json"
+        )
         payload = json.loads(sidecar_path.read_text())
         assert payload["schema_version"] == 1
         assert payload["script"]["path"] == "run_palace.sbatch"
@@ -1085,14 +1164,14 @@ class TestPalaceRunSummary:
             runtime={"wall_time_seconds": 120.0},
             model_size={"global_unknowns": 123456},
             memory={"peak_total_hwm_bytes": 2 * 1024**3},
-            tables={"stage_timing": "metadata/records/palace_stage_timing.csv"},
+            tables={"stage_timing": "metadata/palace_stage_timing.csv"},
             missing_sources=("metadata/scontrol-job-123.txt",),
             parse_warnings=("partial Palace log",),
             metadata={"workflow": "public-test"},
         )
 
         assert record_path == (
-            indexed_report_dir / "metadata" / "records" / "palace_resource_record.json"
+            indexed_report_dir / "metadata" / "palace_resource_record.json"
         )
         summary = load_palace_run_summary(indexed_report_dir)
 
@@ -1137,9 +1216,9 @@ class TestPalaceRunSummary:
         )
 
         assert record_path == (
-            indexed_report_dir / "metadata" / "records" / "palace_resource_record.json"
+            indexed_report_dir / "metadata" / "palace_resource_record.json"
         )
-        records_dir = indexed_report_dir / "metadata" / "records"
+        records_dir = indexed_report_dir / "metadata"
         assert (records_dir / "palace_amr_passes.csv").is_file()
         assert (records_dir / "palace_stage_timing.csv").is_file()
         assert (records_dir / "palace_stage_memory.csv").is_file()
@@ -1178,7 +1257,7 @@ class TestPalaceRunSummary:
         )
         assert summary.resource["table_count"] == 3
         assert summary.resource["tables"]["stage_timing"]["path"] == (
-            "metadata/records/palace_stage_timing.csv"
+            "metadata/palace_stage_timing.csv"
         )
         assert summary.resource["tables"]["stage_timing"]["row_count"] == 8
         serialized = json.dumps(summary.resource)
@@ -1397,7 +1476,7 @@ class TestPalaceSweepSummary:
                     parameters={"gap_um": 6.0},
                     run_dir="points/gap_6um",
                     resource_record_path=(
-                        "points/gap_6um/metadata/records/palace_resource_record.json"
+                        "points/gap_6um/metadata/palace_resource_record.json"
                     ),
                 )
             ],
@@ -1405,7 +1484,7 @@ class TestPalaceSweepSummary:
         )
         payload = json.loads(points_path.read_text())
         assert payload["points"][0]["resource_record_path"] == (
-            "points/gap_6um/metadata/records/palace_resource_record.json"
+            "points/gap_6um/metadata/palace_resource_record.json"
         )
 
         summary = load_palace_sweep_summary(sweep_root)
@@ -1554,7 +1633,9 @@ class TestPalaceSweepSummary:
         assert point.report_metrics["frequency_point_count"] == 2
         assert point.report_metrics["port_count"] == 1
         assert point.report_metrics["s_parameter_count"] == 1
-        assert point.report_metrics["port_epr_rows"] == 1
+        assert point.report_metrics["domain_energy_rows"] == 2
+        assert point.report_metrics["surface_q_rows"] == 1
+        assert point.report_metrics["loss_budget_rows"] == 1
 
         record = summary.to_point_records()[0]
         assert record["report_status"] == "loaded"
@@ -1655,8 +1736,22 @@ class TestDrivenReport:
         interface_rows = report.dielectric_interfaces.set_index("surface_index")
         assert interface_rows.loc[2, "source_name"] == "MA:D1_TOP_M1___D1_SUBSTRATE"
         assert interface_rows.loc[2, "preset_name"] == "public_ma"
-        assert report.port_epr.iloc[0]["source_name"] == "P1"
-        assert report.port_epr.iloc[0]["p_port"] == pytest.approx(-2.5e-4)
+        assert report.domain_energy.iloc[0]["source_name"] == "D1_SUBSTRATE"
+        assert report.domain_energy.iloc[0]["p_elec"] == pytest.approx(0.5)
+        assert report.surface_q.iloc[0]["source_name"] == "MA:D1_TOP_M1___D1_SUBSTRATE"
+        assert report.surface_q.iloc[0]["p_surf"] == pytest.approx(1.0e-7)
+        surface_by_interface = report.surface_interface_summary.set_index(
+            "interface_type"
+        )
+        assert surface_by_interface.loc["MA", "surface_count"] == 1
+        assert report.domain_loss.iloc[0]["p_elec"] == pytest.approx(0.5)
+        assert report.surface_loss.iloc[0]["p_surf"] == pytest.approx(1.0e-7)
+        budget_by_sample = report.loss_budget.set_index(
+            ["sample_column", "sample_value"]
+        )
+        assert budget_by_sample.loc[("m", 1.0), "total_inverse_q_sum"] == pytest.approx(
+            1.0e-6
+        )
         assert report.index_map["entry_name"].tolist() == [
             "substrate",
             "ma_interface",
@@ -1667,7 +1762,9 @@ class TestDrivenReport:
         assert bool(sources.loc["port-S.csv", "loaded"])
         assert bool(sources.loc["palace_index_map.json", "loaded"])
         assert bool(sources.loc["config.json", "loaded"])
-        assert bool(sources.loc["port-EPR.csv", "loaded"])
+        assert bool(sources.loc["domain-E.csv", "loaded"])
+        assert bool(sources.loc["surface-Q.csv", "loaded"])
+        assert "port-EPR.csv" not in sources.index
 
     def test_load_driven_report_allows_missing_optional_reports(
         self,
@@ -1676,25 +1773,31 @@ class TestDrivenReport:
         report = load_driven_report(sim_dir)
 
         assert report.sparams.port_names == ["o1", "o2", "o3"]
-        assert report.port_epr.empty
+        assert report.domain_energy.empty
+        assert report.surface_q.empty
         assert report.domain_materials.empty
         assert report.dielectric_interfaces.empty
         assert report.index_map.empty
         assert report.missing_reports == (
             "palace_index_map.json",
             "config.json",
-            "port-EPR.csv",
+            "domain-E.csv",
+            "surface-Q.csv",
         )
         sources = report.sources.set_index("name")
         assert bool(sources.loc["port-S.csv", "loaded"])
-        assert not bool(sources.loc["port-EPR.csv", "loaded"])
+        assert not bool(sources.loc["domain-E.csv", "loaded"])
+        assert not bool(sources.loc["surface-Q.csv", "loaded"])
+        assert "port-EPR.csv" not in sources.index
 
-    def test_load_driven_report_can_require_port_epr(
+    def test_load_driven_report_does_not_expose_port_epr(
         self,
-        sim_dir: Path,
+        driven_report_dir: Path,
     ) -> None:
-        with pytest.raises(FileNotFoundError, match="port-EPR"):
-            load_driven_report(sim_dir, require_port_epr=True)
+        report = load_driven_report(driven_report_dir)
+
+        assert not hasattr(report, "port_epr")
+        assert "port-EPR.csv" not in report.sources.set_index("name").index
 
 
 class TestEigenmodes:
@@ -1747,7 +1850,7 @@ class TestEigenmodes:
         eigenmode_dir: Path,
     ) -> None:
         results = {
-            "eig.csv": eigenmode_dir / "output" / "palace" / "eig.csv",
+            "eig.csv": eigenmode_dir / "results" / "palace" / "eig.csv",
         }
 
         eigenmodes = load_eigenmodes(results)
@@ -1756,7 +1859,7 @@ class TestEigenmodes:
         np.testing.assert_allclose(eigenmodes.freq_real_ghz, [6.1, 7.2])
 
     def test_load_eigenmodes_accepts_csv_path(self, eigenmode_dir: Path) -> None:
-        csv_path = eigenmode_dir / "output" / "palace" / "eig.csv"
+        csv_path = eigenmode_dir / "results" / "palace" / "eig.csv"
 
         eigenmodes = load_eigenmodes(csv_path)
 
@@ -1768,7 +1871,7 @@ class TestEigenmodes:
             load_eigenmodes(tmp_path)
 
     def test_load_eigenmodes_fills_optional_columns(self, tmp_path: Path) -> None:
-        palace_dir = tmp_path / "output" / "palace"
+        palace_dir = tmp_path / "results" / "palace"
         palace_dir.mkdir(parents=True)
         (palace_dir / "eig.csv").write_text("m, Re{f} (GHz)\n1, 5.5\n")
 
@@ -1781,7 +1884,7 @@ class TestEigenmodes:
         self,
         tmp_path: Path,
     ) -> None:
-        palace_dir = tmp_path / "output" / "palace"
+        palace_dir = tmp_path / "results" / "palace"
         iteration01 = palace_dir / "iteration01"
         iteration02 = palace_dir / "iteration02"
         iteration01.mkdir(parents=True)
@@ -1822,7 +1925,7 @@ class TestEigenmodes:
         self,
         tmp_path: Path,
     ) -> None:
-        palace_dir = tmp_path / "output" / "palace"
+        palace_dir = tmp_path / "results" / "palace"
         iteration01 = palace_dir / "iteration01"
         iteration01.mkdir(parents=True)
         _write_eig_csv(iteration01 / "eig.csv", [[1, 6.0, 0.01, 100.0, 1e-7, 1e-4]])
@@ -1843,6 +1946,7 @@ class TestEigenmodeReport:
     def test_load_eigenmode_report_composes_existing_summaries(
         self,
         eigenmode_report_dir: Path,
+        tmp_path: Path,
     ) -> None:
         report = load_eigenmode_report(eigenmode_report_dir)
 
@@ -1901,6 +2005,52 @@ class TestEigenmodeReport:
         assert report.missing_reports == ()
         assert bool(report.sources.set_index("name").loc["surface-Q.csv", "loaded"])
         assert bool(report.sources.set_index("name").loc["config.json", "loaded"])
+
+        assert isinstance(report.domain_epr_loss, DomainLoss)
+        domain_metrics = report.domain_epr_loss.metrics_dataframe().set_index(
+            "source_index"
+        )
+        assert domain_metrics.loc[1, "channel"] == "domain"
+        assert domain_metrics.loc[1, "participation"] == pytest.approx(0.5)
+        assert domain_metrics.loc[1, "loss_tangent"] == pytest.approx(1.0e-6)
+        assert domain_metrics.loc[1, "inverse_q"] == pytest.approx(5.0e-7)
+        assert domain_metrics.loc[1, "gamma_hz"] == pytest.approx(6.3e9 * 5.0e-7)
+        assert report.domain_epr_loss.to_dataframe().equals(report.domain_loss)
+        assert report.domain_epr_loss.to_records()[0].q_equivalent == pytest.approx(
+            2.0e6
+        )
+        assert report.domain_epr_loss.plot_inverse_q() is not None
+        assert isinstance(report.loss, ReportLoss)
+        assert isinstance(report.loss.budget, LossBudget)
+        assert report.loss.domain.to_dataframe().equals(report.domain_loss)
+        assert report.loss.surface.to_dataframe().equals(report.surface_loss)
+        assert report.loss.budget.to_dataframe().equals(report.loss_budget)
+        assert report.loss.budget.plot_inverse_q() is not None
+        domain_csv = report.loss.domain.save_csv(tmp_path / "domain_loss.csv")
+        surface_csv = report.loss.surface.save_csv(tmp_path / "surface_loss.csv")
+        budget_csv = report.loss.budget.save_csv(tmp_path / "loss_budget.csv")
+        assert (
+            DomainLoss.from_csv(domain_csv).to_dataframe().shape
+            == report.domain_loss.shape
+        )
+        assert (
+            SurfaceLoss.from_csv(surface_csv).to_dataframe().shape
+            == report.surface_loss.shape
+        )
+        assert (
+            LossBudget.from_csv(budget_csv).to_dataframe().shape
+            == report.loss_budget.shape
+        )
+
+        assert isinstance(report.surface_epr_loss, SurfaceLoss)
+        surface_metrics = report.surface_epr_loss.metrics_dataframe().set_index(
+            "source_index"
+        )
+        assert surface_metrics.loc[2, "channel"] == "surface"
+        assert surface_metrics.loc[2, "participation"] == pytest.approx(1.0e-7)
+        assert surface_metrics.loc[2, "loss_tangent"] == pytest.approx(0.0033)
+        assert surface_metrics.loc[2, "inverse_q"] == pytest.approx(5.0e-7)
+        assert report.surface_epr_loss.plot_inverse_q() is not None
 
     def test_load_eigenmode_report_allows_missing_optional_epr(
         self,
@@ -1989,8 +2139,10 @@ class TestIndexedCsv:
         self, indexed_report_dir: Path
     ) -> None:
         results = {
-            "domain-E.csv": indexed_report_dir / "output" / "palace" / "domain-E.csv",
-            "palace_index_map.json": indexed_report_dir / "palace_index_map.json",
+            "domain-E.csv": indexed_report_dir / "results" / "palace" / "domain-E.csv",
+            "palace_index_map.json": indexed_report_dir
+            / "metadata"
+            / "palace_index_map.json",
         }
 
         result = load_indexed_csv(results, "domain-E.csv")
@@ -2000,7 +2152,8 @@ class TestIndexedCsv:
     def test_load_indexed_csv_requires_unknown_section(self, tmp_path: Path) -> None:
         csv_path = tmp_path / "custom.csv"
         csv_path.write_text("x[1]\n1\n")
-        (tmp_path / "palace_index_map.json").write_text(
+        (tmp_path / "metadata").mkdir()
+        (tmp_path / "metadata" / "palace_index_map.json").write_text(
             json.dumps({"schema_version": 1, "entries": []})
         )
 
@@ -2227,7 +2380,7 @@ class TestIndexedReportSummaries:
     def test_summarize_loss_budget_keeps_modes_separate(
         self, indexed_report_dir: Path
     ) -> None:
-        palace_dir = indexed_report_dir / "output" / "palace"
+        palace_dir = indexed_report_dir / "results" / "palace"
         _write_eig_csv(
             palace_dir / "eig.csv",
             [
@@ -2283,8 +2436,13 @@ class TestIndexedReportSummaries:
         self, indexed_report_dir: Path
     ) -> None:
         results = {
-            "surface-Q.csv": indexed_report_dir / "output" / "palace" / "surface-Q.csv",
-            "palace_index_map.json": indexed_report_dir / "palace_index_map.json",
+            "surface-Q.csv": indexed_report_dir
+            / "results"
+            / "palace"
+            / "surface-Q.csv",
+            "palace_index_map.json": indexed_report_dir
+            / "metadata"
+            / "palace_index_map.json",
         }
 
         summary = load_surface_q_summary(results)
@@ -2325,12 +2483,28 @@ class TestElectrostaticReport:
         assert surface_loss.loc[2, "inverse_q"] == pytest.approx(2.5e-7)
         assert "t1_us" not in report.surface_loss.columns
 
+        domain_metrics = report.domain_epr_loss.metrics_dataframe().set_index(
+            "source_index"
+        )
+        assert domain_metrics.loc[1, "participation"] == pytest.approx(0.5)
+        assert domain_metrics.loc[1, "t1_us"] is None
+        surface_metrics = report.surface_epr_loss.metrics_dataframe().set_index(
+            "source_index"
+        )
+        assert surface_metrics.loc[1, "participation"] == pytest.approx(1.0e-7)
+        assert surface_metrics.loc[1, "t1_us"] is None
+
         budget = report.loss_budget.set_index("source_index")
         assert budget.loc[1, "domain_inverse_q_sum"] == pytest.approx(5.0e-7)
         assert budget.loc[1, "surface_inverse_q_sum"] == pytest.approx(5.0e-7)
         assert budget.loc[1, "total_inverse_q_sum"] == pytest.approx(1.0e-6)
         assert budget.loc[2, "total_inverse_q_sum"] == pytest.approx(5.0e-7)
         assert "t1_us" not in report.loss_budget.columns
+        assert isinstance(report.loss, ReportLoss)
+        assert report.loss.domain.to_dataframe().equals(report.domain_loss)
+        assert report.loss.surface.to_dataframe().equals(report.surface_loss)
+        assert report.loss.budget.to_dataframe().equals(report.loss_budget)
+        assert report.loss.budget.plot_inverse_q() is not None
 
         by_interface = report.surface_interface_summary.set_index("interface_type")
         assert by_interface.loc["MA", "surface_count"] == 2
@@ -2396,13 +2570,44 @@ class TestElectrostaticReport:
         with pytest.raises(ValueError, match="frequency_ghz"):
             load_electrostatic_report(electrostatic_report_dir, frequency_ghz=0.0)
 
-    def test_electrostatic_report_loader_stays_root_public(self) -> None:
-        import gsim.palace as palace
-        import gsim.palace.results as results
+    def test_load_electrostatic_report_reads_iteration_history_from_run_folder(
+        self,
+        electrostatic_report_dir: Path,
+    ) -> None:
+        palace_dir = electrostatic_report_dir / "results" / "palace"
+        iteration01 = palace_dir / "iteration01"
+        iteration01.mkdir()
+        _write_terminal_matrix_csv(
+            iteration01 / "terminal-C.csv",
+            "C",
+            [
+                [0.5e-15, -1.0e-15],
+                [-1.0e-15, 2.0e-15],
+            ],
+        )
 
-        assert not hasattr(palace, "ElectrostaticReport")
-        assert results.ElectrostaticReport is ElectrostaticReport
-        assert palace.load_electrostatic_report is load_electrostatic_report
+        report = load_electrostatic_report(electrostatic_report_dir)
+
+        assert report.terminal_c_history["pass_index"].drop_duplicates().tolist() == [
+            1,
+            2,
+        ]
+        assert set(report.terminal_c_history["label"]) == {"Pass 1", "Final"}
+        sources = report.sources.set_index("name")
+        assert bool(sources.loc["iteration*/terminal-C.csv", "loaded"])
+        assert "loaded 1 AMR iteration files" in str(
+            sources.loc["iteration*/terminal-C.csv", "message"]
+        )
+
+    def test_electrostatic_report_loader_stays_assembly_owned(self) -> None:
+        import gsim.palace as palace
+        import gsim.palace.resolve as resolve
+        import gsim.palace.resolve.assembly as assembly
+
+        assert palace.ElectrostaticReport is ElectrostaticReport
+        assert assembly.load_electrostatic_report is load_electrostatic_report
+        assert not hasattr(resolve, "load_electrostatic_report")
+        assert not hasattr(palace, "load_electrostatic_report")
 
 
 class TestTerminalMatrix:
@@ -2435,10 +2640,12 @@ class TestTerminalMatrix:
     ) -> None:
         results = {
             "terminal-Cm.csv": terminal_matrix_dir
-            / "output"
+            / "results"
             / "palace"
             / "terminal-Cm.csv",
-            "palace_index_map.json": terminal_matrix_dir / "palace_index_map.json",
+            "palace_index_map.json": terminal_matrix_dir
+            / "metadata"
+            / "palace_index_map.json",
         }
 
         matrix = load_terminal_matrix(results, "Cm")
@@ -2491,7 +2698,7 @@ class TestTerminalMatrixHistory:
     def test_history_deduplicates_matching_final_and_summarizes(
         self, terminal_matrix_dir: Path
     ) -> None:
-        palace_dir = terminal_matrix_dir / "output" / "palace"
+        palace_dir = terminal_matrix_dir / "results" / "palace"
         iteration01 = palace_dir / "iteration01"
         iteration02 = palace_dir / "iteration02"
         iteration01.mkdir()
@@ -2528,8 +2735,39 @@ class TestTerminalMatrixHistory:
         assert pass2_summary["n_off_diagonal_elements"] == 2
         assert pass2_summary["max_abs_display_delta_to_previous"] == pytest.approx(1.0)
 
+    def test_history_accepts_run_folder_not_only_palace_output_dir(
+        self, terminal_matrix_dir: Path
+    ) -> None:
+        palace_dir = terminal_matrix_dir / "results" / "palace"
+        iteration01 = palace_dir / "iteration01"
+        iteration02 = palace_dir / "iteration02"
+        iteration01.mkdir()
+        iteration02.mkdir()
+        _write_terminal_matrix_csv(
+            iteration01 / "terminal-C.csv",
+            "C",
+            [
+                [1.0e-15, -0.1e-15],
+                [-0.1e-15, 2.0e-15],
+            ],
+        )
+        _write_terminal_matrix_csv(
+            iteration02 / "terminal-C.csv",
+            "C",
+            [
+                [1.5e-15, -0.2e-15],
+                [-0.2e-15, 3.0e-15],
+            ],
+        )
+
+        history = load_terminal_matrix_history(terminal_matrix_dir, "C")
+
+        assert history["pass_index"].drop_duplicates().tolist() == [1, 2, 3]
+        assert set(history["label"]) == {"Pass 1", "Pass 2", "Final"}
+        assert history["row_terminal"].drop_duplicates().tolist() == ["left", "right"]
+
     def test_history_appends_nonmatching_final(self, terminal_matrix_dir: Path) -> None:
-        palace_dir = terminal_matrix_dir / "output" / "palace"
+        palace_dir = terminal_matrix_dir / "results" / "palace"
         iteration01 = palace_dir / "iteration01"
         iteration01.mkdir()
         _write_terminal_matrix_csv(

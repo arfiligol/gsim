@@ -189,8 +189,8 @@ class TestDrivenSimWorkflow:
             "Power"
         )
 
-        manifest_path = output_dir / "mesh_manifest.json"
-        index_map_path = output_dir / "palace_index_map.json"
+        manifest_path = output_dir / "metadata" / "mesh_manifest.json"
+        index_map_path = output_dir / "metadata" / "palace_index_map.json"
         assert manifest_path.exists()
         assert index_map_path.exists()
 
@@ -352,8 +352,8 @@ def test_run_local_direct_palace_supports_serial_wrapper_flag(tmp_path, monkeypa
         assert text
         assert env
         commands.append(cmd)
-        postpro_dir = Path(cwd) / "output" / "palace"
-        postpro_dir.mkdir(parents=True)
+        postpro_dir = Path(cwd) / "results" / "palace"
+        postpro_dir.mkdir(parents=True, exist_ok=True)
         (postpro_dir / "terminal-C.csv").write_text("i\n", encoding="utf-8")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
@@ -380,9 +380,11 @@ def test_run_local_direct_palace_supports_serial_wrapper_flag(tmp_path, monkeypa
         ]
     ]
     assert (
-        results["terminal-C.csv"] == tmp_path / "output" / "palace" / "terminal-C.csv"
+        results["terminal-C.csv"] == tmp_path / "results" / "palace" / "terminal-C.csv"
     )
-    metadata = json.loads((tmp_path / "palace_run_metadata.json").read_text())
+    metadata = json.loads(
+        (tmp_path / "metadata" / "palace_run_metadata.json").read_text()
+    )
     assert metadata["schema_version"] == 1
     assert metadata["status"] == "completed"
     assert metadata["return_code"] == 0
@@ -438,8 +440,8 @@ def test_run_local_direct_palace_binary_mode_omits_wrapper_flags(tmp_path, monke
         assert text
         commands.append(cmd)
         envs.append(env)
-        postpro_dir = Path(cwd) / "output" / "palace"
-        postpro_dir.mkdir(parents=True)
+        postpro_dir = Path(cwd) / "results" / "palace"
+        postpro_dir.mkdir(parents=True, exist_ok=True)
         (postpro_dir / "terminal-C.csv").write_text("i\n", encoding="utf-8")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
@@ -457,9 +459,11 @@ def test_run_local_direct_palace_binary_mode_omits_wrapper_flags(tmp_path, monke
     assert commands == [[str(palace_binary), "config.json"]]
     assert envs[0]["OMP_NUM_THREADS"] == "2"
     assert (
-        results["terminal-C.csv"] == tmp_path / "output" / "palace" / "terminal-C.csv"
+        results["terminal-C.csv"] == tmp_path / "results" / "palace" / "terminal-C.csv"
     )
-    metadata = json.loads((tmp_path / "palace_run_metadata.json").read_text())
+    metadata = json.loads(
+        (tmp_path / "metadata" / "palace_run_metadata.json").read_text()
+    )
     assert metadata["launcher"] == {
         "kind": "executable",
         "executable_mode": "binary",
@@ -473,6 +477,71 @@ def test_run_local_direct_palace_binary_mode_omits_wrapper_flags(tmp_path, monke
         "omp_num_threads": "2",
     }
     assert metadata["command"]["argv"] == ["palace-arm64.bin", "config.json"]
+
+
+def test_run_local_direct_palace_supports_setup_commands(tmp_path, monkeypatch):
+    """Caller-provided setup commands can activate Palace for notebook local runs."""
+
+    sim = ElectrostaticSim()
+    sim.set_output_dir(tmp_path)
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "palace.msh").write_text("$MeshFormat\n", encoding="utf-8")
+
+    commands: list[list[str]] = []
+
+    def fake_run(
+        cmd: list[str],
+        *,
+        cwd: Path,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        env: dict[str, str],
+    ) -> subprocess.CompletedProcess[str]:
+        assert check
+        assert capture_output
+        assert text
+        assert env["OMP_NUM_THREADS"] == "4"
+        commands.append(cmd)
+        postpro_dir = Path(cwd) / "results" / "palace"
+        postpro_dir.mkdir(parents=True, exist_ok=True)
+        (postpro_dir / "terminal-C.csv").write_text("i\n", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    results = sim.run_local(
+        use_apptainer=False,
+        executable_mode="binary",
+        palace_executable="palace-x86_64.bin",
+        setup_commands=(
+            "source /opt/spack/share/spack/setup-env.sh",
+            "spack load palace@0.16.0",
+        ),
+        num_threads=4,
+        verbose=False,
+    )
+
+    assert commands[0][:2] == ["/bin/bash", "-lc"]
+    script = commands[0][2]
+    assert "source /opt/spack/share/spack/setup-env.sh" in script
+    assert "spack load palace@0.16.0" in script
+    assert "command -v palace-x86_64.bin >/dev/null" in script
+    assert "exec palace-x86_64.bin config.json" in script
+    assert (
+        results["terminal-C.csv"] == tmp_path / "results" / "palace" / "terminal-C.csv"
+    )
+    metadata = json.loads(
+        (tmp_path / "metadata" / "palace_run_metadata.json").read_text()
+    )
+    assert metadata["launcher"] == {
+        "kind": "executable",
+        "executable_mode": "binary",
+        "serial": False,
+        "palace_executable_configured": True,
+        "palace_executable_name": "palace-x86_64.bin",
+    }
+    assert metadata["command"]["argv"] == ["palace-x86_64.bin", "config.json"]
 
 
 def test_run_local_direct_palace_binary_mode_rejects_multi_process(tmp_path):
@@ -491,6 +560,21 @@ def test_run_local_direct_palace_binary_mode_rejects_multi_process(tmp_path):
             executable_mode="binary",
             palace_executable=palace_binary,
             num_processes=2,
+            verbose=False,
+        )
+
+
+def test_run_local_direct_palace_rejects_unknown_executable_mode(tmp_path):
+    sim = ElectrostaticSim()
+    sim.set_output_dir(tmp_path)
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "palace.msh").write_text("$MeshFormat\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="executable_mode"):
+        sim.run_local(
+            use_apptainer=False,
+            executable_mode="unknown",  # type: ignore[arg-type]
+            palace_executable="/usr/bin/true",
             verbose=False,
         )
 
@@ -616,7 +700,9 @@ class TestElectrostaticSimWorkflow:
         assert "LumpedPort" not in boundaries
         assert "WavePort" not in boundaries
 
-        index_map_path = Path(electrostatic_sim._output_dir) / "palace_index_map.json"
+        index_map_path = (
+            Path(electrostatic_sim._output_dir) / "metadata" / "palace_index_map.json"
+        )
         assert index_map_path.exists()
         index_map = json.loads(index_map_path.read_text())
         terminal_rows = [
@@ -703,7 +789,9 @@ class TestElectrostaticSimWorkflow:
         assert terminals[1]["Attributes"]
         assert set(terminals[0]["Attributes"]).isdisjoint(terminals[1]["Attributes"])
 
-        index_map = json.loads((Path(output_dir) / "palace_index_map.json").read_text())
+        index_map = json.loads(
+            (Path(output_dir) / "metadata" / "palace_index_map.json").read_text()
+        )
         terminal_rows = [
             row
             for row in index_map["entries"]
@@ -783,7 +871,9 @@ class TestMagnetostaticSimWorkflow:
     def test_write_config_generates_source_index_map(self, magnetostatic_sim):
         """Magnetostatic source indices map back to manifest physical names."""
         magnetostatic_sim.write_config()
-        index_map_path = Path(magnetostatic_sim._output_dir) / "palace_index_map.json"
+        index_map_path = (
+            Path(magnetostatic_sim._output_dir) / "metadata" / "palace_index_map.json"
+        )
         assert index_map_path.exists()
         index_map = json.loads(index_map_path.read_text())
         source_rows = [
@@ -825,7 +915,11 @@ class TestMagnetostaticSimWorkflow:
         assert {row["Type"] for row in flux_rows} == {"Magnetic"}
 
         index_map = json.loads(
-            (Path(magnetostatic_sim._output_dir) / "palace_index_map.json").read_text()
+            (
+                Path(magnetostatic_sim._output_dir)
+                / "metadata"
+                / "palace_index_map.json"
+            ).read_text()
         )
         sections = {row["section"] for row in index_map["entries"]}
         assert "Domains.Postprocessing.Energy" in sections
@@ -880,7 +974,7 @@ class TestMagnetostaticSimWorkflow:
         )
 
         index_map = json.loads(
-            (Path(sim._output_dir) / "palace_index_map.json").read_text()
+            (Path(sim._output_dir) / "metadata" / "palace_index_map.json").read_text()
         )
         source_rows = [
             row

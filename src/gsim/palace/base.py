@@ -1,7 +1,17 @@
-"""Base mixin for Palace simulation classes.
+"""Shared runtime API for Palace simulation classes.
 
-Provides common methods shared across all simulation types:
-DrivenSim, EigenmodeSim, ElectrostaticSim.
+This module provides the common simulation lifecycle used by
+``DrivenSim``, ``EigenmodeSim``, ``ElectrostaticSim``, and
+``MagnetostaticSim``: geometry assignment, output management, mesh/config
+generation, cloud submission, local Palace execution, and handoff-package
+generation.
+
+The base model does not own problem-specific physics settings, report
+composition, local process command details, or notebook display. Subclasses
+define the problem configuration, ``gsim.palace.run`` owns concrete execution
+implementations, ``gsim.palace.resolve`` parses generated artifacts into typed
+result data for review/report workflows, and typed report objects expose
+notebook display helpers.
 """
 
 from __future__ import annotations
@@ -10,11 +20,13 @@ import json
 import logging
 import math
 import tempfile
-import time
-from datetime import UTC, datetime
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+
+from gsim.common import Geometry, LayerStack
 from gsim.palace.models import (
     CPWPortConfig,
     DrivenConfig,
@@ -27,69 +39,67 @@ from gsim.palace.models import (
     WavePortConfig,
 )
 from gsim.palace.models.results import SimulationResult, ValidationResult
+from gsim.palace.run.handoff import generate_palace_handoff_package
+from gsim.palace.run.local import run_palace_local
+from gsim.palace.run_folder import palace_run_folder, prepare_palace_run_folder
+from gsim.palace.run_stage import PalaceRunHandle
 
 if TYPE_CHECKING:
     from gdsfactory.component import Component
 
-    from gsim.common import Geometry, LayerStack
+    from gsim.palace.handoff import (
+        PalaceSlurmHandoffResult,
+        PalaceSlurmProfileResolution,
+    )
     from gsim.palace.mesh.postprocessing import PostprocessingConfig
-    from gsim.palace.results import SParams
+    from gsim.palace.results.driven import SParams
+    from gsim.palace.run_folder import PalaceRunFolder
 
 logger = logging.getLogger(__name__)
 
 
-def _relative_to_output_dir(path: Path, output_dir: Path) -> str:
-    try:
-        return path.relative_to(output_dir).as_posix()
-    except ValueError:
-        return path.as_posix()
+class PalaceSimBase(BaseModel):
+    """Pydantic base model for all Palace simulation classes.
 
-
-def _redact_local_palace_command(
-    cmd: list[str],
-    *,
-    use_apptainer: bool,
-) -> list[str]:
-    redacted: list[str] = []
-    for index, part in enumerate(cmd):
-        if index == 0 or (use_apptainer and index == 2):
-            redacted.append(Path(part).name)
-        else:
-            redacted.append(part)
-    return redacted
-
-
-class PalaceSimMixin:
-    """Mixin providing common methods for all Palace simulation classes.
-
-    Subclasses must define these attributes (typically via Pydantic fields):
-        - geometry: Geometry | None
-        - stack: LayerStack | None
-        - materials: dict[str, MaterialConfig]
-        - numerical: NumericalConfig
-        - _output_dir: Path | None (private)
-        - _stack_kwargs: dict[str, Any] (private)
+    This base owns the common simulation lifecycle and shared Pydantic state.
+    Problem-specific subclasses add solver configuration and selection fields
+    such as ports, terminals, or current sources.
     """
 
-    # Type hints for required attributes (implemented by subclasses)
-    geometry: Geometry | None
-    stack: LayerStack | None
-    materials: dict[str, MaterialConfig]
-    numerical: NumericalConfig
-    driven: DrivenConfig
-    eigenmode: EigenmodeConfig
-    ports: list[PortConfig]
-    cpw_ports: list[CPWPortConfig]
-    wave_ports: list[WavePortConfig]
-    terminals: list[TerminalConfig]
-    simulation_type: Literal["driven", "eigenmode", "electrostatic", "magnetostatic"]
-    _output_dir: Path | None
-    _stack_kwargs: dict[str, Any]
-    _pec_blocks: list
-    _hints: dict[str, Any]
-    _last_postprocessing_config: PostprocessingConfig | None
-    absorbing_boundary: bool
-    _airbox_config: dict[str, float]
+    model_config = ConfigDict(
+        validate_assignment=True,
+        arbitrary_types_allowed=True,
+    )
+
+    geometry: Geometry | None = None
+    stack: LayerStack | None = None
+    materials: dict[str, MaterialConfig] = Field(default_factory=dict)
+    numerical: NumericalConfig = Field(default_factory=NumericalConfig)
+
+    _output_dir: Path | None = PrivateAttr(default=None)
+    _stack_kwargs: dict[str, Any] = PrivateAttr(default_factory=dict)
+    _airbox_config: dict[str, float] = PrivateAttr(default_factory=dict)
+    _pec_blocks: list = PrivateAttr(default_factory=list)
+    _hints: dict[str, Any] = PrivateAttr(default_factory=dict)
+    _last_mesh_result: Any = PrivateAttr(default=None)
+    _last_ports: list = PrivateAttr(default_factory=list)
+    _last_postprocessing_config: Any = PrivateAttr(default=None)
+    _job_id: str | None = PrivateAttr(default=None)
+
+    if TYPE_CHECKING:
+        # Subclasses provide these problem-specific fields. Keeping these
+        # annotations inside TYPE_CHECKING gives shared methods useful types
+        # without making Pydantic treat them as base-model fields.
+        driven: DrivenConfig
+        eigenmode: EigenmodeConfig
+        ports: list[PortConfig]
+        cpw_ports: list[CPWPortConfig]
+        wave_ports: list[WavePortConfig]
+        terminals: list[TerminalConfig]
+        simulation_type: Literal[
+            "driven", "eigenmode", "electrostatic", "magnetostatic"
+        ]
+        absorbing_boundary: bool
 
     # -------------------------------------------------------------------------
     # Output directory
@@ -1044,9 +1054,10 @@ class PalaceSimMixin:
         return SimulationResult(
             mesh_path=mesh_result.mesh_path,
             output_dir=output_dir,
-            config_path=mesh_result.config_path,
-            port_info=mesh_result.port_info,
-            mesh_stats=mesh_result.mesh_stats,
+            config_path=getattr(mesh_result, "config_path", None),
+            manifest=getattr(mesh_result, "manifest", None),
+            port_info=getattr(mesh_result, "port_info", []),
+            mesh_stats=getattr(mesh_result, "mesh_stats", {}),
         )
 
     def _get_ports_for_preview(self, stack: LayerStack) -> list:
@@ -1413,6 +1424,7 @@ class PalaceSimMixin:
         write_artifacts: bool = True,
         material_overlay: Any | None = None,
         hints: dict[str, Any] | None = None,
+        prepare_run_folder: bool = True,
     ) -> Path:
         """Write Palace config.json after mesh generation.
 
@@ -1431,12 +1443,14 @@ class PalaceSimMixin:
             reuse_postprocessing: Reuse the last provided postprocessing config
                 when ``postprocessing`` is omitted. This keeps upload/run paths
                 from silently dropping a previously configured index map.
-            write_artifacts: Write ``mesh_manifest.json`` and, when
-                postprocessing is active, ``palace_index_map.json``.
+            write_artifacts: Write ``metadata/mesh_manifest.json`` and, when
+                postprocessing is active, ``metadata/palace_index_map.json``.
             material_overlay: Optional PDK material overlay path, raw overlay
                 mapping, or loaded overlay mapping used to resolve Palace
                 material values without mutating the source layer stack.
             hints: Optional Palace config fragments merged into ``config.json``.
+            prepare_run_folder: Create the canonical Palace run-folder skeleton
+                before writing config and sidecars.
 
         Returns:
             Path to the generated config.json
@@ -1512,12 +1526,19 @@ class PalaceSimMixin:
                 postprocessing_config=domain_postprocessing_config,
                 boundary_postprocessing_config=boundary_postprocessing_config,
                 material_overlay=material_overlay,
+                prepare_run_folder=prepare_run_folder,
+            )
+            run_folder = (
+                prepare_palace_run_folder(config_path.parent)
+                if prepare_run_folder
+                else palace_run_folder(config_path.parent)
             )
 
             if write_artifacts:
                 self._last_mesh_result.manifest.write_json(
-                    config_path.parent / "mesh_manifest.json"
+                    run_folder.mesh_manifest_path
                 )
+                self._write_geometry_snapshot(run_folder)
                 index_map_entries = []
                 if postprocessing is not None:
                     index_map_entries.extend(postprocessing.index_map.entries)
@@ -1553,7 +1574,7 @@ class PalaceSimMixin:
 
                 if index_map_entries:
                     PostprocessingIndexMap(entries=tuple(index_map_entries)).write_json(
-                        config_path.parent / "palace_index_map.json"
+                        run_folder.index_map_path
                     )
 
             # Validate mesh and config unless this is a photonic workflow.
@@ -1566,11 +1587,33 @@ class PalaceSimMixin:
         finally:
             self._hints = previous_hints
 
+    def _write_geometry_snapshot(self, run_folder: PalaceRunFolder) -> Path | None:
+        """Write an optional run-local GDS snapshot for review provenance."""
+        component = self.geometry.component if self.geometry is not None else None
+        if component is None:
+            return None
+        write_gds = getattr(component, "write_gds", None)
+        if write_gds is None:
+            return None
+        try:
+            run_folder.geometry_dir.mkdir(parents=True, exist_ok=True)
+            write_gds(run_folder.design_gds_path)
+        except TypeError:
+            try:
+                write_gds(str(run_folder.design_gds_path))
+            except Exception as exc:
+                logger.warning("Could not write geometry snapshot: %s", exc)
+                return None
+        except Exception as exc:
+            logger.warning("Could not write geometry snapshot: %s", exc)
+            return None
+        return run_folder.design_gds_path
+
     # -------------------------------------------------------------------------
     # Cloud: fine-grained control
     # -------------------------------------------------------------------------
 
-    def _prepare_upload_dir(self) -> Path:
+    def _prepare_upload_dir(self, *, prepare_run_folder: bool = True) -> Path:
         """Prepare a temp directory with all config/mesh files for upload.
 
         Ensures ``_output_dir`` is set, ``config.json`` exists, and copies
@@ -1585,7 +1628,7 @@ class PalaceSimMixin:
             raise ValueError("Output directory not set. Call set_output_dir() first.")
 
         # Always (re)generate config.json to reflect current driven settings
-        self.write_config()
+        self.write_config(prepare_run_folder=prepare_run_folder)
 
         # Copy input files to a temp dir so we don't destroy the user's directory
         tmp = Path(tempfile.mkdtemp(prefix="palace_"))
@@ -1597,7 +1640,12 @@ class PalaceSimMixin:
                 shutil.copy2(item, dest)
         return tmp
 
-    def upload(self, *, verbose: bool = True) -> str:
+    def upload(
+        self,
+        *,
+        verbose: bool = True,
+        prepare_run_folder: bool = True,
+    ) -> str:
         """Prepare config, upload to the cloud. Does NOT start execution.
 
         Requires :meth:`set_output_dir` and :meth:`mesh` to have been
@@ -1605,6 +1653,8 @@ class PalaceSimMixin:
 
         Args:
             verbose: Print progress messages.
+            prepare_run_folder: Create the canonical Palace run-folder skeleton
+                before staging files for cloud upload.
 
         Returns:
             ``job_id`` string for use with :meth:`start`, :meth:`get_status`,
@@ -1612,7 +1662,7 @@ class PalaceSimMixin:
         """
         from gsim import gcloud
 
-        tmp = self._prepare_upload_dir()
+        tmp = self._prepare_upload_dir(prepare_run_folder=prepare_run_folder)
         try:
             self._job_id = gcloud.upload(tmp, "palace", verbose=verbose)
         except Exception:
@@ -1680,12 +1730,137 @@ class PalaceSimMixin:
     # Simulation
     # -------------------------------------------------------------------------
 
+    def write_slurm_sbatch_handoff(
+        self,
+        profile: PalaceSlurmProfileResolution,
+        *,
+        job_name: str,
+        script_path: str | Path = "run_palace.sbatch",
+        metadata: Mapping[str, Any] | None = None,
+        validate_inputs: bool = True,
+        **sbatch_kwargs: Any,
+    ) -> PalaceSlurmHandoffResult:
+        """Write a Slurm handoff script from a resolved Slurm profile.
+
+        This is the simulation-method wrapper for the lower-level handoff
+        renderer. It keeps notebooks on the explicit ``sim`` pipeline while
+        leaving Slurm schema validation and rendering in
+        ``gsim.palace.handoff``.
+        """
+        if self._output_dir is None:
+            raise ValueError("Output directory not set. Call set_output_dir() first.")
+
+        from gsim.palace.handoff import write_palace_slurm_sbatch_handoff
+
+        return write_palace_slurm_sbatch_handoff(
+            self._output_dir,
+            profile.to_sbatch_spec(job_name=job_name, **sbatch_kwargs),
+            script_path=script_path,
+            profile=profile.profile,
+            metadata=metadata,
+            validate_inputs=validate_inputs,
+        )
+
+    def generate_handoff_package(
+        self,
+        *,
+        include_hashes: bool = False,
+        include_results: bool = False,
+        write_config: bool = True,
+        validate_mesh: bool = True,
+        photonic: bool = False,
+        postprocessing: PostprocessingConfig | None = None,
+        reuse_postprocessing: bool = True,
+        write_artifacts: bool = True,
+        material_overlay: Any | None = None,
+        hints: dict[str, Any] | None = None,
+        status: str = "packaged",
+        launcher: Mapping[str, Any] | None = None,
+        script_path: str | Path | None = None,
+        profile: Any | None = None,
+        resources: Mapping[str, Any] | None = None,
+        command: Mapping[str, Any] | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        archive_path: str | Path | None = None,
+    ) -> PalaceRunHandle:
+        """Generate a Palace handoff package and return a run-stage handle.
+
+        The package includes a fresh ``config.json`` by default, canonical
+        run-folder directories, ``metadata/palace_handoff_metadata.json``,
+        ``metadata/palace_handoff_archive_manifest.json``, and a tar.gz archive
+        rooted at the run-folder name. It does not run Palace or submit a job.
+        It also does not load typed reports; callers enter the Resolve stage
+        explicitly with ``resolve_palace_result(handle.run_folder, ...)``.
+
+        Args:
+            include_hashes: Include SHA-256 checksums for present artifacts.
+            include_results: Include solver result files in the archive
+                manifest when they already exist.
+            write_config: Write ``config.json`` before packaging. This is on by
+                default so the handoff package reflects current simulation
+                settings.
+            validate_mesh: Forwarded to :meth:`write_config`.
+            photonic: Forwarded to :meth:`write_config`.
+            postprocessing: Optional Palace postprocessing config forwarded to
+                :meth:`write_config`.
+            reuse_postprocessing: Forwarded to :meth:`write_config`.
+            write_artifacts: Forwarded to :meth:`write_config`.
+            material_overlay: Forwarded to :meth:`write_config`.
+            hints: Forwarded to :meth:`write_config`.
+            status: Handoff metadata status string.
+            launcher: Optional launcher metadata.
+            script_path: Optional batch-script path included in the handoff
+                package.
+            profile: Optional resolved site/profile metadata.
+            resources: Optional resource request metadata.
+            command: Optional command metadata. When omitted, a minimal Palace
+                config/mesh command shape is recorded.
+            metadata: Additional JSON-friendly handoff metadata.
+            archive_path: Optional target archive path recorded in metadata.
+
+        Returns:
+            :class:`gsim.palace.run_stage.PalaceRunHandle` describing the
+            packaged run folder and generated handoff artifacts.
+
+        Raises:
+            ValueError: If ``set_output_dir()`` has not been called.
+        """
+        if self._output_dir is None:
+            raise ValueError("Output directory not set. Call set_output_dir() first.")
+
+        if write_config:
+            self.write_config(
+                validate_mesh=validate_mesh,
+                photonic=photonic,
+                postprocessing=postprocessing,
+                reuse_postprocessing=reuse_postprocessing,
+                write_artifacts=write_artifacts,
+                material_overlay=material_overlay,
+                hints=hints,
+                prepare_run_folder=True,
+            )
+        return generate_palace_handoff_package(
+            self._output_dir,
+            simulation_type=self.simulation_type,
+            include_hashes=include_hashes,
+            include_results=include_results,
+            status=status,
+            launcher=launcher,
+            script_path=script_path,
+            profile=profile,
+            resources=resources,
+            command=command,
+            metadata=metadata,
+            archive_path=archive_path,
+        )
+
     def run(
         self,
         parent_dir: str | Path | None = None,
         *,
         verbose: Literal["quiet", "status", "full"] = "status",
         wait: bool = True,
+        prepare_run_folder: bool = True,
     ) -> SParams | dict[str, Path] | str:
         """Run simulation on GDSFactory+ cloud.
 
@@ -1699,6 +1874,8 @@ class PalaceSimMixin:
                 ``"full"`` stream solver logs.
             wait: If ``True`` (default), block until results are ready.
                 If ``False``, upload + start and return the ``job_id``.
+            prepare_run_folder: Create the canonical Palace run-folder skeleton
+                before staging files for cloud upload.
 
         Returns:
             - :class:`SParams` for :class:`DrivenSim` (driven sweeps with
@@ -1720,7 +1897,7 @@ class PalaceSimMixin:
             >>> results = eigen_sim.run()  # returns dict[str, Path]
             >>> print(results["eig.csv"])
         """
-        self.upload(verbose=False)
+        self.upload(verbose=False, prepare_run_folder=prepare_run_folder)
         self.start(verbose=verbose != "quiet")
         if not wait:
             if self._job_id is None:
@@ -1739,12 +1916,16 @@ class PalaceSimMixin:
         num_processes: int | None = None,
         num_threads: int | None = None,
         serial: bool = False,
+        setup_commands: Sequence[str] | None = None,
         verbose: bool = True,
+        prepare_run_folder: bool = True,
     ) -> SParams | dict[str, Path]:
         """Run simulation locally using Palace.
 
         Requires mesh() and write_config() to be called first.
         Supports both Apptainer and direct Palace installation.
+        Direct execution can also activate a caller-owned environment first,
+        for example a Spack environment supplied by a PDK run profile.
 
         Args:
             palace_sif_path: Path to Palace Apptainer SIF file.
@@ -1764,7 +1945,13 @@ class PalaceSimMixin:
                 or the value of OMP_NUM_THREADS in the environment
             serial: When running direct Palace, pass the Palace wrapper's
                 ``-serial`` flag so smoke tests can avoid MPI launchers.
+            setup_commands: Optional shell setup commands to run in the same
+                shell session as the local Palace command. This is intended for
+                caller-provided runtime activation such as ``spack load palace``.
+                Supported only with ``use_apptainer=False``.
             verbose: Print progress messages and stream Palace output in real time
+            prepare_run_folder: Create the canonical Palace run-folder skeleton
+                before launching Palace.
 
         Returns:
             Parsed Palace result object (``SParams``) when ``port-S.csv`` is
@@ -1793,309 +1980,33 @@ class PalaceSimMixin:
             >>> results = sim.run_local(
             ...     use_apptainer=False, palace_executable="/usr/local/bin/palace"
             ... )
+            >>>
+            >>> # Using caller-provided shell setup, for example Spack
+            >>> results = sim.run_local(
+            ...     use_apptainer=False,
+            ...     setup_commands=(
+            ...         "source /path/to/spack/share/spack/setup-env.sh",
+            ...         "spack load palace",
+            ...     ),
+            ... )
             >>> # For DrivenSim: `results` is SParams -> results.s21.db
             >>> # For eigen / electrostatic: `results` is dict[str, Path]
         """
-        import os
-        import shutil
-        import subprocess
-
         if self._output_dir is None:
             raise ValueError("Output directory not set. Call set_output_dir() first.")
-
-        output_dir = Path(self._output_dir)
-        config_path = output_dir / "config.json"
-        mesh_path = output_dir / "palace.msh"
-
-        if num_processes is None:
-            num_processes = (
-                1
-                if not use_apptainer and executable_mode == "binary"
-                else os.cpu_count() or 1
-            )
-        run_env = os.environ.copy()
-
-        # Check required files exist
-        if not config_path.exists():
-            raise FileNotFoundError(
-                f"Config file not found: {config_path}. Call write_config() first."
-            )
-
-        if not mesh_path.exists():
-            raise FileNotFoundError(
-                f"Mesh file not found: {mesh_path}. Call mesh() first."
-            )
-
-        # Determine Palace command based on use_apptainer flag
-        if use_apptainer:
-            # Determine Palace SIF path from environment variable or parameter
-            if palace_sif_path is None:
-                palace_sif_path = os.environ.get("PALACE_SIF")
-                if palace_sif_path is None:
-                    raise ValueError(
-                        "Palace SIF path not specified. Either set PALACE_SIF "
-                        "environment variable or pass palace_sif_path parameter."
-                    )
-                if verbose:
-                    logger.info(
-                        "Using PALACE_SIF from environment: %s", palace_sif_path
-                    )
-
-            sif_path = Path(palace_sif_path).expanduser().resolve()
-
-            if not sif_path.exists():
-                raise FileNotFoundError(
-                    f"Palace SIF file not found: {sif_path}. "
-                    "Install Palace via Apptainer or provide correct path."
-                )
-
-            # Check that apptainer is available
-            if shutil.which("apptainer") is None:
-                raise RuntimeError(
-                    "Apptainer not found. Install Apptainer to run local simulations "
-                    "with use_apptainer=True."
-                )
-
-            # Build Apptainer command
-            cmd = [
-                "apptainer",
-                "run",
-                str(sif_path),
-                "-np",
-                str(num_processes),
-            ]
-
-        else:
-            # Direct Palace execution
-            if palace_executable is None:
-                palace_executable = os.environ.get("PALACE_EXECUTABLE", "palace")
-                if verbose:
-                    logger.info(
-                        "Using Palace executable from environment/default: %s",
-                        palace_executable,
-                    )
-
-            exe_path = Path(palace_executable).expanduser()
-
-            # Check if executable exists
-            if not exe_path.exists():
-                # Try resolving to see if it's in PATH
-                resolved = shutil.which(str(exe_path))
-                if resolved is None:
-                    raise FileNotFoundError(
-                        f"Palace executable not found: {exe_path}. "
-                        "Install Palace directly or provide correct path via "
-                        "palace_executable parameter."
-                    )
-                exe_path = Path(resolved)
-
-            if executable_mode == "binary":
-                if num_processes != 1:
-                    raise ValueError(
-                        "executable_mode='binary' runs a single-process Palace "
-                        "binary; use executable_mode='wrapper' for -np support."
-                    )
-                if num_threads is not None:
-                    run_env["OMP_NUM_THREADS"] = str(num_threads)
-                cmd = [str(exe_path)]
-            else:
-                cmd = [str(exe_path)]
-                if serial:
-                    cmd.append("-serial")
-                cmd.extend(["-np", str(num_processes)])
-
-        if num_threads is not None and not (
-            not use_apptainer and executable_mode == "binary"
-        ):
-            cmd.extend(["-nt", str(num_threads)])
-        cmd.extend(["config.json"])
-
-        def _emit_info(msg: str, *args: object) -> None:
-            if logger.isEnabledFor(logging.INFO):
-                logger.info(msg, *args)
-            else:
-                logger.warning(msg, *args)
-
-        def _emit_warning(msg: str, *args: object) -> None:
-            logger.warning(msg, *args)
-
-        if verbose:
-            if use_apptainer:
-                _emit_info("Running Palace simulation in %s via Apptainer", output_dir)
-            else:
-                _emit_info("Running Palace simulation in %s directly", output_dir)
-            _emit_info("Command: %s", " ".join(cmd))
-            _emit_info("Processes: %d", num_processes)
-
-        # Run simulation
-        started = time.perf_counter()
-        returncode: int | None = None
-        try:
-            if verbose:
-                streamed_lines: list[str] = []
-                with subprocess.Popen(  # noqa: S603
-                    cmd,
-                    cwd=output_dir,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                    env=run_env,
-                ) as process:
-                    if process.stdout is not None:
-                        for line in process.stdout:
-                            line = line.rstrip("\n")
-                            streamed_lines.append(line)
-                            if line:
-                                _emit_info(line)
-                    returncode = process.wait()
-
-                if returncode != 0:
-                    tail = "\n".join(streamed_lines[-200:])
-                    error_msg = (
-                        f"Palace simulation failed with return code {returncode}"
-                    )
-                    if tail:
-                        error_msg += f"\n\nOutput (tail):\n{tail}"
-                    raise RuntimeError(error_msg)
-            else:
-                result = subprocess.run(  # noqa: S603
-                    cmd,
-                    cwd=output_dir,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    env=run_env,
-                )
-                returncode = result.returncode
-                if result.stdout:
-                    logger.debug(result.stdout)
-                if result.stderr:
-                    _emit_warning(result.stderr)
-        except FileNotFoundError as e:
-            if use_apptainer:
-                raise RuntimeError(
-                    "Apptainer not found. Install Apptainer to run local simulations "
-                    "with use_apptainer=True."
-                ) from e
-            raise RuntimeError(
-                "Palace executable not found. Install Palace directly or provide "
-                "correct path via palace_executable parameter, "
-                "or set PALACE_EXECUTABLE environment variable."
-            ) from e
-
-        if verbose:
-            _emit_info("Simulation completed successfully")
-
-        postpro_dir = output_dir / "output/palace/"
-
-        if verbose:
-            _emit_info("Results saved to %s", postpro_dir)
-
-        files = {
-            file.name: file
-            for file in postpro_dir.iterdir()
-            if file.is_file() and not file.name.startswith(".")
-        }
-        self._write_local_run_metadata(
-            output_dir=output_dir,
-            postpro_dir=postpro_dir,
-            cmd=cmd,
-            elapsed_seconds=time.perf_counter() - started,
-            returncode=0 if returncode is None else returncode,
+        return run_palace_local(
+            self._output_dir,
+            palace_sif_path=palace_sif_path,
+            palace_executable=palace_executable,
             use_apptainer=use_apptainer,
             executable_mode=executable_mode,
-            executable_path=None if use_apptainer else exe_path,
-            sif_path=sif_path if use_apptainer else None,
             num_processes=num_processes,
             num_threads=num_threads,
             serial=serial,
-            omp_num_threads=run_env.get("OMP_NUM_THREADS"),
-            files=files,
+            setup_commands=setup_commands,
+            verbose=verbose,
+            prepare_run_folder=prepare_run_folder,
         )
-
-        # Match cloud run() behavior for Palace: return parsed SParams when
-        # possible, else fall back to raw files dict.
-        from gsim.palace.results import load_sparams
-
-        try:
-            return load_sparams(files)
-        except FileNotFoundError:
-            return files
-
-    def _write_local_run_metadata(
-        self,
-        *,
-        output_dir: Path,
-        postpro_dir: Path,
-        cmd: list[str],
-        elapsed_seconds: float,
-        returncode: int,
-        use_apptainer: bool,
-        executable_mode: Literal["wrapper", "binary"],
-        executable_path: Path | None,
-        sif_path: Path | None,
-        num_processes: int,
-        num_threads: int | None,
-        serial: bool,
-        omp_num_threads: str | None,
-        files: dict[str, Path],
-    ) -> Path:
-        launcher: dict[str, Any]
-        if use_apptainer:
-            launcher = {
-                "kind": "apptainer",
-                "palace_sif_configured": sif_path is not None,
-                "palace_sif_name": None if sif_path is None else sif_path.name,
-            }
-        else:
-            launcher = {
-                "kind": "executable",
-                "executable_mode": executable_mode,
-                "serial": serial,
-                "palace_executable_configured": executable_path is not None,
-                "palace_executable_name": (
-                    None if executable_path is None else executable_path.name
-                ),
-            }
-
-        metadata = {
-            "schema_version": 1,
-            "created_at_utc": datetime.now(UTC).isoformat(timespec="seconds"),
-            "status": "completed",
-            "return_code": returncode,
-            "elapsed_seconds": elapsed_seconds,
-            "launcher": launcher,
-            "resources": {
-                "num_processes": num_processes,
-                "num_threads": num_threads,
-                "omp_num_threads": omp_num_threads,
-            },
-            "command": {
-                "argv": _redact_local_palace_command(
-                    cmd,
-                    use_apptainer=use_apptainer,
-                )
-            },
-            "paths": {
-                "config": "config.json",
-                "mesh": "palace.msh",
-                "postprocessing_output": _relative_to_output_dir(
-                    postpro_dir,
-                    output_dir,
-                ),
-            },
-            "outputs": {
-                name: {
-                    "path": _relative_to_output_dir(path, output_dir),
-                    "bytes": int(path.stat().st_size),
-                }
-                for name, path in sorted(files.items())
-            },
-        }
-        metadata_path = output_dir / "palace_run_metadata.json"
-        metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
-        return metadata_path
 
     # -------------------------------------------------------------------------
     # Port methods

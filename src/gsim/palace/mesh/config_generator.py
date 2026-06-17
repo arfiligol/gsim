@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 import gmsh
 
+from gsim.palace.run_folder import palace_run_folder, prepare_palace_run_folder
 from gsim.palace.ports.config import PortType
 
 if TYPE_CHECKING:
@@ -58,6 +59,7 @@ def generate_palace_config(
     postprocessing_config: dict[str, Any] | None = None,
     boundary_postprocessing_config: dict[str, Any] | None = None,
     material_overlay: Any | None = None,
+    prepare_run_folder: bool = True,
 ) -> Path:
     """Generate Palace config.json file.
 
@@ -84,11 +86,19 @@ def generate_palace_config(
         material_overlay: Optional PDK material overlay path, raw overlay
             mapping, or loaded overlay mapping used to resolve Palace material
             values without mutating the source layer stack.
+        prepare_run_folder: Create the canonical Palace run-folder skeleton
+            before writing config and sidecars.
 
     Returns:
         Path to the generated config.json
     """
     from gsim.palace.ports.config import PortGeometry
+
+    run_folder = (
+        prepare_palace_run_folder(output_path)
+        if prepare_run_folder
+        else palace_run_folder(output_path)
+    )
 
     if simulation_type not in (
         "driven",
@@ -166,7 +176,7 @@ def generate_palace_config(
         "Problem": {
             "Type": simulation_type.capitalize(),
             "Verbose": 3,
-            "Output": f"output/{model_name}",
+            "Output": "results/palace",
         },
         "Model": {
             "Mesh": f"{model_name}.msh",
@@ -613,12 +623,13 @@ def generate_palace_config(
         _deep_merge_config(config, hints)
 
     # Write config file
-    config_path = output_path / "config.json"
+    config_path = run_folder.config_path
     with config_path.open("w") as f:
         json.dump(config, f, indent=4)
 
     if material_resolution_rows or interface_resolution_rows:
-        material_resolution_path = output_path / "palace_material_resolution.json"
+        material_resolution_path = run_folder.material_resolution_path
+        material_resolution_path.parent.mkdir(parents=True, exist_ok=True)
         with material_resolution_path.open("w") as f:
             json.dump(
                 {
@@ -631,7 +642,8 @@ def generate_palace_config(
             )
 
     # Write port information file
-    port_info_path = output_path / "port_information.json"
+    port_info_path = run_folder.port_information_path
+    port_info_path.parent.mkdir(parents=True, exist_ok=True)
     port_info_struct = {"ports": port_info, "unit": 1e-6, "name": model_name}
     with port_info_path.open("w") as f:
         json.dump(port_info_struct, f, indent=4)
@@ -1097,6 +1109,7 @@ def write_config(
     postprocessing_config: dict[str, Any] | None = None,
     boundary_postprocessing_config: dict[str, Any] | None = None,
     material_overlay: Any | None = None,
+    prepare_run_folder: bool = True,
 ) -> Path:
     """Write Palace config.json from a MeshResult.
 
@@ -1120,6 +1133,8 @@ def write_config(
         material_overlay: Optional PDK material overlay path, raw overlay
             mapping, or loaded overlay mapping used to resolve Palace material
             values without mutating the source layer stack.
+        prepare_run_folder: Create the canonical Palace run-folder skeleton
+            before writing config and sidecars.
 
     Returns:
         Path to the generated config.json
@@ -1158,6 +1173,7 @@ def write_config(
         postprocessing_config=postprocessing_config,
         boundary_postprocessing_config=boundary_postprocessing_config,
         material_overlay=material_overlay,
+        prepare_run_folder=prepare_run_folder,
     )
 
     # Update the mesh_result with the config path
