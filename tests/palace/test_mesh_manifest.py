@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,6 +18,7 @@ from gsim.palace.mesh.postprocessing import (
     build_dielectric_interface_specs_from_assignments,
     build_dielectric_interface_specs_from_material_kinds,
     build_postprocessing_config_from_manifest,
+    build_surface_epr_dielectric_specs,
     build_terminal_index_map_from_manifest,
 )
 from gsim.palace.models import PalacePort, TerminalConfig
@@ -1014,6 +1016,69 @@ def test_interface_assignment_specs_reject_exterior() -> None:
             },
             assignments={"metal___None": "public_sa"},
         )
+
+
+def test_surface_epr_specs_group_split_surfaces_by_source() -> None:
+    surfaces = (
+        SimpleNamespace(
+            interface_type="MS",
+            face_kind="bottom",
+            source_id="shell0",
+            metal_body_id=None,
+            physical_group_name="shell0__MS__BOTTOM__TOTAL",
+            interface_id="shell0-total",
+            band_min_um=0.0,
+            band_max_um=None,
+        ),
+        SimpleNamespace(
+            interface_type="MS",
+            face_kind="bottom",
+            source_id="shell0",
+            metal_body_id=None,
+            physical_group_name="shell0__MS__BOTTOM__BAND_0_50NM",
+            interface_id="shell0-band",
+            band_min_um=0.0,
+            band_max_um=0.05,
+        ),
+        SimpleNamespace(
+            interface_type="MS",
+            face_kind="bottom",
+            source_id="shell0",
+            metal_body_id=None,
+            physical_group_name="shell0__MS__BOTTOM__CORE_AFTER_50NM",
+            interface_id="shell0-core",
+            band_min_um=0.05,
+            band_max_um=None,
+        ),
+    )
+
+    specs = build_surface_epr_dielectric_specs(
+        surfaces,
+        preset_name="martinis2022_ms",
+        preset={
+            "interface_type": "MS",
+            "thickness": 0.002,
+            "permittivity": 9.8,
+            "loss_tangent": 0.005,
+            "source": "paper",
+        },
+        face_kind="bottom",
+    )
+
+    assert [spec.entry_name for spec in specs] == [
+        "shell0__MS__BOTTOM__TOTAL",
+        "shell0__MS__BOTTOM__BAND_0_50NM",
+        "shell0__MS__BOTTOM__CORE_AFTER_50NM",
+    ]
+    assert specs[0].entry_names == (
+        "shell0__MS__BOTTOM__BAND_0_50NM",
+        "shell0__MS__BOTTOM__CORE_AFTER_50NM",
+    )
+    assert [spec.metadata["surface_epr_summary_kind"] for spec in specs] == [
+        "total",
+        "band",
+        "core",
+    ]
 
 
 def test_interface_assignment_specs_allow_explicit_non_interface() -> None:

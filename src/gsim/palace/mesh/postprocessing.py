@@ -1,11 +1,17 @@
-"""Typed Palace postprocessing builders derived from mesh roles."""
+"""Typed Palace postprocessing builders derived from mesh roles.
+
+Responsibility:
+Owns Palace postprocessing specs, config fragments, and index-map rows derived
+from mesh manifests or interface catalogs. It does not discover geometry,
+assign Gmsh physical groups, parse Palace result CSVs, or render reports.
+"""
 
 from __future__ import annotations
 
 import json
 import math
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -376,6 +382,94 @@ def _drop_empty_postprocessing_sections(
 ) -> dict[str, list[dict[str, Any]]]:
     """Return only non-empty Palace postprocessing sections."""
     return {name: entries for name, entries in sections.items() if entries}
+
+
+def build_surface_epr_dielectric_specs(
+    surfaces: Iterable[Any],
+    *,
+    preset_name: str,
+    preset: Mapping[str, Any],
+    face_kind: str | None = None,
+    role: MeshRole | str = "conductor_surface",
+) -> tuple[DielectricInterfaceSpec, ...]:
+    """Build total and split Surface EPR dielectric specs from catalog surfaces."""
+    base_spec = _dielectric_interface_spec_from_preset(
+        preset_name=preset_name,
+        preset=preset,
+        role=role,
+        entry_name="",
+    )
+    selected_surfaces = tuple(
+        surface
+        for surface in surfaces
+        if getattr(surface, "interface_type", None) == base_spec.interface_type
+        and (face_kind is None or getattr(surface, "face_kind", None) == face_kind)
+    )
+    split_surfaces = tuple(
+        surface for surface in selected_surfaces if not _surface_epr_is_total(surface)
+    )
+    if not split_surfaces:
+        suffix = "" if face_kind is None else f" {face_kind}"
+        raise ValueError(
+            f"No generated {base_spec.interface_type}{suffix} Surface EPR groups found."
+        )
+
+    source_ids = tuple(
+        dict.fromkeys(
+            source_id
+            for surface in split_surfaces
+            if (source_id := _surface_epr_source_id(surface)) is not None
+        )
+    )
+    total_specs = tuple(
+        replace(
+            base_spec,
+            entry_names=tuple(
+                _surface_epr_entry_name(surface)
+                for surface in split_surfaces
+                if _surface_epr_source_id(surface) == source_id
+            ),
+            combine_entries=True,
+            entry_name=next(
+                (
+                    _surface_epr_entry_name(surface)
+                    for surface in selected_surfaces
+                    if _surface_epr_source_id(surface) == source_id
+                    and _surface_epr_is_total(surface)
+                ),
+                _surface_epr_total_name(
+                    source_id=source_id,
+                    interface_type=base_spec.interface_type,
+                    face_kind=face_kind,
+                ),
+            ),
+            metadata={
+                "loss_channel": base_spec.interface_type,
+                "surface_epr_summary_kind": "total",
+                "surface_epr_exclude_below_um": 0.0,
+            },
+        )
+        for source_id in source_ids
+    )
+    split_specs = tuple(
+        replace(
+            base_spec,
+            entry_names=(_surface_epr_entry_name(surface),),
+            combine_entries=True,
+            entry_name=_surface_epr_entry_name(surface),
+            metadata={
+                "loss_channel": base_spec.interface_type,
+                "surface_epr_summary_kind": "core"
+                if getattr(surface, "band_max_um", None) is None
+                else "band",
+                "surface_epr_exclude_below_um": float(
+                    getattr(surface, "band_min_um", 0.0)
+                ),
+            },
+        )
+        for surface in split_surfaces
+    )
+    return total_specs + split_specs
 
 
 def build_dielectric_interface_specs_from_assignments(
@@ -918,6 +1012,37 @@ def _combined_attributes(entries: tuple[MeshPhysicalGroup, ...]) -> tuple[int, .
     return tuple(dict.fromkeys(attributes))
 
 
+def _surface_epr_entry_name(surface: Any) -> str:
+    return str(getattr(surface, "physical_group_name", None) or surface.interface_id)
+
+
+def _surface_epr_is_total(surface: Any) -> bool:
+    return (
+        float(getattr(surface, "band_min_um", 0.0)) == 0.0
+        and getattr(surface, "band_max_um", None) is None
+    )
+
+
+def _surface_epr_source_id(surface: Any) -> str | None:
+    source_id = getattr(surface, "source_id", None) or getattr(
+        surface,
+        "metal_body_id",
+        None,
+    )
+    return source_id if isinstance(source_id, str) and source_id else None
+
+
+def _surface_epr_total_name(
+    *,
+    source_id: str,
+    interface_type: str,
+    face_kind: str | None,
+) -> str:
+    if face_kind is None:
+        return f"{source_id}__{interface_type}__TOTAL"
+    return f"{source_id}__{interface_type}__{face_kind.upper()}__TOTAL"
+
+
 def _combined_index_entry(
     *,
     section: str,
@@ -1024,5 +1149,6 @@ __all__ = [
     "build_dielectric_interface_specs_from_material_kinds",
     "build_postprocessing_config_from_manifest",
     "build_surface_current_index_map_from_manifest",
+    "build_surface_epr_dielectric_specs",
     "build_terminal_index_map_from_manifest",
 ]
