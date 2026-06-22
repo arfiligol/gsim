@@ -6,7 +6,6 @@ by Palace typed data:
 - table-like objects, which are passed through without interpretation;
 - trace plots, for one or more x/y series;
 - trace subplot grids, for related trace groups such as magnitude and phase;
-- color maps, for matrix-like data.
 
 The helpers deliberately do not know about Driven, Eigenmode, Electrostatic,
 loss budgets, handoff packages, or report presets. Domain-specific choices
@@ -16,8 +15,7 @@ belong to typed data objects and problem reports.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
-from typing import Any, Protocol, cast
+from typing import Any, Protocol, TypeGuard, cast
 
 type DisplayValue = object
 type VisualizationMap = Mapping[str, DisplayValue]
@@ -48,15 +46,6 @@ class PlotlyFigure(Protocol):
     def write_html(self, *args: Any, **kwargs: Any) -> Any:
         """Write the figure to HTML using Plotly's runtime implementation."""
         ...
-
-
-@dataclass(frozen=True, kw_only=True)
-class DisplayItem:
-    """One named table, figure, or metric produced by a typed data visualizer."""
-
-    name: str
-    value: DisplayValue
-    kind: str = "figure"
 
 
 class VisualizationProvider(Protocol):
@@ -160,67 +149,84 @@ def make_trace_subplot_figure(
         vertical_spacing=vertical_spacing,
         subplot_titles=tuple(str(panel.get("title", "")) for panel in panels),
     )
+    shared_x_title: str | None = None
     for row, panel in enumerate(panels, start=1):
         for trace in panel.get("traces", ()):
             payload = dict(trace)
             payload.setdefault("mode", "lines")
             fig.add_scatter(**payload, row=row, col=1)
         if panel.get("x_title") is not None:
-            fig.update_xaxes(title_text=str(panel["x_title"]), row=row, col=1)
+            if shared_xaxes:
+                shared_x_title = str(panel["x_title"])
+            else:
+                fig.update_xaxes(title_text=str(panel["x_title"]), row=row, col=1)
         if panel.get("y_title") is not None:
             fig.update_yaxes(title_text=str(panel["y_title"]), row=row, col=1)
-    fig.update_layout(title=title)
+    if shared_x_title is not None:
+        fig.update_xaxes(title_text=shared_x_title, row=len(panels), col=1)
+    fig.update_layout(title=title, height=max(450, 300 * len(panels)))
     return cast("PlotlyFigure", fig)
 
 
-def make_heatmap_figure(
-    z: DisplayValue,
+def display_items(
+    items: Mapping[str, DisplayValue],
     *,
-    x: Sequence[DisplayValue] | None = None,
-    y: Sequence[DisplayValue] | None = None,
-    title: str | None = None,
-    x_title: str | None = None,
-    y_title: str | None = None,
-    colorbar_title: str | None = None,
-) -> PlotlyFigure:
-    """Build a Plotly heatmap for generic matrix-like data."""
-    import plotly.graph_objects as go
+    figure_layout: Mapping[str, Any] | None = None,
+    plotly_config: Mapping[str, Any] | None = None,
+) -> None:
+    """Display named tables, figures, and metrics in deterministic order.
 
-    fig = go.Figure(
-        data=go.Heatmap(
-            z=z,
-            x=x,
-            y=y,
-            colorbar=None if colorbar_title is None else {"title": colorbar_title},
-        )
-    )
-    fig.update_layout(title=title)
-    if x_title is not None:
-        fig.update_xaxes(title_text=x_title)
-    if y_title is not None:
-        fig.update_yaxes(title_text=y_title)
-    return cast("PlotlyFigure", fig)
-
-
-def display_items(items: Mapping[str, DisplayValue] | Iterable[DisplayItem]) -> None:
-    """Display named tables, figures, and metrics in deterministic order."""
+    Typed Data plot builders create Plotly figures with semantic data and
+    semantic layout: traces, titles, axes, and units. This display helper may
+    apply cosmetic Plotly layout such as template, height, margins, or fonts.
+    ``figure_layout`` is applied with ``fig.update_layout(...)`` and changes
+    cosmetic figure layout. ``plotly_config`` is passed to ``plotly.io.show``
+    at render time for options such as responsiveness and modebar controls.
+    Plotly config is not stored on the figure object; it is consumed when the
+    figure is shown.
+    """
     from IPython.display import Markdown, display
 
-    if isinstance(items, Mapping):
-        mapped_items = cast("Mapping[str, DisplayValue]", items)
-        iterable = [
-            DisplayItem(name=name, value=value) for name, value in mapped_items.items()
-        ]
-    else:
-        iterable = list(items)
+    for name, value in items.items():
+        if _is_plotly_figure(value):
+            if figure_layout is not None:
+                value.update_layout(**dict(figure_layout))
+            if plotly_config is not None:
+                import plotly.io as pio
 
-    for item in iterable:
-        display(Markdown(f"#### {item.name}"))
-        display(item.value)
+                pio.show(value, config=dict(plotly_config))
+            else:
+                display(value)
+            continue
+        display(Markdown(f"#### {name.replace('_', ' ').title()}"))
+        display(_display_value_for_name(name, value))
+
+
+def _is_plotly_figure(value: DisplayValue) -> TypeGuard[PlotlyFigure]:
+    return hasattr(value, "update_layout") and hasattr(value, "write_html")
+
+
+def _display_value_for_name(name: str, value: DisplayValue) -> DisplayValue:
+    if name not in {"domain_epr_summary_table", "surface_epr_summary_table"}:
+        return value
+
+    try:
+        import pandas as pd
+    except ImportError:
+        return value
+
+    if not isinstance(value, pd.DataFrame):
+        return value
+
+    formats = {
+        column: "{:.3e}"
+        for column in ("participation", "inverse_q", "q_equivalent", "t1_us")
+        if column in value.columns
+    }
+    return value.style.format(formats) if formats else value
 
 
 __all__ = [
-    "DisplayItem",
     "DisplayValue",
     "PlotlyFigure",
     "TraceMapping",
@@ -229,7 +235,6 @@ __all__ = [
     "collect_visualizations",
     "display_items",
     "make_bar_figure",
-    "make_heatmap_figure",
     "make_trace_figure",
     "make_trace_subplot_figure",
 ]

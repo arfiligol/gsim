@@ -31,7 +31,26 @@ from gsim.palace.results.eigenmode import Eigenmodes
 from gsim.palace.results.loss import (
     DOMAIN_LOSS_COLUMNS,
     LOSS_BUDGET_COLUMNS,
+    LOSS_CHANNEL_BUDGET_COLUMNS,
     SURFACE_LOSS_COLUMNS,
+)
+
+_SURFACE_INTERFACE_CONTEXT_KEYS = (
+    "surface_attribute",
+    "preset_name",
+    "preset_source",
+    "loss_channel",
+    "source_entry_name",
+    "surface_epr_summary_kind",
+    "surface_epr_exclude_below_um",
+    "source_aware_surface_epr_group_names",
+    "surface_epr_band_names",
+    "surface_epr_band_min_um",
+    "surface_epr_band_max_um",
+    "surface_epr_band_label",
+    "thickness",
+    "permittivity",
+    "loss_tangent",
 )
 
 
@@ -161,39 +180,22 @@ def summarize_surface_loss(
             {
                 "frequency_ghz": resolved_frequency,
                 "q_equivalent": q_from_inverse_q(inverse_q),
-                "surface_attribute": (
-                    None
-                    if interface_row is None
-                    else interface_row.get("surface_attribute")
-                ),
-                "surface_attributes": (
-                    ()
-                    if interface_row is None
-                    else interface_row.get("surface_attributes", ())
-                ),
-                "preset_name": (
-                    None if interface_row is None else interface_row.get("preset_name")
-                ),
-                "preset_source": (
-                    None
-                    if interface_row is None
-                    else interface_row.get("preset_source")
-                ),
-                "thickness": None
-                if interface_row is None
-                else interface_row.get("thickness"),
-                "permittivity": (
-                    None if interface_row is None else interface_row.get("permittivity")
-                ),
-                "loss_tangent": (
-                    None if interface_row is None else interface_row.get("loss_tangent")
-                ),
+                "surface_attributes": (),
+                **dict.fromkeys(_SURFACE_INTERFACE_CONTEXT_KEYS),
                 **rate_columns_for_frequency(
                     frequency_ghz=resolved_frequency,
                     inverse_q=inverse_q,
                 ),
             }
         )
+        if interface_row is not None:
+            row.update(
+                {
+                    key: interface_row.get(key)
+                    for key in _SURFACE_INTERFACE_CONTEXT_KEYS
+                }
+            )
+            row["surface_attributes"] = interface_row.get("surface_attributes", ())
         rows.append(row)
 
     if not rows:
@@ -211,6 +213,7 @@ def summarize_loss_budget(
     """Summarize per-mode bulk/domain and surface inverse-Q contributions."""
     import pandas as pd
 
+    surface_loss = select_primary_surface_loss_rows(surface_loss)
     if domain_loss.empty and surface_loss.empty:
         return empty_loss_budget_summary()
 
@@ -259,6 +262,60 @@ def summarize_loss_budget(
         )
 
     return ordered_dataframe(pd.DataFrame.from_records(rows), LOSS_BUDGET_COLUMNS)
+
+
+def summarize_loss_channel_budget(loss_rows: pd.DataFrame) -> pd.DataFrame:
+    """Summarize caller-tagged loss channels without inferring taxonomy."""
+    if (
+        loss_rows.empty
+        or "loss_channel" not in loss_rows
+        or "inverse_q" not in loss_rows
+    ):
+        return empty_loss_channel_budget_summary()
+
+    frame = select_primary_surface_loss_rows(loss_rows)
+    frame = frame.loc[frame["loss_channel"].notna()].copy()
+    if frame.empty:
+        return empty_loss_channel_budget_summary()
+
+    groups = tuple(
+        column
+        for column in (
+            "source_index",
+            "mode_index",
+            "sample_column",
+            "sample_value",
+            "frequency_ghz",
+            "source_entry_name",
+            "surface_epr_summary_kind",
+            "surface_epr_exclude_below_um",
+        )
+        if column in frame.columns and frame[column].notna().any()
+    )
+    sum_columns = [*groups, "loss_channel"]
+    budget = (
+        frame.groupby(sum_columns, dropna=False)["inverse_q"]
+        .sum()
+        .reset_index()
+    )
+    if groups:
+        totals = budget.groupby(list(groups), dropna=False)["inverse_q"].transform(
+            "sum"
+        )
+    else:
+        totals = budget["inverse_q"].sum()
+    budget["loss_fraction"] = budget["inverse_q"].div(totals).fillna(0.0)
+    return ordered_dataframe(budget, LOSS_CHANNEL_BUDGET_COLUMNS)
+
+
+def select_primary_surface_loss_rows(loss_rows: pd.DataFrame) -> pd.DataFrame:
+    """Keep total Surface EPR rows plus ordinary loss rows."""
+    if loss_rows.empty or "surface_epr_summary_kind" not in loss_rows.columns:
+        return loss_rows
+    kinds = loss_rows["surface_epr_summary_kind"]
+    if not kinds.eq("total").any():
+        return loss_rows
+    return loss_rows.loc[kinds.isna() | kinds.eq("total")].copy()
 
 
 def rate_columns_for_frequency(
@@ -343,6 +400,13 @@ def empty_loss_budget_summary() -> pd.DataFrame:
     import pandas as pd
 
     return pd.DataFrame(columns=LOSS_BUDGET_COLUMNS)
+
+
+def empty_loss_channel_budget_summary() -> pd.DataFrame:
+    """Return an empty loss-channel budget summary with stable columns."""
+    import pandas as pd
+
+    return pd.DataFrame(columns=LOSS_CHANNEL_BUDGET_COLUMNS)
 
 
 def matching_domain_material_row(
@@ -517,8 +581,10 @@ __all__ = [
     "DOMAIN_LOSS_COLUMNS",
     "LOSS_BUDGET_COLUMNS",
     "SURFACE_LOSS_COLUMNS",
+    "select_primary_surface_loss_rows",
     "summarize_domain_loss",
     "summarize_loss_budget",
+    "summarize_loss_channel_budget",
     "summarize_surface_loss",
     "validate_positive_frequency_ghz",
 ]

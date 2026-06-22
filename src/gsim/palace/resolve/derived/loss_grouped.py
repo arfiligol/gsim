@@ -16,6 +16,7 @@ from gsim.palace.resolve.derived.epr_math import q_from_inverse_q, sum_numeric_c
 from gsim.palace.resolve.derived.loss import (
     ordered_dataframe,
     rate_columns_for_frequency,
+    select_primary_surface_loss_rows,
     summarize_loss_budget,
 )
 from gsim.palace.results.loss import LOSS_BUDGET_COLUMNS
@@ -39,6 +40,7 @@ def summarize_grouped_loss_budget(
     """
     import pandas as pd
 
+    surface_loss = select_primary_surface_loss_rows(surface_loss)
     group_columns = _loss_group_columns(domain_loss, surface_loss)
     if group_columns:
         group_values = _loss_group_values(

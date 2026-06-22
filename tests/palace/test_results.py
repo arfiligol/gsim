@@ -28,6 +28,7 @@ from gsim.palace.resolve.assembly import (
 from gsim.palace.resolve.derived.loss import (
     summarize_domain_loss,
     summarize_loss_budget,
+    summarize_loss_channel_budget,
     summarize_surface_loss,
 )
 from gsim.palace.resolve.derived.materials import (
@@ -65,9 +66,10 @@ from gsim.palace.results import (
     EigenmodeReport,
     Eigenmodes,
     ElectrostaticReport,
+    SimulationBenchmark,
     SParams,
 )
-from gsim.palace.results.driven import get_port_map, load_sparams
+from gsim.palace.results.driven import load_sparams
 from gsim.palace.results.loss import DomainLoss, LossBudget, ReportLoss, SurfaceLoss
 
 
@@ -119,7 +121,6 @@ def test_palace_root_results_api_keeps_notebook_surface_narrow() -> None:
         "IndexedCsvColumn",
         "SParam",
         "TerminalMatrix",
-        "get_port_map",
         "load_domain_energy_summary",
         "load_eigenmode_history",
         "load_eigenmodes",
@@ -843,29 +844,6 @@ class TestSParams:
         sp.plot()
         plt.close("all")
 
-    def test_plot_interactive_runs(self, sim_dir: Path) -> None:
-        sp = load_sparams(sim_dir)
-        fig = sp.plot_interactive()
-        assert len(fig.data) == len(sp.keys())
-
-    def test_plot_interactive_labels(self, sim_dir: Path) -> None:
-        sp = load_sparams(sim_dir)
-        fig = sp.plot_interactive()
-        names = [trace.name for trace in fig.data]
-        # 3 ports -> S11, S21, S31 etc.
-        assert "S11" in names
-        assert "S21" in names
-
-    def test_plot_interactive_visibility(self, sim_dir: Path) -> None:
-        sp = load_sparams(sim_dir)
-        fig = sp.plot_interactive()
-        # First excitation column (Si1) should be visible
-        for trace in fig.data:
-            if trace.name.endswith("1"):  # S11, S21, S31
-                assert trace.visible is True
-            else:
-                assert trace.visible == "legendonly"
-
 
 class TestLoadSparamsSource:
     """Tests for source resolution (dir, subdir, dict)."""
@@ -899,18 +877,6 @@ class TestLoadSparamsSource:
         assert sp["p1", "p1"].db[0] == pytest.approx(-20.0)
 
 
-class TestGetPortMap:
-    """Tests for get_port_map."""
-
-    def test_returns_mapping(self, sim_dir: Path) -> None:
-        pm = get_port_map(sim_dir)
-        assert pm == {1: "o1", 2: "o2", 3: "o3"}
-
-    def test_legacy_numeric_fallback(self, sim_dir_no_names: Path) -> None:
-        pm = get_port_map(sim_dir_no_names)
-        assert pm == {1: "p1", 2: "p2"}
-
-
 class TestPalaceRunSummary:
     """Tests for reusable Palace run artifact summaries."""
 
@@ -941,6 +907,56 @@ class TestPalaceRunSummary:
         assert "private-node" not in serialized
         assert "private-user" not in serialized
         assert "/opt/private-palace" not in serialized
+
+    def test_estimated_peak_memory_populates_benchmark_pass_table(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        run_dir = tmp_path / "run"
+        log_path = run_dir / "logs" / "palace-public.log"
+        log_path.parent.mkdir(parents=True)
+        memory_line_1 = (
+            "Estimated peak per-node memory usage is: Min. 100.0M, "
+            "Max. 150.0M, Avg. 125.0M, Total 300.0M"
+        )
+        memory_line_2 = (
+            "Estimated peak per-node memory usage is: Min. 200.0M, "
+            "Max. 250.0M, Avg. 225.0M, Total 500.0M"
+        )
+        log_path.write_text(
+            dedent(
+                f"""
+                Running with 2 MPI processes, 3 OpenMP threads
+
+                Elapsed Time Report (s)           Min.        Max.        Avg.
+                ==============================================================
+                Total                            1.000       1.200       1.100
+                {memory_line_1}
+
+                Proceeding with solve/estimate iteration 2...
+
+                Elapsed Time Report (s)           Min.        Max.        Avg.
+                ==============================================================
+                Total                            2.000       2.400       2.200
+                {memory_line_2}
+                """
+            )
+        )
+
+        write_palace_resource_record_from_log(
+            run_dir,
+            log_path,
+            allocation={"cores": 6},
+        )
+        summary = load_palace_run_summary(run_dir)
+
+        adaptive_passes = SimulationBenchmark.from_run_summary(
+            summary
+        ).adaptive_pass_dataframe()
+        memory_gib = adaptive_passes.set_index("adaptive_pass")["peak_total_hwm_gib"]
+
+        assert memory_gib.loc[1] == pytest.approx(300 * 1024**2 / 1024**3)
+        assert memory_gib.loc[2] == pytest.approx(500 * 1024**2 / 1024**3)
 
     def test_parse_slurm_scontrol_job_extracts_sanitized_allocation(
         self,
@@ -1260,6 +1276,39 @@ class TestPalaceRunSummary:
             "metadata/palace_stage_timing.csv"
         )
         assert summary.resource["tables"]["stage_timing"]["row_count"] == 8
+
+        benchmark = SimulationBenchmark.from_run_summary(summary)
+        adaptive_passes = benchmark.adaptive_pass_dataframe().set_index("adaptive_pass")
+        assert adaptive_passes.index.tolist() == [1, 2]
+        assert adaptive_passes.loc[1, "cumulative_wall_time_seconds"] == (
+            pytest.approx(58.58)
+        )
+        assert adaptive_passes.loc[2, "cumulative_wall_time_seconds"] == (
+            pytest.approx(121.0)
+        )
+        assert adaptive_passes.loc[2, "cumulative_core_hours"] == pytest.approx(
+            121.0 * 112 / 3600
+        )
+        assert adaptive_passes.loc[1, "peak_total_hwm_gib"] == pytest.approx(10.8)
+        assert adaptive_passes.loc[2, "peak_total_hwm_gib"] == pytest.approx(20.8)
+        assert adaptive_passes.loc[1, "global_unknowns"] == 887970
+        assert adaptive_passes.loc[2, "global_unknowns"] == 10718029
+        benchmark_items = benchmark.visualize()
+        assert "simulation_benchmark_summary_table" in benchmark_items
+        assert "simulation_benchmark_table" not in benchmark_items
+        assert "simulation_benchmark_adaptive_pass_table" in benchmark_items
+        assert "simulation_benchmark_adaptive_pass_trace_plot" in benchmark_items
+        assert "simulation_benchmark_metrics_bar_plot" not in benchmark_items
+        figure = benchmark_items["simulation_benchmark_adaptive_pass_trace_plot"]
+        assert figure.data[0].y[-1] == pytest.approx(121.0 / 60.0)
+        assert figure.layout.yaxis.title.text == "Wall time (minutes)"
+        assert figure.layout.yaxis2.title.text == (
+            "Core-hours (allocated cores x elapsed hours)"
+        )
+        assert figure.layout.xaxis.title.text is None
+        assert figure.layout.xaxis4.title.text == "Adaptive pass"
+        assert figure.layout.height >= 1200
+
         serialized = json.dumps(summary.resource)
         assert "private-node" not in serialized
         assert "private-user" not in serialized
@@ -1267,6 +1316,15 @@ class TestPalaceRunSummary:
         assert "private_layout_run" not in serialized
         assert "/private/work" not in serialized
         assert "/opt/private-palace" not in serialized
+
+    def test_simulation_benchmark_omits_empty_runtime_resource_summary(self) -> None:
+        benchmark = SimulationBenchmark(
+            problem_type="Electrostatic",
+            runtime={"present": False},
+            resource={"present": False},
+        )
+
+        assert benchmark.visualize() == {}
 
 
 class TestPalaceSweepSummary:
@@ -1946,7 +2004,6 @@ class TestEigenmodeReport:
     def test_load_eigenmode_report_composes_existing_summaries(
         self,
         eigenmode_report_dir: Path,
-        tmp_path: Path,
     ) -> None:
         report = load_eigenmode_report(eigenmode_report_dir)
 
@@ -2007,7 +2064,7 @@ class TestEigenmodeReport:
         assert bool(report.sources.set_index("name").loc["config.json", "loaded"])
 
         assert isinstance(report.domain_epr_loss, DomainLoss)
-        domain_metrics = report.domain_epr_loss.metrics_dataframe().set_index(
+        domain_metrics = report.domain_epr_loss.to_epr_dataframe().set_index(
             "source_index"
         )
         assert domain_metrics.loc[1, "channel"] == "domain"
@@ -2016,41 +2073,21 @@ class TestEigenmodeReport:
         assert domain_metrics.loc[1, "inverse_q"] == pytest.approx(5.0e-7)
         assert domain_metrics.loc[1, "gamma_hz"] == pytest.approx(6.3e9 * 5.0e-7)
         assert report.domain_epr_loss.to_dataframe().equals(report.domain_loss)
-        assert report.domain_epr_loss.to_records()[0].q_equivalent == pytest.approx(
-            2.0e6
-        )
-        assert report.domain_epr_loss.plot_inverse_q() is not None
+        assert domain_metrics.loc[1, "q_equivalent"] == pytest.approx(2.0e6)
         assert isinstance(report.loss, ReportLoss)
         assert isinstance(report.loss.budget, LossBudget)
         assert report.loss.domain.to_dataframe().equals(report.domain_loss)
         assert report.loss.surface.to_dataframe().equals(report.surface_loss)
         assert report.loss.budget.to_dataframe().equals(report.loss_budget)
-        assert report.loss.budget.plot_inverse_q() is not None
-        domain_csv = report.loss.domain.save_csv(tmp_path / "domain_loss.csv")
-        surface_csv = report.loss.surface.save_csv(tmp_path / "surface_loss.csv")
-        budget_csv = report.loss.budget.save_csv(tmp_path / "loss_budget.csv")
-        assert (
-            DomainLoss.from_csv(domain_csv).to_dataframe().shape
-            == report.domain_loss.shape
-        )
-        assert (
-            SurfaceLoss.from_csv(surface_csv).to_dataframe().shape
-            == report.surface_loss.shape
-        )
-        assert (
-            LossBudget.from_csv(budget_csv).to_dataframe().shape
-            == report.loss_budget.shape
-        )
 
         assert isinstance(report.surface_epr_loss, SurfaceLoss)
-        surface_metrics = report.surface_epr_loss.metrics_dataframe().set_index(
+        surface_metrics = report.surface_epr_loss.to_epr_dataframe().set_index(
             "source_index"
         )
         assert surface_metrics.loc[2, "channel"] == "surface"
         assert surface_metrics.loc[2, "participation"] == pytest.approx(1.0e-7)
         assert surface_metrics.loc[2, "loss_tangent"] == pytest.approx(0.0033)
         assert surface_metrics.loc[2, "inverse_q"] == pytest.approx(5.0e-7)
-        assert report.surface_epr_loss.plot_inverse_q() is not None
 
     def test_load_eigenmode_report_allows_missing_optional_epr(
         self,
@@ -2344,6 +2381,99 @@ class TestIndexedReportSummaries:
         assert by_index.loc[2, "q_equivalent"] == pytest.approx(2.0e6)
         assert by_index.loc[2, "gamma_hz"] == pytest.approx(5.0e9 * 5.0e-7)
 
+    def test_summarize_surface_loss_carries_surface_epr_channel_metadata(
+        self,
+    ) -> None:
+        import pandas as pd
+
+        surface_q = pd.DataFrame(
+            {
+                "source_index": [1, 1, 1],
+                "surface_index": [1, 2, 3],
+                "p_surf": [1.0e-7, 2.0e-7, 1.0e-7],
+                "q_surf": [2.0e6, 4.0e6, 1.0e6],
+                "inverse_q": [5.0e-7, 2.5e-7, 1.0e-6],
+            }
+        )
+        interfaces = pd.DataFrame(
+            {
+                "surface_index": [1, 2, 3],
+                "loss_channel": ["MS", "SA", None],
+                "surface_epr_exclude_below_um": [0.05, 0.05, 0.05],
+                "surface_epr_band_names": [
+                    ("ms_band_50_200nm",),
+                    ("sa_band_50_200nm",),
+                    ("unlabeled",),
+                ],
+            }
+        )
+
+        surface_loss = summarize_surface_loss(surface_q, interfaces)
+        budget = summarize_loss_channel_budget(surface_loss)
+
+        by_channel = budget.set_index("loss_channel")
+        assert surface_loss.set_index("surface_index").loc[1, "loss_channel"] == "MS"
+        assert by_channel.loc["MS", "inverse_q"] == pytest.approx(5.0e-7)
+        assert by_channel.loc["SA", "inverse_q"] == pytest.approx(2.5e-7)
+        assert by_channel.loc["MS", "loss_fraction"] == pytest.approx(2.0 / 3.0)
+        assert by_channel.loc["SA", "loss_fraction"] == pytest.approx(1.0 / 3.0)
+        assert set(budget["loss_channel"]) == {"MS", "SA"}
+
+    def test_source_aware_surface_epr_budget_uses_total_rows_by_default(
+        self,
+    ) -> None:
+        import pandas as pd
+
+        surface_q = pd.DataFrame(
+            {
+                "surface_index": [1, 2, 3],
+                "p_surf": [1.0e-7, 9.0e-7, 2.0e-7],
+                "q_surf": [1.0e7, 1.0e6, 5.0e6],
+                "inverse_q": [1.0e-7, 9.0e-7, 2.0e-7],
+            }
+        )
+        interfaces = pd.DataFrame(
+            {
+                "surface_index": [1, 2, 3],
+                "source_entry_name": [
+                    "D0_TOP_M1_pec_0",
+                    "D0_TOP_M1_pec_0",
+                    "D0_TOP_M1_pec_0",
+                ],
+                "surface_epr_summary_kind": ["total", "exclude_below", "total"],
+                "surface_epr_exclude_below_um": [0.0, 0.05, 0.0],
+                "loss_channel": ["MS", "MS", "MA"],
+                "source_aware_surface_epr_group_names": [
+                    ("band_0_50nm", "band_50_100nm", "core"),
+                    ("band_50_100nm", "core"),
+                    ("band_0_50nm", "band_50_100nm", "core"),
+                ],
+            }
+        )
+
+        surface_loss = summarize_surface_loss(surface_q, interfaces)
+        channel_budget = summarize_loss_channel_budget(surface_loss)
+        loss_budget = summarize_loss_budget(
+            pd.DataFrame(),
+            surface_loss,
+            frequency_ghz=5.0,
+        )
+
+        surface_rows = surface_loss.set_index("surface_index")
+        assert surface_rows.loc[1, "source_entry_name"] == "D0_TOP_M1_pec_0"
+        assert surface_rows.loc[2, "surface_epr_summary_kind"] == "exclude_below"
+        assert surface_rows.loc[1, "source_aware_surface_epr_group_names"] == (
+            "band_0_50nm",
+            "band_50_100nm",
+            "core",
+        )
+
+        by_channel = channel_budget.set_index("loss_channel")
+        assert set(channel_budget["loss_channel"]) == {"MS", "MA"}
+        assert by_channel.loc["MS", "inverse_q"] == pytest.approx(1.0e-7)
+        assert by_channel.loc["MA", "inverse_q"] == pytest.approx(2.0e-7)
+        assert loss_budget.iloc[0]["surface_inverse_q_sum"] == pytest.approx(3.0e-7)
+
     def test_summarize_loss_budget_combines_domain_and_surface_loss(
         self, eigenmode_report_dir: Path
     ) -> None:
@@ -2483,12 +2613,12 @@ class TestElectrostaticReport:
         assert surface_loss.loc[2, "inverse_q"] == pytest.approx(2.5e-7)
         assert "t1_us" not in report.surface_loss.columns
 
-        domain_metrics = report.domain_epr_loss.metrics_dataframe().set_index(
+        domain_metrics = report.domain_epr_loss.to_epr_dataframe().set_index(
             "source_index"
         )
         assert domain_metrics.loc[1, "participation"] == pytest.approx(0.5)
         assert domain_metrics.loc[1, "t1_us"] is None
-        surface_metrics = report.surface_epr_loss.metrics_dataframe().set_index(
+        surface_metrics = report.surface_epr_loss.to_epr_dataframe().set_index(
             "source_index"
         )
         assert surface_metrics.loc[1, "participation"] == pytest.approx(1.0e-7)
@@ -2504,7 +2634,6 @@ class TestElectrostaticReport:
         assert report.loss.domain.to_dataframe().equals(report.domain_loss)
         assert report.loss.surface.to_dataframe().equals(report.surface_loss)
         assert report.loss.budget.to_dataframe().equals(report.loss_budget)
-        assert report.loss.budget.plot_inverse_q() is not None
 
         by_interface = report.surface_interface_summary.set_index("interface_type")
         assert by_interface.loc["MA", "surface_count"] == 2
@@ -2575,6 +2704,49 @@ class TestElectrostaticReport:
         electrostatic_report_dir: Path,
     ) -> None:
         palace_dir = electrostatic_report_dir / "results" / "palace"
+        metadata_dir = electrostatic_report_dir / "metadata"
+        index_map_path = metadata_dir / "palace_index_map.json"
+        index_map = json.loads(index_map_path.read_text())
+        for entry in index_map["entries"]:
+            if (
+                entry["section"] == "Boundaries.Postprocessing.Dielectric"
+                and entry["index"] == 2
+            ):
+                entry["metadata"] = {
+                    "source_entry_name": "left",
+                    "surface_epr_summary_kind": "total",
+                    "surface_epr_exclude_below_um": 0.0,
+                }
+        index_map["entries"].append(
+            {
+                "section": "Boundaries.Postprocessing.Dielectric",
+                "index": 3,
+                "entry_name": "ma_total_right",
+                "role": "boundary_surface",
+                "attributes": [21],
+                "physical_names": ["MA:right_metal__substrate"],
+                "dimension": 2,
+                "metadata": {
+                    "source_entry_name": "right",
+                    "surface_epr_summary_kind": "total",
+                    "surface_epr_exclude_below_um": 0.0,
+                },
+            }
+        )
+        index_map_path.write_text(json.dumps(index_map))
+        config_path = electrostatic_report_dir / "config.json"
+        config = json.loads(config_path.read_text())
+        config["Boundaries"]["Postprocessing"]["Dielectric"].append(
+            {
+                "Index": 3,
+                "Attributes": [21],
+                "Type": "MA",
+                "Thickness": 0.002,
+                "Permittivity": 10.0,
+                "LossTan": 0.0033,
+            }
+        )
+        config_path.write_text(json.dumps(config))
         iteration01 = palace_dir / "iteration01"
         iteration01.mkdir()
         _write_terminal_matrix_csv(
@@ -2584,6 +2756,16 @@ class TestElectrostaticReport:
                 [0.5e-15, -1.0e-15],
                 [-1.0e-15, 2.0e-15],
             ],
+        )
+        (iteration01 / "surface-Q.csv").write_text(
+            "i, p_surf[2], Q_surf[2], p_surf[3], Q_surf[3]\n"
+            "1, 1.0e-7, 1.0e7, 2.0e-7, 5.0e6\n"
+        )
+        iteration02 = palace_dir / "iteration02"
+        iteration02.mkdir()
+        (iteration02 / "surface-Q.csv").write_text(
+            "i, p_surf[2], Q_surf[2], p_surf[3], Q_surf[3]\n"
+            "1, 2.0e-7, 5.0e6, 3.0e-7, 3.333333e6\n"
         )
 
         report = load_electrostatic_report(electrostatic_report_dir)
@@ -2597,6 +2779,30 @@ class TestElectrostaticReport:
         assert bool(sources.loc["iteration*/terminal-C.csv", "loaded"])
         assert "loaded 1 AMR iteration files" in str(
             sources.loc["iteration*/terminal-C.csv", "message"]
+        )
+        assert bool(sources.loc["iteration*/surface-Q.csv", "loaded"])
+        convergence = report.surface_epr_convergence
+        assert convergence.columns.tolist() == [
+            "pass_index",
+            "interface_type",
+            "surface_epr_summary_kind",
+            "surface_epr_exclude_below_um",
+            "surface_epr_abs",
+        ]
+        assert "source_entry_name" not in convergence.columns
+        by_pass = convergence.set_index(
+            [
+                "pass_index",
+                "interface_type",
+                "surface_epr_summary_kind",
+                "surface_epr_exclude_below_um",
+            ]
+        )
+        assert by_pass.loc[(1, "MA", "total", 0.0), "surface_epr_abs"] == (
+            pytest.approx(3.0e-7)
+        )
+        assert by_pass.loc[(2, "MA", "total", 0.0), "surface_epr_abs"] == (
+            pytest.approx(5.0e-7)
         )
 
     def test_electrostatic_report_loader_stays_assembly_owned(self) -> None:
@@ -2793,31 +2999,37 @@ class TestTerminalMatrixHistory:
         assert final_left_right["display_delta_to_previous"] == pytest.approx(1.0)
 
 
-class TestSParamsSaveLoad:
-    """Tests for SParams save_npz/from_file round-trip."""
+class TestSParamsSave:
+    """Tests for SParams NumPy export."""
 
-    def test_round_trip(self, sim_dir: Path, tmp_path: Path) -> None:
+    def test_save_npz_exports_numpy_artifact(
+        self,
+        sim_dir: Path,
+        tmp_path: Path,
+    ) -> None:
         sp = load_sparams(sim_dir)
         out = sp.save_npz(tmp_path / "cached")
         assert out.suffix == ".npz"
         assert out.exists()
 
-        loaded = SParams.from_file(out)
-        assert loaded.port_names == sp.port_names
-        assert len(loaded.freq) == len(sp.freq)
-        np.testing.assert_allclose(loaded.freq, sp.freq)
+        exported = np.load(out, allow_pickle=False)
+        assert list(exported["port_names"]) == sp.port_names
+        np.testing.assert_allclose(exported["freq"], sp.freq)
         for key in sp._data:
-            np.testing.assert_allclose(loaded[key].db, sp[key].db)
-            np.testing.assert_allclose(loaded[key].deg, sp[key].deg)
+            to_port, from_port = key
+            np.testing.assert_allclose(
+                exported[f"S_{to_port}_{from_port}_db"],
+                sp[key].db,
+            )
+            np.testing.assert_allclose(
+                exported[f"S_{to_port}_{from_port}_deg"],
+                sp[key].deg,
+            )
 
     def test_adds_npz_suffix(self, sim_dir: Path, tmp_path: Path) -> None:
         sp = load_sparams(sim_dir)
         out = sp.save_npz(tmp_path / "no_ext")
         assert out.name == "no_ext.npz"
-
-    def test_from_file_missing_raises(self, tmp_path: Path) -> None:
-        with pytest.raises(FileNotFoundError):
-            SParams.from_file(tmp_path / "nonexistent.npz")
 
 
 def _write_terminal_matrix_csv(

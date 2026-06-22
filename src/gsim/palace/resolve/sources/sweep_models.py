@@ -16,7 +16,6 @@ from gsim.palace._shared import (
     as_mapping,
     duplicate_values,
     json_ready,
-    path_value,
     record_column_key,
     record_value,
 )
@@ -53,7 +52,7 @@ class PalaceSweepPointSpec:
         for field_name in SWEEP_POINT_PATH_FIELDS:
             value = getattr(self, field_name)
             if value is not None:
-                row[field_name] = path_value(value)
+                row[field_name] = str(value)
         return row
 
 
@@ -209,14 +208,14 @@ class PalaceSweepSummary:
     @property
     def total_runtime_elapsed_seconds(self) -> float | None:
         """Sum known point runtime durations, or ``None`` when none are present."""
-        elapsed = [
-            point.run_summary.runtime.get("elapsed_seconds")
-            for point in self.points
-            if point.run_summary.runtime.get("elapsed_seconds") is not None
-        ]
+        elapsed: list[float] = []
+        for point in self.points:
+            value = point.run_summary.runtime.get("elapsed_seconds")
+            if value is not None:
+                elapsed.append(float(value))
         if not elapsed:
             return None
-        return float(sum(float(value) for value in elapsed))
+        return sum(elapsed)
 
     def to_point_records(self) -> list[dict[str, Any]]:
         """Return flat, table-friendly point records for this sweep."""

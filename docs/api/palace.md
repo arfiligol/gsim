@@ -16,9 +16,15 @@ packages. Helper-only lowering details should stay in their owning modules.
         - set_output_dir
         - set_geometry
         - set_stack
+        - activate_substrate
+        - activate_inter_die_vacuum
+        - activate_outer_vacuum
         - set_driven
+        - set_palace_version
         - set_material
         - set_numerical
+        - set_refinement
+        - set_linear_solver
         - add_port
         - add_cpw_port
         - add_pec
@@ -44,9 +50,15 @@ packages. Helper-only lowering details should stay in their owning modules.
         - set_output_dir
         - set_geometry
         - set_stack
+        - activate_substrate
+        - activate_inter_die_vacuum
+        - activate_outer_vacuum
         - set_eigenmode
+        - set_palace_version
         - set_material
         - set_numerical
+        - set_refinement
+        - set_linear_solver
         - add_port
         - add_cpw_port
         - add_pec
@@ -67,9 +79,15 @@ packages. Helper-only lowering details should stay in their owning modules.
         - set_output_dir
         - set_geometry
         - set_stack
+        - activate_substrate
+        - activate_inter_die_vacuum
+        - activate_outer_vacuum
         - set_electrostatic
+        - set_palace_version
         - set_material
         - set_numerical
+        - set_refinement
+        - set_linear_solver
         - add_terminal
         - add_pec
         - mesh
@@ -89,9 +107,15 @@ packages. Helper-only lowering details should stay in their owning modules.
         - set_output_dir
         - set_geometry
         - set_stack
+        - activate_substrate
+        - activate_inter_die_vacuum
+        - activate_outer_vacuum
         - set_magnetostatic
+        - set_palace_version
         - set_material
         - set_numerical
+        - set_refinement
+        - set_linear_solver
         - add_current_source
         - add_pec
         - mesh
@@ -112,6 +136,27 @@ and `add_terminal()`. Lower-level port geometry, extraction, and CPW/wave-port
 helpers live in `gsim.palace.ports` or the port config models instead of the
 root `gsim.palace` import surface.
 
+For lumped ports, `add_port(direction=...)` describes Palace solver
+field/polarization direction, not generated sheet geometry. String inputs such
+as `"X"`, `"+X"`, and `"-Y"` and finite nonzero 3-vectors are normalized to
+unit Cartesian vectors before writing `Boundaries.LumpedPort.Direction`.
+Generated in-plane port sheets still come from the GDSFactory port `center`,
+`width`, `orientation`, and layer.
+
+For layout-authored horizontal solver sheets, pass a PDK-owned simulation layer
+catalog with `sim.set_simulation_layers(...)` and declare the port with
+`generate_sheet=False`. The component port layer must be a registered
+simulation-only solver sheet layer; `layer=...` on `add_port()` remains the
+target stack/material layer. Mesh generation selects the unique authored polygon
+covering the port center and then follows the same physical-group to
+`Boundaries.LumpedPort` pipeline as generated sheets. This authored-sheet path
+does not apply to vertical via ports.
+
+::: gsim.palace.models.SimulationLayerCatalog
+    options:
+      show_source: false
+      inherited_members: false
+
 ::: gsim.palace.ports.extract_ports
     options:
       show_source: false
@@ -123,11 +168,6 @@ root `gsim.palace` import surface.
 ::: gsim.palace.ports.configure_wave_port
     options:
       show_source: false
-
-::: gsim.palace.ports.PalacePort
-    options:
-      show_source: false
-      inherited_members: false
 
 ::: gsim.palace.models.CPWPortConfig
     options:
@@ -143,6 +183,66 @@ root `gsim.palace` import surface.
 
 These APIs control mesh construction. They should change generated geometry or
 meshing behavior, not Palace postprocessing/reportability.
+
+`sim.set_stack(...)` loads stack facts from the active PDK, YAML, a
+`gsim.common.LayerStack`, or a `gdsfactory` `LayerStack`. Direct stack inputs
+are copied into simulation-owned state before material overrides or mesh-time
+changes are applied, so caller-owned stacks are not mutated. The no-argument
+and keyword modes remain the simple stack path; they may still auto-create the
+existing oxide/passivation background dielectrics when those options are left
+enabled.
+
+For PDKs that define physical simulation regions as named stack layers, activate
+the regions explicitly after `set_stack(...)`. The public activation calls are
+`activate_substrate(layer, *, die=None, margin_x=0.0, margin_y=0.0,
+material=None)`, `activate_inter_die_vacuum(layer="D0_TO_D1_GAP", *,
+lower_die="D0", upper_die="D1", margin_x=0.0, margin_y=0.0, material=None)`,
+and `activate_outer_vacuum(layer="OUTER_VACUUM", *, margin_x=0.0,
+margin_y=0.0, z_above=0.0, z_below=0.0, material=None)`. Region margins and
+outer-vacuum z extents are non-negative and belong on these activation calls.
+Layer and die names must be non-empty.
+
+Activated regions become 3D mesh regions using the stack layer name as the
+physical group and manifest identity. A flip-chip PDK can therefore keep
+`D0_SUBSTRATE`, `D1_SUBSTRATE`, `D0_TO_D1_GAP`, and `OUTER_VACUUM` visible in
+mesh groups, manifests, postprocessing index maps, and material-resolution
+sidecars while still resolving Palace material properties from `Si` or
+`vacuum`. A region-level `material=...` override is preserved as group and
+manifest provenance and is the material used by `mesh.config_generator` when it
+assembles `Domains.Materials`.
+
+Explicit activated-region mode is separate from the legacy airbox workflow.
+Calling `set_airbox(...)` before or after activating regions raises a hard
+error. Legacy airbox controls such as `air_margin`,
+`airbox_margin_x`/`airbox_margin_y`, `airbox_z_above`/`airbox_z_below`,
+mesh-time `z_above`/`z_below`, and mesh-time `airbox_margin` are rejected in
+explicit-region mode. Workflows that want the simple enclosing airbox should
+keep using `set_stack(...)` plus `set_airbox(...)` without activating named
+stack regions.
+
+::: gsim.palace.models.ActivatedRegion
+    options:
+      show_source: false
+      inherited_members: false
+
+## Versioned Palace Config
+
+`sim.set_palace_version(...)` selects the Palace configuration schema target.
+The first supported targets are `0.15.0` and `0.16.0`, with `0.16.0` as the
+default. `write_config(validate_schema=True)` validates the final assembled
+`config.json` against the selected schema before returning.
+
+`sim.set_refinement(...)` owns the common `Model.Refinement` fragment,
+`sim.set_linear_solver(...)` owns common `Solver.Linear` settings, and
+`sim.set_output_formats(...)` owns `Problem.OutputFormats`. The simpler
+`sim.set_numerical(...)` remains a convenience wrapper for common order,
+tolerance, solver type, and device settings. Rare Palace-native keys can be
+passed as Palace JSON fragments and are checked by final schema validation.
+
+`Domains` and `Boundaries` remain mesh-derived sections assembled by
+`mesh.config_generator`. Notebook code should not pass those sections through
+untyped hints; the generator rejects hints that would overwrite `Domains`,
+`Boundaries`, `Problem.Type`, `Problem.Output`, or `Model.Mesh`.
 
 ::: gsim.palace.MeshConfig
     options:
@@ -189,6 +289,16 @@ provenance sidecars without adding new mesh-generation knobs.
 ::: gsim.palace.mesh.build_dielectric_interface_specs_from_material_kinds
     options:
       show_source: false
+
+::: gsim.palace.mesh.build_interface_surface_catalog
+    options:
+      show_source: false
+
+Surface EPR interface metadata comes from generated mesh groups after full-3D
+Gmsh interface discovery. Source-polygon Surface EPR bands are not a supported
+production mesh input. Finite-metal B lowering emits 50 nm planar top/bottom
+band/core physical groups from discovered shell interfaces; vertical sidewalls
+remain total channels.
 
 ## Advanced Mesh Postprocessing Authoring
 
@@ -262,9 +372,102 @@ my_run-palace.tar.gz
 ```
 
 The archive root is `my_run/`, so post-run result archives can be extracted
-over the same folder to fill `logs/` and `results/palace/`. AEDT/HFSS export
-and result packaging are public-PDK responsibilities, not `gsim.palace`
-responsibilities.
+over the same folder to fill `logs/` and `results/palace/`. `gsim.palace`
+owns generic Palace result package profiles and commands; PDKs own
+example-specific recommendations and site/profile defaults.
+
+### Return Results From HPC
+
+After the Palace job finishes, enter the remote run folder and choose the
+smallest archive that supports local analysis.
+
+| Profile | Archive suffix | Use it when | Includes | Excludes |
+| --- | --- | --- | --- | --- |
+| `light` | `-light.tar.gz` | You only need scalar tables, logs, metadata, and report inputs. | CSVs, logs, metadata, manifests, report inputs. | Palace field directories, VTK/BP/HDF5 field files, and meshes. |
+| `with-fields` | `-with-fields.tar.gz` | Numeric postprocessing needs Palace GridFunction field output. | Everything in `light`, plus `results/**/gridfunction/**`. | ParaView output, VTK/PVTU field files, and solver `.msh` files. |
+| `with-fields-and-meshes` | `-with-fields-and-meshes.tar.gz` | Local audit needs solver mesh identity or physical groups. | Everything in `with-fields`, plus solver mesh and mesh-generation identity artifacts. | ParaView output and VTK/PVTU field files by default. |
+| `full` | `-full.tar.gz` | You intentionally need the complete run folder. | The whole run folder. | Nothing by default. |
+
+Light result package:
+
+```bash
+cd <remote-run-folder>
+BUNDLE_ID="$(basename "$PWD")"
+tar \
+  --checkpoint=1000 \
+  --checkpoint-action=dot \
+  -czf "../${BUNDLE_ID}-light.tar.gz" \
+  --transform "s|^\.$|${BUNDLE_ID}|;s|^\./|${BUNDLE_ID}/|" \
+  --exclude='./results/palace/paraview' \
+  --exclude='./results/palace/gridfunction' \
+  --exclude='./results/palace/iteration*/paraview' \
+  --exclude='./results/palace/iteration*/gridfunction' \
+  --exclude='./results/*/palace/paraview' \
+  --exclude='./results/*/palace/gridfunction' \
+  --exclude='./results/*/palace/iteration*/paraview' \
+  --exclude='./results/*/palace/iteration*/gridfunction' \
+  --exclude='*.msh' \
+  --exclude='*.vtu' \
+  --exclude='*.pvtu' \
+  --exclude='*.vtk' \
+  --exclude='*.bp' \
+  --exclude='*.h5' \
+  --exclude='*.hdf5' \
+  --exclude='*.mesh' \
+  --exclude='*.sol' \
+  .
+```
+
+With fields:
+
+```bash
+cd <remote-run-folder>
+BUNDLE_ID="$(basename "$PWD")"
+tar \
+  --checkpoint=1000 \
+  --checkpoint-action=dot \
+  -czf "../${BUNDLE_ID}-with-fields.tar.gz" \
+  --transform "s|^\.$|${BUNDLE_ID}|;s|^\./|${BUNDLE_ID}/|" \
+  --exclude='./results/palace/paraview' \
+  --exclude='./results/palace/iteration*/paraview' \
+  --exclude='./results/*/palace/paraview' \
+  --exclude='./results/*/palace/iteration*/paraview' \
+  --exclude='*.msh' \
+  --exclude='*.vtu' \
+  --exclude='*.pvtu' \
+  --exclude='*.vtk' \
+  --exclude='*.bp' \
+  --exclude='*.h5' \
+  --exclude='*.hdf5' \
+  .
+```
+
+With fields and meshes:
+
+```bash
+cd <remote-run-folder>
+BUNDLE_ID="$(basename "$PWD")"
+tar \
+  --checkpoint=1000 \
+  --checkpoint-action=dot \
+  -czf "../${BUNDLE_ID}-with-fields-and-meshes.tar.gz" \
+  --transform "s|^\.$|${BUNDLE_ID}|;s|^\./|${BUNDLE_ID}/|" \
+  --exclude='./results/palace/paraview' \
+  --exclude='./results/palace/iteration*/paraview' \
+  --exclude='./results/*/palace/paraview' \
+  --exclude='./results/*/palace/iteration*/paraview' \
+  --exclude='*.vtu' \
+  --exclude='*.pvtu' \
+  --exclude='*.vtk' \
+  .
+```
+
+Download and extract the archive locally from the parent folder:
+
+```bash
+scp <user>@<hpc-host>:<remote-run-parent>/<archive-name>.tar.gz .
+tar -xzf <archive-name>.tar.gz
+```
 
 `generate_handoff_package()` is a Run Stage API. It returns
 `PalaceRunHandle`, which records the packaged run folder and optional launcher
@@ -349,11 +552,6 @@ dynamic `str | None`, static tools can only prove the common report contract.
       show_source: false
       inherited_members: false
 
-::: gsim.palace.results.SimulationPerformance
-    options:
-      show_source: false
-      inherited_members: false
-
 ::: gsim.palace.results.SimulationBenchmark
     options:
       show_source: false
@@ -382,7 +580,7 @@ Notebook workflows usually inspect the objects returned by simulation methods
 directly. Callers that need explicit type imports for mesh or validation return
 values should use the owner module, not the root `gsim.palace` import surface.
 
-::: gsim.palace.models.results.SimulationResult
+::: gsim.palace.mesh.MeshResult
     options:
       show_source: false
       inherited_members: false

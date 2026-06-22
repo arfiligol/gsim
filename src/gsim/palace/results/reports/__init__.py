@@ -11,13 +11,14 @@ The structure is intentionally navigable:
 * ``driven``, ``eigenmode``, and ``electrostatic`` define the concrete Problem
   Type Reports that notebooks and type checkers should inspect.
 
-Report classes aggregate Typed Data objects and expose ``show_all_results()``.
+Report classes aggregate Typed Data objects and expose ``show_all_results()``
+for physics results plus ``show_simulation_benchmark()`` for run-cost metadata.
 They do not parse Palace artifacts, compute derived physics tables, or define
-generic display primitives. Resolve assembly creates report instances;
-Typed Data owns table/plot semantics; Display owns generic visualization
-helpers. Shared table classes may be reused across reports, but report-level
-accessors stay problem-specific because identical columns do not imply
-identical loss semantics.
+generic display primitives. Resolve assembly creates report instances; Typed
+Data owns table/plot semantics; Display owns generic visualization helpers.
+Shared table classes may be reused across reports, but report-level accessors
+stay problem-specific because identical columns do not imply identical loss
+semantics.
 """
 
 from __future__ import annotations

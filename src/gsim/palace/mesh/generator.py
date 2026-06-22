@@ -1,15 +1,30 @@
-"""Mesh generator for Palace EM simulation."""
+"""Palace mesh generation orchestration.
+
+This module composes component geometry, stack layers, declared ports,
+simulation-layer catalogs, and mesh settings into a Gmsh mesh and optional
+Palace config artifacts. It sequences geometry creation, authored sheet
+selection, physical group assignment, manifest writing, and config generation.
+
+PDK catalog construction and port declaration happen before mesh generation.
+Resolve/report loading and typed result visualization happen after solver
+outputs exist. The runtime path is ``PalaceSimBase.mesh()`` through mesh
+geometry, sheets, and groups, then optional ``config.json`` and mesh manifest
+sidecars.
+"""
 
 from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from numbers import Integral
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import gmsh
+
+from gsim.palace.models.versions import DEFAULT_PALACE_CONFIG_VERSION
 
 from . import gmsh_utils
 from .config_generator import (
@@ -19,6 +34,7 @@ from .config_generator import (
 )
 from .geometry import (
     GeometryData,
+    _reject_activated_region_airbox_controls,
     add_dielectrics,
     add_metals,
     add_patterned_dielectrics,
@@ -30,20 +46,24 @@ from .geometry import (
 )
 from .groups import assign_physical_groups
 from .manifest import MeshManifest, build_mesh_manifest
+from .sheets import extract_authored_sheet_polygons
 
 if TYPE_CHECKING:
     from gsim.common.stack import LayerStack
     from gsim.palace.models import (
+        ActivatedRegion,
         CurrentSourceConfig,
         DrivenConfig,
         EigenmodeConfig,
         ElectrostaticConfig,
         MagnetostaticConfig,
         NumericalConfig,
+        PalaceConfigVersion,
+        PalacePort,
+        SimulationLayerCatalog,
         TerminalConfig,
     )
     from gsim.palace.models.pec import PECBlockConfig
-    from gsim.palace.ports.config import PalacePort
 
 logger = logging.getLogger(__name__)
 
@@ -413,6 +433,10 @@ def generate_mesh(
     electrostatic_config: ElectrostaticConfig | None = None,
     magnetostatic_config: MagnetostaticConfig | None = None,
     numerical_config: NumericalConfig | None = None,
+    refinement_config: Mapping[str, Any] | None = None,
+    problem_output_formats: Mapping[str, Any] | None = None,
+    palace_version: PalaceConfigVersion = DEFAULT_PALACE_CONFIG_VERSION,
+    validate_schema: bool = True,
     terminals: list[TerminalConfig] | None = None,
     current_sources: list[CurrentSourceConfig] | None = None,
     write_config: bool = True,
@@ -432,6 +456,9 @@ def generate_mesh(
     verbosity: int = 3,
     decimate_tolerance: float | None = None,
     material_overlay: Any | None = None,
+    simulation_layers: SimulationLayerCatalog | None = None,
+    activated_regions: tuple[ActivatedRegion, ...] = (),
+    surface_epr_inset_margins_um: Sequence[float] = (0.0, 0.05),
 ) -> MeshResult:
     """Generate mesh for Palace EM simulation.
 
@@ -456,6 +483,10 @@ def generate_mesh(
         driven_config: Optional DrivenConfig for frequency sweep settings
         eigenmode_config: Optional EigenmodeConfig for eigenmode problems
         numerical_config: Optional NumericalConfig for solver settings
+        refinement_config: Optional Model.Refinement fragment
+        problem_output_formats: Optional Problem.OutputFormats fragment
+        palace_version: Target Palace configuration schema version
+        validate_schema: Validate generated config against the target schema
         write_config: Whether to write config.json (default True)
         pec_blocks: PEC configuration
         planar_conductors: If True, treat conductors as 2D PEC surfaces
@@ -477,10 +508,27 @@ def generate_mesh(
         material_overlay: Optional PDK material overlay path, raw overlay
             mapping, or loaded overlay mapping used only for config material
             resolution when ``write_config=True``.
+        simulation_layers: PDK-declared simulation-only layers. These layers
+            are excluded from material extraction and are used only when ports
+            request layout-authored solver sheets.
+        activated_regions: Stack layers explicitly selected as Palace mesh
+            regions by the public simulation API.
+        surface_epr_inset_margins_um: Surface EPR inset margins in um.
+            0 means total; positive values define generated finite-shell
+            inset partitions.
 
     Returns:
         MeshResult with paths and metadata
     """
+    if activated_regions:
+        _reject_activated_region_airbox_controls(
+            air_margin=air_margin,
+            airbox_margin_x=airbox_margin_x,
+            airbox_margin_y=airbox_margin_y,
+            airbox_z_above=airbox_z_above,
+            airbox_z_below=airbox_z_below,
+        )
+
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -488,7 +536,65 @@ def generate_mesh(
 
     # Extract geometry
     logger.info("Extracting geometry...")
-    geometry = extract_geometry(component, stack, decimate_tolerance=decimate_tolerance)
+    simulation_gds_layers = simulation_layers.gds_layers if simulation_layers else None
+    if simulation_gds_layers:
+        geometry = extract_geometry(
+            component,
+            stack,
+            decimate_tolerance=decimate_tolerance,
+            exclude_gds_layers=simulation_gds_layers,
+        )
+    else:
+        geometry = extract_geometry(
+            component,
+            stack,
+            decimate_tolerance=decimate_tolerance,
+        )
+    requested_sheet_layers = {
+        port.sheet_gds_layer
+        for port in ports
+        if not port.generate_sheet and port.sheet_gds_layer is not None
+    }
+    simulation_polygons = (
+        extract_authored_sheet_polygons(component, simulation_layers)
+        if simulation_layers is not None and requested_sheet_layers
+        else {}
+    )
+    authored_sheet_polygons = {
+        layer: polygons
+        for layer, polygons in simulation_polygons.items()
+        if layer in requested_sheet_layers
+    }
+    sheet_bboxes = [
+        polygon.bbox
+        for layer, polygons in simulation_polygons.items()
+        if layer in requested_sheet_layers
+        for polygon in polygons
+    ]
+    if sheet_bboxes:
+        xmins, ymins, xmaxs, ymaxs = zip(*sheet_bboxes, strict=True)
+        sheet_xmin = min(xmins)
+        sheet_ymin = min(ymins)
+        sheet_xmax = max(xmaxs)
+        sheet_ymax = max(ymaxs)
+        gxmin, gymin, gxmax, gymax = geometry.bbox
+        if not all(math.isfinite(value) for value in geometry.bbox):
+            geometry = GeometryData(
+                polygons=geometry.polygons,
+                bbox=(sheet_xmin, sheet_ymin, sheet_xmax, sheet_ymax),
+                layer_bboxes=geometry.layer_bboxes,
+            )
+        else:
+            geometry = GeometryData(
+                polygons=geometry.polygons,
+                bbox=(
+                    min(gxmin, sheet_xmin),
+                    min(gymin, sheet_ymin),
+                    max(gxmax, sheet_xmax),
+                    max(gymax, sheet_ymax),
+                ),
+                layer_bboxes=geometry.layer_bboxes,
+            )
     logger.info("  Polygons: %s", len(geometry.polygons))
     logger.info("  Bbox: %s", geometry.bbox)
 
@@ -510,9 +616,14 @@ def generate_mesh(
 
         # Add geometry
         logger.info("Adding metals...")
-        metal_tags = add_metals(
-            kernel, geometry, stack, planar_conductors, merge_via_distance
+        metal_result = add_metals(
+            kernel,
+            geometry,
+            stack,
+            planar_conductors,
+            merge_via_distance,
         )
+        metal_tags = metal_result.metal_tags
 
         # Add PEC blocks if configured
         pec_block_tags: dict = {}
@@ -531,21 +642,31 @@ def generate_mesh(
             airbox_margin_y=airbox_margin_y,
             airbox_z_above=airbox_z_above,
             airbox_z_below=airbox_z_below,
+            activated_regions=activated_regions,
         )
-        domain_bbox = (
-            geometry.bbox[0] - margin_x,
-            geometry.bbox[1] - margin_y,
-            geometry.bbox[2] + margin_x,
-            geometry.bbox[3] + margin_y,
-        )
+        if activated_regions:
+            domain_bbox = (
+                domain_bounds[0],
+                domain_bounds[1],
+                domain_bounds[3],
+                domain_bounds[4],
+            )
+        else:
+            domain_bbox = (
+                geometry.bbox[0] - margin_x,
+                geometry.bbox[1] - margin_y,
+                geometry.bbox[2] + margin_x,
+                geometry.bbox[3] + margin_y,
+            )
         port_tags, port_info = add_ports(
             kernel,
             ports,
             stack,
             domain_bbox=domain_bbox,
             domain_bounds=domain_bounds,
+            simulation_layers=simulation_layers,
+            authored_sheet_polygons=authored_sheet_polygons,
         )
-
         logger.info("Adding dielectrics...")
         dielectric_tags = add_dielectrics(
             kernel,
@@ -558,6 +679,7 @@ def generate_mesh(
             airbox_margin_y=airbox_margin_y,
             airbox_z_above=airbox_z_above,
             airbox_z_below=airbox_z_below,
+            activated_regions=activated_regions,
         )
 
         logger.info("Adding patterned dielectric layers...")
@@ -588,6 +710,9 @@ def generate_mesh(
             port_info,
             pec_block_tags=pec_block_tags or None,
             stack=stack,
+            activated_regions=activated_regions,
+            shaped_dielectric_names=metal_result.shaped_dielectric_names,
+            surface_epr_inset_margins_um=surface_epr_inset_margins_um,
         )
         pg_map = gmsh_utils.run_boolean_pipeline(entities)
 
@@ -605,7 +730,10 @@ def generate_mesh(
             entities,
             pg_map,
             stack,
+            activated_regions=activated_regions,
             pec_block_tags=pec_block_tags or None,
+            shaped_dielectric_names=metal_result.shaped_dielectric_names,
+            pec_surface_bboxes=metal_result.pec_surface_bboxes,
         )
 
         # After assign_physical_groups, refinement_lines may reference
@@ -738,8 +866,12 @@ def generate_mesh(
                 driven_config,
                 eigenmode_config,
                 numerical_config,
+                refinement_config,
+                palace_version,
+                validate_schema,
                 absorbing_boundary,
                 periodic_axis,
+                problem_output_formats=problem_output_formats,
                 electrostatic_config=electrostatic_config,
                 terminals=terminals,
                 magnetostatic_config=magnetostatic_config,

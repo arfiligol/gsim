@@ -45,12 +45,25 @@ from gsim.palace.resolve.loaders.index_maps import (
     load_postprocessing_index_map,
     postprocessing_index_map_to_dataframe,
 )
+from gsim.palace.resolve.loaders.terminal import iteration_dirs
+from gsim.palace.resolve.sources.path_utils import resolve_palace_output_dir
 from gsim.palace.results.loss import DomainLoss, LossBudget, SurfaceLoss
 from gsim.palace.results.postprocessing import DomainEnergy, SurfaceQ
 from gsim.palace.results.reports.electrostatic import ElectrostaticReport
 
 if TYPE_CHECKING:
+    import pandas as pd
+
     from gsim.palace.resolve.sources.run_models import PalaceRunSummary
+
+
+SURFACE_EPR_CONVERGENCE_COLUMNS = (
+    "pass_index",
+    "interface_type",
+    "surface_epr_summary_kind",
+    "surface_epr_exclude_below_um",
+    "surface_epr_abs",
+)
 
 
 def load_electrostatic_report(
@@ -192,6 +205,14 @@ def load_electrostatic_report(
         frequency_ghz=frequency_ghz,
     )
     surface_interface_summary = summarize_surface_q_by_interface(surface_loss)
+    surface_epr_convergence = load_surface_epr_convergence_for_report(
+        source,
+        include_history=include_history,
+        index_map_path=resolved_index_map_path if index_map_present else None,
+        dielectric_interfaces=dielectric_interfaces,
+        frequency_ghz=frequency_ghz,
+        source_rows=source_rows,
+    )
     loss_budget = summarize_grouped_loss_budget(
         domain_loss,
         surface_loss,
@@ -211,6 +232,7 @@ def load_electrostatic_report(
         surface_interface_summary=surface_interface_summary,
         domain_epr_loss=DomainLoss(domain_loss),
         surface_epr_loss=SurfaceLoss(surface_loss),
+        surface_epr_convergence=surface_epr_convergence,
         loss_budget_result=LossBudget(dataframe=loss_budget),
         index_map=index_map_frame,
         sources=pd.DataFrame.from_records(
@@ -219,3 +241,127 @@ def load_electrostatic_report(
         ),
         run_summary=coerce_report_run_summary(source, run_summary),
     )
+
+
+def load_surface_epr_convergence_for_report(
+    source: str | Path | dict,
+    *,
+    include_history: bool,
+    index_map_path: Path | None,
+    dielectric_interfaces: Any,
+    frequency_ghz: float | None,
+    source_rows: list[dict[str, Any]],
+) -> pd.DataFrame:
+    """Load AMR Surface EPR convergence from ``iteration*/surface-Q.csv`` files."""
+    import pandas as pd
+
+    iteration_paths = find_surface_q_iteration_csvs(source)
+    source_rows.append(
+        report_source_row(
+            "iteration*/surface-Q.csv",
+            None,
+            required=False,
+            present=bool(iteration_paths),
+            loaded=include_history and bool(iteration_paths),
+            message=(
+                f"loaded {len(iteration_paths)} AMR iteration files"
+                if include_history and iteration_paths
+                else "history disabled"
+                if not include_history
+                else "no AMR iteration surface-Q.csv files found"
+            ),
+        )
+    )
+    if not include_history or not iteration_paths:
+        return empty_surface_epr_convergence()
+
+    frames: list[pd.DataFrame] = []
+    for csv_path, pass_index in iteration_paths:
+        source_arg: dict[str, Path] = {"surface-Q.csv": csv_path}
+        if index_map_path is not None:
+            source_arg["palace_index_map.json"] = index_map_path
+        surface_q = load_surface_q_summary(
+            source_arg if index_map_path is not None else csv_path,
+            index_map_path=index_map_path,
+        )
+        surface_loss = summarize_surface_loss(
+            surface_q,
+            dielectric_interfaces,
+            frequency_ghz=frequency_ghz,
+        )
+        if surface_loss.empty or "p_surf" not in surface_loss.columns:
+            continue
+        frame = surface_loss.copy()
+        frame["pass_index"] = pass_index
+        frames.append(frame)
+
+    if not frames:
+        return empty_surface_epr_convergence()
+
+    history = pd.concat(frames, ignore_index=True)
+    history["surface_epr_abs"] = pd.to_numeric(
+        history["p_surf"],
+        errors="coerce",
+    ).abs()
+    if "interface_type" not in history.columns:
+        history["interface_type"] = ""
+    if "surface_epr_summary_kind" not in history.columns:
+        history["surface_epr_summary_kind"] = "total"
+    else:
+        history["surface_epr_summary_kind"] = history[
+            "surface_epr_summary_kind"
+        ].fillna("total")
+    if "surface_epr_exclude_below_um" not in history.columns:
+        history["surface_epr_exclude_below_um"] = 0.0
+    else:
+        history["surface_epr_exclude_below_um"] = pd.to_numeric(
+            history["surface_epr_exclude_below_um"],
+            errors="coerce",
+        ).fillna(0.0)
+
+    history = history.dropna(subset=["surface_epr_abs"])
+    if history.empty:
+        return empty_surface_epr_convergence()
+
+    result = history.groupby(
+        [
+            "pass_index",
+            "interface_type",
+            "surface_epr_summary_kind",
+            "surface_epr_exclude_below_um",
+        ],
+        dropna=False,
+        as_index=False,
+    )["surface_epr_abs"].sum()
+    return result.loc[:, SURFACE_EPR_CONVERGENCE_COLUMNS].sort_values(
+        [
+            "interface_type",
+            "surface_epr_exclude_below_um",
+            "surface_epr_summary_kind",
+            "pass_index",
+        ]
+    )
+
+
+def find_surface_q_iteration_csvs(
+    source: str | Path | dict,
+) -> tuple[tuple[Path, int], ...]:
+    """Return ``iteration*/surface-Q.csv`` paths sorted by adaptive pass."""
+    if isinstance(source, dict):
+        return ()
+
+    path = Path(source)
+    base = path.parent if path.is_file() else path
+    output_dir = resolve_palace_output_dir(base)
+    return tuple(
+        (iteration_dir / "surface-Q.csv", pass_index)
+        for iteration_dir, pass_index in iteration_dirs(output_dir)
+        if (iteration_dir / "surface-Q.csv").exists()
+    )
+
+
+def empty_surface_epr_convergence() -> pd.DataFrame:
+    """Return the empty Surface EPR convergence dataframe contract."""
+    import pandas as pd
+
+    return pd.DataFrame(columns=SURFACE_EPR_CONVERGENCE_COLUMNS)

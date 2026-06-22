@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from gsim.common.stack import LayerStack
+from gsim.common.stack import Layer, LayerStack
 from gsim.palace.mesh.config_generator import generate_palace_config, write_config
 from gsim.palace.mesh.generator import MeshResult
 from gsim.palace.mesh.manifest import build_mesh_manifest
@@ -19,6 +19,7 @@ from gsim.palace.mesh.postprocessing import (
     build_postprocessing_config_from_manifest,
     build_terminal_index_map_from_manifest,
 )
+from gsim.palace.models import PalacePort, TerminalConfig
 
 
 def _minimal_groups() -> dict:
@@ -153,16 +154,248 @@ def test_generate_palace_config_merges_postprocessing_config(tmp_path: Path) -> 
         model_name="palace",
         fmax=10e9,
         absorbing_boundary=False,
-        postprocessing_config={"SurfaceFlux": [{"Attributes": [22]}]},
+        postprocessing_config={"Energy": [{"Index": 1, "Attributes": [22]}]},
     )
 
     postprocessing = json.loads(config_path.read_text())["Domains"]["Postprocessing"]
-    assert postprocessing["Energy"] == []
+    assert postprocessing["Energy"] == [{"Index": 1, "Attributes": [22]}]
     assert postprocessing["Probe"] == []
-    assert postprocessing["SurfaceFlux"] == [{"Attributes": [22]}]
 
 
-def test_generate_palace_config_deep_merges_solver_hints(tmp_path: Path) -> None:
+def test_generate_palace_config_rejects_duplicate_terminal_attributes(
+    tmp_path: Path,
+) -> None:
+    groups = {
+        "volumes": {"air": {"phys_group": 1}},
+        "conductor_surfaces": {
+            "D0_TOP_M1__MS__BOTTOM__TOTAL": {
+                "phys_group": 21,
+                "layer": "D0_TOP_M1",
+                "bbox": [0.0, 0.0, 0.0, 10.0, 10.0, 0.0],
+            },
+        },
+        "pec_surfaces": {},
+        "port_surfaces": {},
+        "boundary_surfaces": {},
+    }
+    stack = LayerStack(
+        layers={
+            "D0_TOP_M1": Layer(
+                name="D0_TOP_M1",
+                gds_layer=(1, 0),
+                zmin=0.0,
+                zmax=0.2,
+                thickness=0.2,
+                material="aluminum",
+                layer_type="conductor",
+            )
+        },
+        materials={
+            "air": {"permittivity": 1.0},
+            "aluminum": {"conductivity": 3.5e7},
+        },
+    )
+
+    with pytest.raises(ValueError, match="already selected by earlier terminals"):
+        generate_palace_config(
+            groups=groups,
+            ports=[],
+            port_info=[],
+            stack=stack,
+            output_path=tmp_path,
+            model_name="palace",
+            fmax=10e9,
+            simulation_type="electrostatic",
+            absorbing_boundary=False,
+            validate_schema=False,
+            terminals=[
+                TerminalConfig(name="left", layer="D0_TOP_M1"),
+                TerminalConfig(name="right", layer="D0_TOP_M1"),
+            ],
+        )
+
+
+def test_generate_palace_config_maps_activated_region_name_to_stack_material(
+    tmp_path: Path,
+) -> None:
+    groups = {
+        "volumes": {
+            "D0_SUBSTRATE": {
+                "phys_group": 10,
+                "tags": [110],
+                "stack_layer": "D0_SUBSTRATE",
+                "material": "Si",
+            },
+            "OUTER_VACUUM": {
+                "phys_group": 11,
+                "tags": [111],
+                "stack_layer": "OUTER_VACUUM",
+                "material": "vacuum",
+            },
+        },
+        "conductor_surfaces": {},
+        "pec_surfaces": {},
+        "port_surfaces": {},
+        "boundary_surfaces": {},
+    }
+    stack = LayerStack(
+        layers={
+            "D0_SUBSTRATE": Layer(
+                name="D0_SUBSTRATE",
+                gds_layer=(201, 0),
+                zmin=-500.0,
+                zmax=0.0,
+                thickness=500.0,
+                material="Si",
+                layer_type="substrate",
+            ),
+            "OUTER_VACUUM": Layer(
+                name="OUTER_VACUUM",
+                gds_layer=(201, 3),
+                zmin=510.2,
+                zmax=1510.2,
+                thickness=1000.0,
+                material="vacuum",
+                layer_type="dielectric",
+            ),
+        },
+        materials={
+            "Si": {"permittivity": 11.9},
+            "vacuum": {"permittivity": 1.0, "loss_tangent": 0.0},
+        },
+    )
+
+    config_path = generate_palace_config(
+        groups=groups,
+        ports=[],
+        port_info=[],
+        stack=stack,
+        output_path=tmp_path,
+        model_name="palace",
+        fmax=10e9,
+        absorbing_boundary=False,
+    )
+
+    manifest_entries = {
+        entry.name: entry for entry in build_mesh_manifest(groups).entries
+    }
+    materials = json.loads(config_path.read_text())["Domains"]["Materials"]
+
+    assert manifest_entries["D0_SUBSTRATE"].physical_names == ("D0_SUBSTRATE",)
+    assert manifest_entries["OUTER_VACUUM"].physical_names == ("OUTER_VACUUM",)
+    assert materials == [
+        {"Attributes": [10], "Permittivity": 11.9, "LossTan": 0.0},
+        {"Attributes": [11], "Permittivity": 1.0, "LossTan": 0.0},
+    ]
+
+
+def test_activated_region_material_override_reaches_domains_materials(
+    tmp_path: Path,
+) -> None:
+    groups = {
+        "volumes": {
+            "OUTER_VACUUM": {
+                "phys_group": 11,
+                "tags": [111],
+                "stack_layer": "OUTER_VACUUM",
+                "material": "clean_vacuum",
+                "activated_region": True,
+                "activated_region_role": "outer_vacuum",
+                "material_override": "clean_vacuum",
+            },
+        },
+        "conductor_surfaces": {},
+        "pec_surfaces": {},
+        "port_surfaces": {},
+        "boundary_surfaces": {},
+    }
+    stack = LayerStack(
+        layers={
+            "OUTER_VACUUM": Layer(
+                name="OUTER_VACUUM",
+                gds_layer=(201, 3),
+                zmin=510.2,
+                zmax=1510.2,
+                thickness=1000.0,
+                material="vacuum",
+                layer_type="dielectric",
+            ),
+        },
+        materials={
+            "vacuum": {"permittivity": 1.0, "loss_tangent": 0.0},
+            "clean_vacuum": {"permittivity": 1.02, "loss_tangent": 0.0001},
+        },
+    )
+
+    config_path = generate_palace_config(
+        groups=groups,
+        ports=[],
+        port_info=[],
+        stack=stack,
+        output_path=tmp_path,
+        model_name="palace",
+        fmax=10e9,
+        absorbing_boundary=False,
+    )
+
+    manifest_entries = {
+        entry.name: entry for entry in build_mesh_manifest(groups).entries
+    }
+    materials = json.loads(config_path.read_text())["Domains"]["Materials"]
+
+    assert manifest_entries["OUTER_VACUUM"].metadata["material_override"] == (
+        "clean_vacuum"
+    )
+    assert materials == [{"Attributes": [11], "Permittivity": 1.02, "LossTan": 0.0001}]
+
+
+def test_generate_palace_config_emits_lumped_port_direction_vectors(
+    tmp_path: Path,
+) -> None:
+    groups = {
+        "volumes": {"air": {"phys_group": 1}},
+        "conductor_surfaces": {},
+        "pec_surfaces": {},
+        "port_surfaces": {
+            "P1": {"phys_group": 21},
+            "P2": {
+                "type": "cpw",
+                "elements": [
+                    {"phys_group": 22, "direction": "X"},
+                    {"phys_group": 23, "direction": "-Y"},
+                ],
+            },
+        },
+        "boundary_surfaces": {},
+    }
+    ports = [
+        PalacePort(name="o1", direction=[3.0, 4.0, 0.0]),
+        PalacePort(
+            name="cpw",
+            multi_element=True,
+            centers=[(0.0, 0.0), (0.0, 10.0)],
+            directions=["X", "-Y"],
+        ),
+    ]
+
+    config_path = generate_palace_config(
+        groups=groups,
+        ports=ports,
+        port_info=[],
+        stack=LayerStack(materials={"air": {"permittivity": 1.0}}),
+        output_path=tmp_path,
+        model_name="palace",
+        fmax=10e9,
+        absorbing_boundary=False,
+    )
+
+    lumped_ports = json.loads(config_path.read_text())["Boundaries"]["LumpedPort"]
+    assert lumped_ports[0]["Direction"] == [0.6, 0.8, 0.0]
+    assert lumped_ports[1]["Elements"][0]["Direction"] == [1.0, 0.0, 0.0]
+    assert lumped_ports[1]["Elements"][1]["Direction"] == [0.0, -1.0, 0.0]
+
+
+def test_generate_palace_config_deep_merges_config_hints(tmp_path: Path) -> None:
     groups = {
         "volumes": {"air": {"phys_group": 1}},
         "conductor_surfaces": {},
@@ -180,14 +413,63 @@ def test_generate_palace_config_deep_merges_solver_hints(tmp_path: Path) -> None
         model_name="palace",
         fmax=10e9,
         absorbing_boundary=False,
-        hints={"Solver": {"Device": "GPU", "Backend": "/gpu/cuda"}},
+        hints={
+            "Solver": {
+                "Device": "GPU",
+                "Backend": "/gpu/cuda",
+                "Linear": {"AMSMaxIts": 2},
+            },
+            "Model": {"Refinement": {"MaxIts": 2}},
+            "Problem": {"OutputFormats": {"Paraview": True}},
+        },
     )
 
-    solver = json.loads(config_path.read_text())["Solver"]
+    config = json.loads(config_path.read_text())
+    solver = config["Solver"]
     assert solver["Device"] == "GPU"
     assert solver["Backend"] == "/gpu/cuda"
+    assert solver["Linear"]["AMSMaxIts"] == 2
     assert solver["Linear"]["Type"] == "Default"
-    assert solver["Driven"]["Samples"][0]["Type"] == "Driven"
+    assert solver["Driven"]["Samples"][0]["Type"] == "Linear"
+    assert config["Model"]["Refinement"]["MaxIts"] == 2
+    assert config["Problem"]["OutputFormats"]["Paraview"] is True
+
+
+@pytest.mark.parametrize(
+    ("hints", "message"),
+    [
+        ({"Domains": {"Materials": []}}, r"Domains"),
+        ({"Boundaries": {"PEC": {"Attributes": [1]}}}, r"Boundaries"),
+        ({"Problem": {"Type": "Eigenmode"}}, r"Problem\.Type"),
+        ({"Problem": {"Output": "other"}}, r"Problem\.Output"),
+        ({"Model": {"Mesh": "other.msh"}}, r"Model\.Mesh"),
+    ],
+)
+def test_generate_palace_config_rejects_protected_hints(
+    tmp_path: Path,
+    hints: dict[str, object],
+    message: str,
+) -> None:
+    groups = {
+        "volumes": {"air": {"phys_group": 1}},
+        "conductor_surfaces": {},
+        "pec_surfaces": {},
+        "port_surfaces": {},
+        "boundary_surfaces": {},
+    }
+
+    with pytest.raises(ValueError, match=message):
+        generate_palace_config(
+            groups=groups,
+            ports=[],
+            port_info=[],
+            stack=LayerStack(materials={"air": {"permittivity": 1.0}}),
+            output_path=tmp_path,
+            model_name="palace",
+            fmax=10e9,
+            absorbing_boundary=False,
+            hints=hints,
+        )
 
 
 def test_write_config_merges_postprocessing_config(tmp_path: Path) -> None:
@@ -211,14 +493,13 @@ def test_write_config_merges_postprocessing_config(tmp_path: Path) -> None:
         stack=LayerStack(materials={"air": {"permittivity": 1.0}}),
         ports=[],
         absorbing_boundary=False,
-        postprocessing_config={"SurfaceFlux": [{"Attributes": [22]}]},
+        postprocessing_config={"Energy": [{"Index": 1, "Attributes": [22]}]},
     )
 
     postprocessing = json.loads(config_path.read_text())["Domains"]["Postprocessing"]
     assert mesh_result.config_path == config_path
-    assert postprocessing["Energy"] == []
+    assert postprocessing["Energy"] == [{"Index": 1, "Attributes": [22]}]
     assert postprocessing["Probe"] == []
-    assert postprocessing["SurfaceFlux"] == [{"Attributes": [22]}]
 
 
 def test_write_config_applies_material_overlay_without_mutating_stack(
@@ -269,7 +550,7 @@ def test_write_config_applies_material_overlay_without_mutating_stack(
     assert stack.materials["Si"]["conductivity"] == 2.0
 
     material_resolution = json.loads(
-        (tmp_path / "palace_material_resolution.json").read_text()
+        (tmp_path / "metadata" / "palace_material_resolution.json").read_text()
     )
     row = material_resolution["materials"][0]
     assert row["material_attribute"] == 1
@@ -330,7 +611,7 @@ def test_write_config_applies_material_overlay_alias_to_generated_air(
     assert material["Permeability"] == pytest.approx(1.0)
 
     material_resolution = json.loads(
-        (tmp_path / "palace_material_resolution.json").read_text()
+        (tmp_path / "metadata" / "palace_material_resolution.json").read_text()
     )
     row = material_resolution["materials"][0]
     assert row["material_attribute"] == 1
@@ -401,7 +682,7 @@ def test_write_config_resolves_dielectric_interface_material_overlay(
     assert interface["LossTan"] == 0.0017
 
     material_resolution = json.loads(
-        (tmp_path / "palace_material_resolution.json").read_text()
+        (tmp_path / "metadata" / "palace_material_resolution.json").read_text()
     )
     row = material_resolution["interfaces"][0]
     assert row["surface_index"] == 7
@@ -1141,6 +1422,49 @@ def test_material_kind_interface_specs_accept_generated_name_aliases() -> None:
     )
 
 
+def test_material_kind_interface_specs_use_interface_material_metadata() -> None:
+    groups = _minimal_groups()
+    groups["boundary_surfaces"] = {
+        "D0_SUBSTRATE___OUTER_VACUUM": {
+            "phys_group": 47,
+            "tags": [407],
+            "dim": 2,
+            "interface_materials": {
+                "D0_SUBSTRATE": "Si",
+                "OUTER_VACUUM": "vacuum",
+            },
+        },
+    }
+    manifest = build_mesh_manifest(groups)
+
+    specs = build_dielectric_interface_specs_from_material_kinds(
+        manifest,
+        material_kind_by_name={
+            "Si": "dielectric",
+            "vacuum": "vacuum",
+        },
+        presets={
+            "public_sa": {
+                "interface_type": "SA",
+                "thickness": 0.003,
+                "permittivity": 2.0,
+            },
+        },
+        preset_by_interface_type={"SA": "public_sa"},
+    )
+
+    assert specs == (
+        DielectricInterfaceSpec(
+            interface_type="SA",
+            thickness=0.003,
+            permittivity=2.0,
+            role="boundary_surface",
+            entry_names=("D0_SUBSTRATE___OUTER_VACUUM",),
+            preset_name="public_sa",
+        ),
+    )
+
+
 def test_material_kind_interface_specs_reject_missing_kind() -> None:
     manifest = build_mesh_manifest(_minimal_groups())
 
@@ -1266,10 +1590,14 @@ def test_material_kind_interface_specs_stay_in_mesh_owner_module() -> None:
 
 def test_manifest_row_builders_and_type_aliases_stay_in_owner_modules() -> None:
     import gsim.palace.mesh as mesh
-    from gsim.palace.mesh import manifest, postprocessing
+    from gsim.palace.mesh import manifest, postprocessing, surface_epr
 
     assert mesh.MeshManifest is manifest.MeshManifest
     assert mesh.SurfaceFluxSpec is postprocessing.SurfaceFluxSpec
+    assert (
+        mesh.build_interface_surface_catalog
+        is surface_epr.build_interface_surface_catalog
+    )
     assert (
         mesh.build_postprocessing_config_from_manifest
         is postprocessing.build_postprocessing_config_from_manifest

@@ -1,7 +1,7 @@
 """Dependency-light helpers shared by Palace package internals.
 
-This module owns only scalar coercion, JSON conversion, path formatting, and
-small record helpers that are reused across Palace resolve and typed-data code.
+This module owns only scalar coercion, JSON conversion, and small record helpers
+that are reused across Palace resolve and typed-data code.
 It does not know about solver artifacts, problem reports, display policy,
 physics columns, or handoff workflows.
 """
@@ -106,11 +106,6 @@ def json_ready(value: Any) -> Any:
     if isinstance(value, Iterable) and not isinstance(value, str | bytes):
         return [json_ready(item) for item in value]
     return value
-
-
-def path_value(value: Any) -> str:
-    """Return a stable string representation for path-like sidecar fields."""
-    return str(value)
 
 
 def relative_path_or_name(path: Path, root: Path) -> str:

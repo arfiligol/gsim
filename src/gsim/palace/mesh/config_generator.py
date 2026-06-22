@@ -1,19 +1,35 @@
-"""Palace configuration file generation.
+"""Palace configuration assembly from mesh-side physical groups.
 
-This module handles generating Palace config.json and collecting mesh statistics.
+This module owns the final Palace ``Domains`` and ``Boundaries`` sections and
+the material-resolution sidecar mapping from mesh groups to stack or overlay
+material properties. It consumes mesh groups, manifests, ports, terminals, and
+solver settings after Gmsh has assigned physical names. Region activation and
+Gmsh geometry construction stay in the simulation API and mesh geometry layers;
+this module maps their finalized groups into Palace config artifacts.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import gmsh
 
+from gsim.palace.config_validation import validate_palace_config
+from gsim.palace.models.ports import (
+    PalaceDirectionInput,
+    PortType,
+    normalize_palace_direction,
+)
+from gsim.palace.models.versions import (
+    DEFAULT_PALACE_CONFIG_VERSION,
+    PalaceConfigVersion,
+    normalize_palace_config_version,
+)
 from gsim.palace.run_folder import palace_run_folder, prepare_palace_run_folder
-from gsim.palace.ports.config import PortType
 
 if TYPE_CHECKING:
     from gsim.common.stack import LayerStack
@@ -25,9 +41,8 @@ if TYPE_CHECKING:
         MagnetostaticConfig,
         NumericalConfig,
     )
-    from gsim.palace.models.ports import TerminalConfig
+    from gsim.palace.models.ports import PalacePort, TerminalConfig
     from gsim.palace.models.sources import CurrentDirection
-    from gsim.palace.ports.config import PalacePort
 
 
 def _palace_direction(value: CurrentDirection) -> str | list[float]:
@@ -35,6 +50,33 @@ def _palace_direction(value: CurrentDirection) -> str | list[float]:
     if isinstance(value, str):
         return value
     return [float(item) for item in value]
+
+
+def _palace_lumped_port_direction(value: PalaceDirectionInput) -> list[float]:
+    """Return the Palace JSON vector for a LumpedPort direction."""
+    return [float(item) for item in normalize_palace_direction(value)]
+
+
+def _default_refinement_config() -> dict[str, Any]:
+    return {
+        "Tol": 1.0e-2,
+        "MaxIts": 0,
+        "MaxSize": 0,
+        "UpdateFraction": 0.7,
+        "Nonconformal": True,
+        "UniformLevels": 0,
+        "Boxes": [],
+        "Spheres": [],
+    }
+
+
+def _merged_refinement_config(
+    refinement_config: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    refinement = _default_refinement_config()
+    if refinement_config:
+        _deep_merge_config(refinement, dict(refinement_config))
+    return refinement
 
 
 def generate_palace_config(
@@ -49,9 +91,13 @@ def generate_palace_config(
     driven_config: DrivenConfig | None = None,
     eigenmode_config: EigenmodeConfig | None = None,
     numerical_config: NumericalConfig | None = None,
+    refinement_config: Mapping[str, Any] | None = None,
+    palace_version: PalaceConfigVersion = DEFAULT_PALACE_CONFIG_VERSION,
+    validate_schema: bool = True,
     absorbing_boundary: bool = True,
     periodic_axis: str | None = None,
     hints: dict[str, Any] | None = None,
+    problem_output_formats: Mapping[str, Any] | None = None,
     electrostatic_config: ElectrostaticConfig | None = None,
     terminals: list[TerminalConfig] | None = None,
     magnetostatic_config: MagnetostaticConfig | None = None,
@@ -75,9 +121,15 @@ def generate_palace_config(
             When provided, material dispersion is evaluated at the center
             frequency ``(fmin + fmax) / 2`` of the sweep band.
         eigenmode_config: Optional EigenmodeConfig for eigenproblems settings
+        numerical_config: Optional NumericalConfig for generic solver settings.
+        refinement_config: Optional Palace ``Model.Refinement`` fragment.
+        palace_version: Target Palace configuration schema version.
+        validate_schema: Validate the final assembled JSON against the target
+            Palace version schema before writing.
         absorbing_boundary: Whether to add absorbing (PML) boundary
         periodic_axis: Optional periodic axis identifier
         hints: Additional config hints merged into the JSON
+        problem_output_formats: Optional Palace ``Problem.OutputFormats`` fragment.
         postprocessing_config: Optional Palace ``Domains.Postprocessing`` entries
             merged into the default empty postprocessing block.
         boundary_postprocessing_config: Optional Palace
@@ -92,8 +144,6 @@ def generate_palace_config(
     Returns:
         Path to the generated config.json
     """
-    from gsim.palace.ports.config import PortGeometry
-
     run_folder = (
         prepare_palace_run_folder(output_path)
         if prepare_run_folder
@@ -109,6 +159,8 @@ def generate_palace_config(
     ):
         raise ValueError(f"Unsupported simulation type: {simulation_type}")
 
+    palace_version = normalize_palace_config_version(palace_version)
+
     # Use driven_config if provided, otherwise fall back to legacy parameters
     if driven_config is not None:
         solver_driven = driven_config.to_palace_config()
@@ -118,7 +170,7 @@ def generate_palace_config(
         solver_driven = {
             "Samples": [
                 {
-                    "Type": "Driven",
+                    "Type": "Linear",
                     "MinFreq": 1.0,  # 1 GHz
                     "MaxFreq": fmax / 1e9,
                     "FreqStep": freq_step,
@@ -132,30 +184,25 @@ def generate_palace_config(
         solver_eigenmode = eigenmode_config.to_palace_config()
     else:
         # Legacy behavior - compute from fmax
-        solver_eigenmode = (
-            {
-                "N": 10,
-                "Tol": 1.0e-6,
-                "Target": fmax,
-            },
-        )
+        solver_eigenmode = {
+            "N": 10,
+            "Tol": 1.0e-6,
+            "Target": fmax / 1e9,
+        }
 
     solver_conf: dict[str, object]
     if numerical_config is not None:
-        solver_conf = dict(numerical_config.to_solver_config())
+        solver_conf = dict(
+            numerical_config.to_solver_config(palace_version=palace_version)
+        )
     else:
         # Backward-compatible defaults for direct generate_palace_config() calls
         # that do not provide a NumericalConfig.
-        solver_conf = {
-            "Linear": {
-                "Type": "Default",
-                "KSPType": "GMRES",
-                "Tol": 1e-6,
-                "MaxIts": 1000,
-            },
-            "Order": 2,
-            "Device": "CPU",
-        }
+        from gsim.palace.models import NumericalConfig
+
+        solver_conf = dict(
+            NumericalConfig().to_solver_config(palace_version=palace_version)
+        )
 
     if simulation_type == "driven":
         solver_conf["Driven"] = solver_driven
@@ -172,20 +219,28 @@ def generate_palace_config(
         else:
             solver_conf["Magnetostatic"] = {"Save": 0}
 
+    palace_problem_type = {
+        "driven": "Driven",
+        "eigenmode": "Eigenmode",
+        "electrostatic": "Electrostatic",
+        "electrostatics": "Electrostatic",
+        "magnetostatic": "Magnetostatic",
+    }[simulation_type]
+
+    problem_config: dict[str, object] = {
+        "Type": palace_problem_type,
+        "Verbose": 3,
+        "Output": "results/palace",
+    }
+    if problem_output_formats:
+        problem_config["OutputFormats"] = deepcopy(dict(problem_output_formats))
+
     config: dict[str, object] = {
-        "Problem": {
-            "Type": simulation_type.capitalize(),
-            "Verbose": 3,
-            "Output": "results/palace",
-        },
+        "Problem": problem_config,
         "Model": {
             "Mesh": f"{model_name}.msh",
             "L0": 1e-6,  # um
-            "Refinement": {
-                "UniformLevels": 0,
-                "Tol": 1e-2,
-                "MaxIts": 0,
-            },
+            "Refinement": _merged_refinement_config(refinement_config),
         },
         "Solver": solver_conf,
     }
@@ -226,6 +281,22 @@ def generate_palace_config(
                 continue
             stack_material_name = layer.material
             mat_props = stack_materials.get(stack_material_name, {})
+        elif info.get("stack_layer") is not None:
+            stack_layer_name = str(info["stack_layer"])
+            layer = stack.layers.get(stack_layer_name)
+            if layer is None:
+                raise ValueError(
+                    f"Mesh volume '{volume_name}' references missing stack layer "
+                    f"'{stack_layer_name}'."
+                )
+            stack_material_name = str(info.get("material") or layer.material)
+            mat_props = stack_materials.get(stack_material_name, {})
+            if not mat_props:
+                raise ValueError(
+                    f"Activated region '{volume_name}' uses material "
+                    f"'{stack_material_name}', but that material is not defined "
+                    "in the layer stack or material overlay."
+                )
         else:
             stack_material_name = material_name
             mat_props = stack_materials.get(stack_material_name, {})
@@ -310,14 +381,19 @@ def generate_palace_config(
     conductors: list[dict[str, object]] = []
 
     for name, info in groups["conductor_surfaces"].items():
+        if info.get("postprocessing_only"):
+            continue
+        boundary_attrs = _boundary_attributes_for_conductor_surface(groups, info)
+        if not boundary_attrs:
+            continue
         # Extract layer name from "layer_xy" or "layer_z"
-        layer_name = name.rsplit("_", 1)[0]
+        layer_name = str(info.get("layer", name.rsplit("_", 1)[0]))
         layer = stack.layers.get(layer_name)
         if layer:
             mat_props = stack_materials.get(layer.material, {})
             conductors.append(
                 {
-                    "Attributes": [info["phys_group"]],
+                    "Attributes": boundary_attrs,
                     "Conductivity": mat_props.get("conductivity", 5.8e7),
                     "Thickness": layer.zmax - layer.zmin,
                 }
@@ -343,11 +419,23 @@ def generate_palace_config(
         # Anything that wasn't assigned to a terminal becomes Ground.
         ground_attrs: list[int] = []
         for surf_info in groups.get("conductor_surfaces", {}).values():
+            if surf_info.get("postprocessing_only"):
+                continue
             ground_attrs.extend(
                 pg
-                for pg in _physical_group_values(surf_info.get("phys_group"))
+                for pg in _boundary_attributes_for_conductor_surface(
+                    groups,
+                    surf_info,
+                )
                 if pg not in assigned_pgs
             )
+        for source_id in _finite_conductor_split_source_ids(groups):
+            child_attrs = _finite_conductor_split_boundary_attributes(
+                groups,
+                source_id,
+            )
+            if child_attrs and not set(child_attrs) & assigned_pgs:
+                ground_attrs.extend(child_attrs)
         pec_surfaces = groups.get("pec_surfaces", {})
         for surf_info in pec_surfaces.values():
             ground_attrs.extend(
@@ -433,7 +521,9 @@ def generate_palace_config(
                         elements = [
                             {
                                 "Attributes": [elem["phys_group"]],
-                                "Direction": elem["direction"],
+                                "Direction": _palace_lumped_port_direction(
+                                    elem["direction"]
+                                ),
                             }
                             for elem in port_group["elements"]
                         ]
@@ -448,11 +538,7 @@ def generate_palace_config(
                 else:
                     # Single-element port
                     if port.port_type == PortType.LUMPED:
-                        direction = (
-                            "Z"
-                            if port.geometry == PortGeometry.VIA
-                            else port.direction.upper()
-                        )
+                        direction = _palace_lumped_port_direction(port.direction)
 
                         has_reactive = (
                             port.resistance is not None
@@ -620,7 +706,14 @@ def generate_palace_config(
 
     # Merge any extra hints into the config
     if hints:
+        _reject_protected_config_hints(hints)
         _deep_merge_config(config, hints)
+
+    if validate_schema:
+        validate_palace_config(
+            cast(dict[str, Any], config),
+            palace_version=palace_version,
+        )
 
     # Write config file
     config_path = run_folder.config_path
@@ -693,6 +786,14 @@ def _selector_entries(
             pec_surfaces=pec_surfaces,
             via_boundary=via_boundary,
         )
+        duplicate_attrs = sorted(attr for attr in unique_attrs if attr in assigned_pgs)
+        if duplicate_attrs:
+            selector_name = getattr(selector, "name", f"T{idx}")
+            raise ValueError(
+                f"Terminal {selector_name!r} on layer {selector.layer!r} matched "
+                "attributes already selected by earlier terminals: "
+                f"{duplicate_attrs}."
+            )
         selected_vias.update(selector_vias)
         assigned_pgs.update(unique_attrs)
         entries.append(
@@ -729,9 +830,17 @@ def _selector_attributes(
     )
 
     for surf_name, surf_info in groups.get("conductor_surfaces", {}).items():
-        surf_layer = surf_name.rsplit("_", 1)[0]
-        if surf_layer == selector.layer:
-            attrs.extend(_physical_group_values(surf_info.get("phys_group")))
+        if surf_info.get("postprocessing_only"):
+            continue
+        if _conductor_matches_selector(surf_name, surf_info, selector):
+            attrs.extend(
+                _boundary_attributes_for_conductor_surface(groups, surf_info)
+            )
+    for source_id in _finite_conductor_split_sources_for_selector(
+        groups,
+        selector,
+    ):
+        attrs.extend(_finite_conductor_split_boundary_attributes(groups, source_id))
 
     for pec_name, pec_info in resolved_pec_surfaces.items():
         if _pec_matches_selector(pec_name, pec_info, selector):
@@ -743,6 +852,93 @@ def _selector_attributes(
             selected_vias.add(via_name)
 
     return sorted(set(attrs)), selected_vias
+
+
+def _boundary_attributes_for_conductor_surface(
+    groups: dict[str, Any],
+    surf_info: dict[str, object],
+) -> list[int]:
+    if surf_info.get("source") == "finite_conductor_terminal_shell":
+        source_id = surf_info.get("source_id")
+        if isinstance(source_id, str) and source_id:
+            child_attrs = _finite_conductor_split_boundary_attributes(
+                groups,
+                source_id,
+            )
+            if child_attrs:
+                return child_attrs
+    return _physical_group_values(surf_info.get("phys_group"))
+
+
+def _finite_conductor_split_boundary_attributes(
+    groups: dict[str, Any],
+    source_id: str,
+) -> list[int]:
+    attrs: list[int] = []
+    for info in groups.get("conductor_surfaces", {}).values():
+        if not isinstance(info, dict):
+            continue
+        if info.get("source_id") != source_id:
+            continue
+        if not info.get("postprocessing_only") or not info.get("surface_epr"):
+            continue
+        if info.get("surface_epr_summary_kind") == "total":
+            continue
+        attrs.extend(_physical_group_values(info.get("phys_group")))
+    return sorted(set(attrs))
+
+
+def _finite_conductor_split_source_ids(groups: dict[str, Any]) -> tuple[str, ...]:
+    source_ids: list[str] = []
+    for info in groups.get("conductor_surfaces", {}).values():
+        if not isinstance(info, dict):
+            continue
+        if not info.get("postprocessing_only") or not info.get("surface_epr"):
+            continue
+        if info.get("surface_epr_summary_kind") == "total":
+            continue
+        source_id = info.get("source_id")
+        if isinstance(source_id, str) and source_id:
+            source_ids.append(source_id)
+    return tuple(dict.fromkeys(source_ids))
+
+
+def _finite_conductor_split_sources_for_selector(
+    groups: dict[str, Any],
+    selector: Any,
+) -> tuple[str, ...]:
+    source_ids: list[str] = []
+    for info in groups.get("conductor_surfaces", {}).values():
+        if not isinstance(info, dict):
+            continue
+        if not info.get("postprocessing_only") or not info.get("surface_epr"):
+            continue
+        if info.get("surface_epr_summary_kind") == "total":
+            continue
+        if info.get("layer") != selector.layer:
+            continue
+        if selector.center is not None and not _bbox_contains_center(
+            info.get("bbox"),
+            selector.center,
+        ):
+            continue
+        source_id = info.get("source_id")
+        if isinstance(source_id, str) and source_id:
+            source_ids.append(source_id)
+    return tuple(dict.fromkeys(source_ids))
+
+
+def _conductor_matches_selector(
+    surf_name: str,
+    surf_info: dict[str, object],
+    selector: Any,
+) -> bool:
+    surf_layer = surf_info.get("layer", surf_name.rsplit("_", 1)[0])
+    if surf_layer != selector.layer and surf_name != selector.layer:
+        return False
+    if selector.center is None:
+        return True
+    return _bbox_contains_center(surf_info.get("bbox"), selector.center)
 
 
 def _surface_current_entry(
@@ -814,14 +1010,20 @@ def _pec_matches_selector(
         return False
     if selector.center is None:
         return True
-    bbox = pec_info.get("bbox")
+    return _bbox_contains_center(pec_info.get("bbox"), selector.center)
+
+
+def _bbox_contains_center(
+    bbox: Any,
+    center: tuple[float, float],
+) -> bool:
     if (
         not isinstance(bbox, (list, tuple))
         or len(bbox) != 6
         or not all(isinstance(value, (int, float)) for value in bbox)
     ):
         return False
-    x, y = selector.center
+    x, y = center
     tol = 1e-6
     return (
         float(bbox[0]) - tol <= x <= float(bbox[3]) + tol
@@ -918,6 +1120,35 @@ def _deep_merge_config(target: dict[str, Any], updates: dict[str, Any]) -> None:
             _deep_merge_config(existing, value)
         else:
             target[key] = deepcopy(value)
+
+
+_PROTECTED_HINT_PATHS: tuple[tuple[str, ...], ...] = (
+    ("Domains",),
+    ("Boundaries",),
+    ("Problem", "Type"),
+    ("Problem", "Output"),
+    ("Model", "Mesh"),
+)
+
+
+def _hint_path(path: tuple[str, ...]) -> str:
+    return ".".join(path)
+
+
+def _reject_protected_config_hints(
+    hints: Mapping[str, Any],
+    *,
+    path: tuple[str, ...] = (),
+) -> None:
+    for key, value in hints.items():
+        current_path = (*path, str(key))
+        if current_path in _PROTECTED_HINT_PATHS:
+            raise ValueError(
+                "Palace config hints cannot overwrite "
+                f"{_hint_path(current_path)}. Use the typed owner API instead."
+            )
+        if isinstance(value, Mapping):
+            _reject_protected_config_hints(value, path=current_path)
 
 
 def _resolve_single_interface_material(
@@ -1100,8 +1331,12 @@ def write_config(
     driven_config: DrivenConfig | None = None,
     eigenmode_config: EigenmodeConfig | None = None,
     numerical_config: NumericalConfig | None = None,
+    refinement_config: Mapping[str, Any] | None = None,
+    palace_version: PalaceConfigVersion = DEFAULT_PALACE_CONFIG_VERSION,
+    validate_schema: bool = True,
     absorbing_boundary: bool = True,
     hints: dict[str, Any] | None = None,
+    problem_output_formats: Mapping[str, Any] | None = None,
     electrostatic_config: ElectrostaticConfig | None = None,
     terminals: list[TerminalConfig] | None = None,
     magnetostatic_config: MagnetostaticConfig | None = None,
@@ -1125,6 +1360,7 @@ def write_config(
         eigenmode_config: Optional EigenmodeConfig for eigenproblems settings
         absorbing_boundary: Whether to add absorbing (PML) boundary
         hints: Additional config hints merged into the JSON
+        problem_output_formats: Optional Palace ``Problem.OutputFormats`` fragment.
         postprocessing_config: Optional Palace ``Domains.Postprocessing`` entries
             merged into the default empty postprocessing block.
         boundary_postprocessing_config: Optional Palace
@@ -1163,9 +1399,13 @@ def write_config(
         driven_config=driven_config,
         eigenmode_config=eigenmode_config,
         numerical_config=numerical_config,
+        refinement_config=refinement_config,
+        palace_version=palace_version,
+        validate_schema=validate_schema,
         absorbing_boundary=absorbing_boundary,
         periodic_axis=mesh_result.periodic_axis,
         hints=hints,
+        problem_output_formats=problem_output_formats,
         electrostatic_config=electrostatic_config,
         terminals=terminals,
         magnetostatic_config=magnetostatic_config,

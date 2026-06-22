@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-from gsim.palace.display import DisplayValue, PlotlyFigure
+from gsim.palace.display import DisplayValue, PlotlyFigure, make_trace_figure
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -76,7 +76,6 @@ class Eigenmodes:
         """Plot final eigenmode frequencies by mode index."""
         if self.dataframe.empty:
             return None
-        from gsim.palace.display import make_trace_figure
 
         return make_trace_figure(
             (
@@ -125,8 +124,6 @@ class EigenmodeConvergence:
         required = {"iteration_index", "frequency_ghz", "mode_index"}
         if self.mode_history.empty or not required.issubset(self.mode_history.columns):
             return None
-
-        from gsim.palace.display import make_trace_figure
 
         traces = []
         for mode_index, frame in self.mode_history.groupby("mode_index", sort=True):

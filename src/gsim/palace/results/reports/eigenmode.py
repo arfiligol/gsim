@@ -113,13 +113,20 @@ class EigenmodeReport(BasePalaceReport):
         typed_data: list[VisualizationProvider] = [
             *super().typed_results(),
             self.eigenmodes,
-            self.convergence,
-            self.domain_energy_result,
-            self.surface_q_result,
         ]
+        if (
+            not self.convergence.mode_history.empty
+            or not self.convergence.pass_summary.empty
+        ):
+            typed_data.append(self.convergence)
+        if not self.domain_energy.empty:
+            typed_data.append(self.domain_energy_result)
+        if not self.surface_q.empty:
+            typed_data.append(self.surface_q_result)
         if not self.port_epr.empty:
             typed_data.append(self.port_epr_result)
-        typed_data.append(self.loss)
+        if not self.loss.empty:
+            typed_data.append(self.loss)
         return tuple(typed_data)
 
     def to_sweep_metrics(self) -> dict[str, Any]:

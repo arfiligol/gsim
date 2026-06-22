@@ -1,26 +1,15 @@
 """Local Palace execution for the Run Stage.
 
-Responsibility:
-Owns local Palace command construction, optional caller-provided environment
-setup, process execution, local-run metadata, and immediate result discovery.
+This module builds and runs a local Palace command from a canonical run folder,
+including optional caller-provided setup commands, process execution,
+local-run metadata, and immediate result discovery.
 
-Does not own:
 Simulation model state, mesh/config generation, Slurm handoff archives, cloud
-submission, Resolve/report construction, typed report display, or PDK-specific
-runtime policy.
-
-Inputs:
-A canonical Palace run folder containing ``config.json`` and ``palace.msh``,
-plus explicit caller runtime options from ``PalaceSimBase.run_local()``.
-
-Outputs:
-Raw Palace outputs under ``results/palace`` and
-``metadata/palace_run_metadata.json``. Driven runs return ``SParams`` when
-``port-S.csv`` is present; other runs return raw result paths.
-
-Pipeline position:
-``sim.run_local()`` facade -> local executor -> ``results/palace`` /
-``metadata`` -> ``resolve_palace_result(run_folder, ...)``.
+submission, Resolve/report construction, typed report display, and PDK-specific
+runtime policy are owned by adjacent layers. Local execution consumes a folder
+with ``config.json`` and ``palace.msh``, writes raw solver outputs under
+``results/palace`` and metadata under ``metadata``, then leaves the folder ready
+for ``resolve_palace_result(run_folder, ...)``.
 """
 
 from __future__ import annotations
@@ -28,25 +17,33 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import subprocess
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import Any, Literal
 
+from gsim.palace.resolve.sources.resources import write_palace_resource_record_from_log
 from gsim.palace.run_folder import (
     palace_run_folder,
     prepare_palace_run_folder,
     relative_to_run_folder,
 )
 
-if TYPE_CHECKING:
-    from gsim.palace.results.driven import SParams
-
 logger = logging.getLogger(__name__)
+
+PALACE_VERSION_LINE_PATTERN = re.compile(
+    r"\bpalace\b.*?(?<![-_/@])v?(\d+\.\d+\.\d+)\b",
+    re.IGNORECASE,
+)
+PALACE_PACKAGE_PATH_VERSION_PATTERN = re.compile(
+    r"\bpalace-(\d+\.\d+\.\d+)-",
+    re.IGNORECASE,
+)
 
 
 def redact_local_palace_command(
@@ -94,6 +91,57 @@ def build_local_setup_shell_command(
     return ["/bin/bash", "-lc", "\n".join(script_lines)]
 
 
+def parse_palace_runtime_version(output: str) -> str | None:
+    """Extract a Palace semantic version from executable output.
+
+    The local runner often invokes Palace through wrappers, MPI launchers, or
+    Spack setup commands. Those layers can print dependency versions such as
+    ``Open MPI 5.0.8`` before Palace itself prints anything. Palace's own
+    ``--version`` output may report only a commit hash, so Spack package paths
+    like ``palace-0.16.0-...`` are the fallback source for config-version audit.
+    """
+    for line in output.splitlines():
+        match = PALACE_VERSION_LINE_PATTERN.search(line)
+        if match is not None:
+            return match.group(1)
+    package_match = PALACE_PACKAGE_PATH_VERSION_PATTERN.search(output)
+    if package_match is not None:
+        return package_match.group(1)
+    return None
+
+
+def detect_palace_runtime_version(
+    version_cmd: Sequence[str],
+    *,
+    cwd: Path,
+    env: Mapping[str, str],
+    setup_commands: Sequence[str],
+) -> tuple[str | None, str]:
+    """Run a best-effort Palace version command and return version plus output."""
+    run_cmd = (
+        build_local_setup_shell_command(setup_commands, version_cmd)
+        if setup_commands
+        else list(version_cmd)
+    )
+    try:
+        result = subprocess.run(  # noqa: S603
+            run_cmd,
+            cwd=cwd,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=dict(env),
+            timeout=30,
+        )
+    except Exception as exc:
+        return None, str(exc)
+    output = "\n".join(part for part in (result.stdout, result.stderr) if part)
+    runtime_version = parse_palace_runtime_version(output)
+    if runtime_version is None:
+        runtime_version = parse_palace_runtime_version(shlex.join(version_cmd))
+    return runtime_version, output.strip()
+
+
 def write_local_run_metadata(
     *,
     output_dir: Path,
@@ -110,6 +158,12 @@ def write_local_run_metadata(
     serial: bool,
     omp_num_threads: str | None,
     files: dict[str, Path],
+    target_palace_version: str | None,
+    runtime_palace_version: str | None,
+    runtime_version_output: str | None,
+    runtime_version_check: str,
+    palace_log_path: Path | None = None,
+    resource_record_path: Path | None = None,
 ) -> Path:
     """Write ``metadata/palace_run_metadata.json`` for a completed local run."""
     launcher: dict[str, object]
@@ -130,7 +184,7 @@ def write_local_run_metadata(
             ),
         }
 
-    metadata = {
+    metadata: dict[str, Any] = {
         "schema_version": 1,
         "created_at_utc": datetime.now(UTC).isoformat(timespec="seconds"),
         "status": "completed",
@@ -164,6 +218,24 @@ def write_local_run_metadata(
             for name, path in sorted(files.items())
         },
     }
+    if target_palace_version is not None or runtime_palace_version is not None:
+        metadata["palace_version"] = {
+            "target": target_palace_version,
+            "runtime": runtime_palace_version,
+            "check": runtime_version_check,
+        }
+        if runtime_version_output:
+            metadata["palace_version"]["output"] = runtime_version_output
+    if palace_log_path is not None:
+        metadata["paths"]["palace_log"] = relative_to_run_folder(
+            palace_log_path,
+            output_dir,
+        )
+    if resource_record_path is not None:
+        metadata["paths"]["resource_record"] = relative_to_run_folder(
+            resource_record_path,
+            output_dir,
+        )
     metadata_path = palace_run_folder(output_dir).local_run_metadata_path
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
@@ -183,7 +255,9 @@ def run_palace_local(
     setup_commands: Sequence[str] | None = None,
     verbose: bool = True,
     prepare_run_folder: bool = True,
-) -> SParams | dict[str, Path]:
+    palace_version: str | None = None,
+    check_runtime_version: bool = True,
+) -> dict[str, Path]:
     """Run Palace locally against a prepared canonical run folder."""
     if executable_mode not in {"wrapper", "binary"}:
         raise ValueError("executable_mode must be 'wrapper' or 'binary'")
@@ -250,6 +324,7 @@ def run_palace_local(
             "-np",
             str(num_processes),
         ]
+        version_cmd = ["apptainer", "run", str(sif_path), "--version"]
 
     else:
         if palace_executable is None:
@@ -290,11 +365,38 @@ def run_palace_local(
             if serial:
                 cmd.append("-serial")
             cmd.extend(["-np", str(num_processes)])
+        version_cmd = [str(resolved_exe_path), "--version"]
 
     if num_threads is not None and not (
         not use_apptainer and executable_mode == "binary"
     ):
         cmd.extend(["-nt", str(num_threads)])
+    runtime_version, runtime_version_output = detect_palace_runtime_version(
+        version_cmd,
+        cwd=output_path,
+        env=run_env,
+        setup_commands=normalized_setup_commands,
+    )
+    runtime_version_check = "not_requested"
+    if palace_version is not None:
+        if runtime_version is None:
+            runtime_version_check = "unknown"
+            if verbose:
+                logger.warning(
+                    "Could not detect Palace runtime version before local run."
+                )
+        elif runtime_version != palace_version:
+            runtime_version_check = "mismatch"
+            message = (
+                "Palace runtime version "
+                f"{runtime_version!r} does not match target config version "
+                f"{palace_version!r}."
+            )
+            if check_runtime_version:
+                raise RuntimeError(message)
+            logger.warning(message)
+        else:
+            runtime_version_check = "matched"
     cmd.extend(["config.json"])
     run_cmd = (
         build_local_setup_shell_command(normalized_setup_commands, cmd)
@@ -323,25 +425,32 @@ def run_palace_local(
 
     started = time.perf_counter()
     returncode: int | None = None
+    palace_log_path = run_folder.logs_dir / "palace-local.log"
+    palace_log_path.parent.mkdir(parents=True, exist_ok=True)
+    palace_log_path.write_text("", encoding="utf-8")
     try:
         if verbose:
             streamed_lines: list[str] = []
-            with subprocess.Popen(  # noqa: S603
-                run_cmd,
-                cwd=output_path,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                env=run_env,
-            ) as process:
-                if process.stdout is not None:
-                    for line in process.stdout:
-                        line = line.rstrip("\n")
-                        streamed_lines.append(line)
-                        if line:
-                            emit_info(line)
-                returncode = process.wait()
+            with palace_log_path.open("w", encoding="utf-8") as log_stream:
+                process_context = subprocess.Popen(  # noqa: S603
+                    run_cmd,
+                    cwd=output_path,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    env=run_env,
+                )
+                with process_context as process:
+                    if process.stdout is not None:
+                        for line in process.stdout:
+                            log_stream.write(line)
+                            log_stream.flush()
+                            line = line.rstrip("\n")
+                            streamed_lines.append(line)
+                            if line:
+                                emit_info(line)
+                    returncode = process.wait()
 
             if returncode != 0:
                 tail = "\n".join(streamed_lines[-200:])
@@ -363,6 +472,11 @@ def run_palace_local(
                 logger.debug(result.stdout)
             if result.stderr:
                 emit_warning(result.stderr)
+            log_output = "".join(
+                part for part in (result.stdout, result.stderr) if part
+            )
+            if log_output:
+                palace_log_path.write_text(log_output, encoding="utf-8")
     except FileNotFoundError as e:
         if use_apptainer:
             raise RuntimeError(
@@ -388,11 +502,25 @@ def run_palace_local(
         for file in postpro_dir.iterdir()
         if file.is_file() and not file.name.startswith(".")
     }
+    elapsed_seconds = time.perf_counter() - started
+    resource_record_path: Path | None = None
+    if palace_log_path.stat().st_size > 0:
+        allocation: dict[str, int] = {"num_processes": num_processes}
+        if num_threads is not None:
+            allocation["num_threads"] = num_threads
+        resource_record_path = write_palace_resource_record_from_log(
+            output_path,
+            palace_log_path,
+            launcher={"kind": "local"},
+            allocation=allocation,
+            runtime={"elapsed_seconds": elapsed_seconds},
+            metadata={"source": "run_palace_local"},
+        )
     write_local_run_metadata(
         output_dir=output_path,
         postpro_dir=postpro_dir,
         cmd=cmd,
-        elapsed_seconds=time.perf_counter() - started,
+        elapsed_seconds=elapsed_seconds,
         returncode=0 if returncode is None else returncode,
         use_apptainer=use_apptainer,
         executable_mode=executable_mode,
@@ -403,20 +531,15 @@ def run_palace_local(
         serial=serial,
         omp_num_threads=run_env.get("OMP_NUM_THREADS"),
         files=files,
+        target_palace_version=palace_version,
+        runtime_palace_version=runtime_version,
+        runtime_version_output=runtime_version_output,
+        runtime_version_check=runtime_version_check,
+        palace_log_path=palace_log_path,
+        resource_record_path=resource_record_path,
     )
 
-    from gsim.palace.results.driven import load_sparams
-
-    try:
-        return load_sparams(files)
-    except FileNotFoundError:
-        return files
+    return files
 
 
-__all__ = [
-    "build_local_setup_shell_command",
-    "redact_local_palace_command",
-    "run_palace_local",
-    "validate_local_setup_commands",
-    "write_local_run_metadata",
-]
+__all__ = ["run_palace_local"]

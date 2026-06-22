@@ -1,24 +1,13 @@
 """Run-stage models for Palace execution and handoff workflows.
 
-Responsibility:
-Owns lightweight handles returned by Palace run-stage APIs after a run folder
-has been prepared, executed, or packaged.
+This module defines the lightweight handles returned after a Palace run folder
+has been prepared, executed, or packaged. The handles keep notebooks focused on
+the run folder and optional launcher/archive references.
 
-Does not own:
 Resolve/report loading, typed result data, Slurm rendering, cloud submission,
-or local process execution.
-
-Inputs:
-Run-stage APIs provide canonical run-folder paths and optional launcher/archive
-references.
-
-Outputs:
-Notebook-friendly handles that can be passed into Resolve by using
-``handle.run_folder``.
-
-Pipeline position:
-``sim.write_config() / sim.generate_handoff_package()`` ->
-``PalaceRunHandle`` -> ``resolve_palace_result(handle.run_folder)``.
+and local process execution are implemented elsewhere. A typical notebook path
+is ``sim.write_config()`` or ``sim.generate_handoff_package()``, then a
+``PalaceRunHandle``, then ``resolve_palace_result(handle.run_folder)``.
 """
 
 from __future__ import annotations
@@ -39,7 +28,7 @@ class PalaceRunHandle:
     """
 
     run_folder: Path
-    kind: Literal["handoff", "slurm", "local", "cloud"]
+    kind: Literal["handoff", "slurm", "local"]
     status: str
     problem_type: str | None = None
     profile_name: str | None = None
@@ -47,7 +36,6 @@ class PalaceRunHandle:
     archive_path: Path | None = None
     metadata_path: Path | None = None
     archive_manifest_path: Path | None = None
-    cloud_job_id: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -70,7 +58,6 @@ class PalaceRunHandle:
             "archive_manifest_path": None
             if self.archive_manifest_path is None
             else self.archive_manifest_path.as_posix(),
-            "cloud_job_id": self.cloud_job_id,
             "metadata": dict(self.metadata),
         }
 

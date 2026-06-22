@@ -1,13 +1,28 @@
 """Numerical solver configuration models for Palace simulations.
 
-This module contains Pydantic models for numerical solver settings.
+This module owns the small ``gsim`` numerical API and serializes it to Palace
+JSON fragments. Full Palace key coverage stays with the vendored JSON schemas.
 """
 
 from __future__ import annotations
 
-from typing import Literal
+from copy import deepcopy
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from gsim.palace.models.versions import PalaceConfigVersion
+
+PalaceLinearSolverType = Literal[
+    "AMS",
+    "BoomerAMG",
+    "SuperLU",
+    "MUMPS",
+    "STRUMPACK",
+    "Jacobi",
+    "Default",
+]
+PalaceDevice = Literal["CPU", "GPU", "Debug"]
 
 
 class NumericalConfig(BaseModel):
@@ -60,42 +75,65 @@ class NumericalConfig(BaseModel):
         description="Maximum Krylov solver iterations. Increase if solver "
         "does not converge.",
     )
-    solver_type: Literal["Default", "SuperLU", "STRUMPACK", "MUMPS"] = Field(
+    solver_type: PalaceLinearSolverType = Field(
         default="Default",
         description="Linear solver backend. 'Default' auto-selects. "
         "Direct solvers (SuperLU, STRUMPACK, MUMPS) are more robust "
-        "but use more memory.",
+        "but use more memory. AMS, BoomerAMG, and Jacobi select iterative "
+        "preconditioners directly.",
     )
 
     preconditioner: Literal["Default", "AMS", "BoomerAMG"] = Field(
         default="Default",
-        description="Preconditioner type. 'AMS' is best for EM curl-curl "
-        "problems. 'BoomerAMG' is an algebraic multigrid alternative.",
+        description="Convenience alias for Solver.Linear.Type when solver_type "
+        "is 'Default'. 'AMS' is best for EM curl-curl problems. "
+        "'BoomerAMG' is an algebraic multigrid alternative.",
     )
 
-    device: Literal["CPU", "GPU"] = Field(
+    device: PalaceDevice = Field(
         default="CPU",
         description="Compute device. 'GPU' enables GPU-accelerated assembly "
         "and solves if Palace was built with GPU support.",
     )
 
-    def to_linear_solver_config(self) -> dict[str, object]:
+    linear_solver: dict[str, Any] | None = Field(
+        default=None,
+        description="Advanced Solver.Linear Palace JSON fragment. When set, it "
+        "takes precedence over the simple tolerance/max_iterations/"
+        "solver_type/preconditioner convenience fields.",
+    )
+
+    def to_linear_solver_config(
+        self,
+        *,
+        palace_version: PalaceConfigVersion = "0.16.0",
+    ) -> dict[str, object]:
         """Convert to Palace ``Solver.Linear`` config.
 
         Notes:
             - For ``solver_type='MUMPS'``, direct-solver defaults follow the
               existing Palace TODO template in this codebase.
-            - ``preconditioner`` is only applied for ``solver_type='Default'``.
+            - ``preconditioner`` is applied as ``Solver.Linear.Type`` when
+              ``solver_type='Default'``.
+            - Rare Palace-native keys should be added through ``set_linear_solver``
+              or config hints and checked by final JSON schema validation.
         """
-        linear_conf: dict[str, object] = {
-            "Type": self.solver_type,
+        _ = palace_version
+        if self.linear_solver is not None:
+            return deepcopy(self.linear_solver)
+
+        solver_type = self.solver_type
+        if solver_type == "Default" and self.preconditioner != "Default":
+            solver_type = self.preconditioner
+
+        linear: dict[str, object] = {
+            "Type": solver_type,
             "KSPType": "GMRES",
             "Tol": self.tolerance,
             "MaxIts": self.max_iterations,
         }
-
-        if self.solver_type == "MUMPS":
-            linear_conf.update(
+        if solver_type == "MUMPS":
+            linear.update(
                 {
                     "MaxIts": 1,
                     "MGMaxLevels": 1,
@@ -107,37 +145,27 @@ class NumericalConfig(BaseModel):
                     "ComplexCoarseSolve": True,
                 }
             )
+        return linear
 
-        if self.solver_type == "Default" and self.preconditioner != "Default":
-            linear_conf["Preconditioner"] = self.preconditioner
-
-        return linear_conf
-
-    def to_solver_config(self) -> dict[str, object]:
+    def to_solver_config(
+        self,
+        *,
+        palace_version: PalaceConfigVersion = "0.16.0",
+    ) -> dict[str, object]:
         """Convert to Palace ``Solver`` section config."""
         return {
-            "Linear": self.to_linear_solver_config(),
             "Order": self.order,
             "Device": self.device,
+            "Linear": self.to_linear_solver_config(palace_version=palace_version),
         }
 
-    def to_palace_config(self) -> dict:
-        """Convert to Palace JSON config format."""
-        solver_config: dict[str, str | int | float] = {
-            "Tolerance": self.tolerance,
-            "MaxIterations": self.max_iterations,
-        }
-
-        if self.solver_type != "Default":
-            solver_config["Type"] = self.solver_type
-
-        if self.preconditioner != "Default":
-            solver_config["Preconditioner"] = self.preconditioner
-
-        return {
-            "Order": self.order,
-            "Solver": solver_config,
-        }
+    def to_palace_config(
+        self,
+        *,
+        palace_version: PalaceConfigVersion = "0.16.0",
+    ) -> dict[str, object]:
+        """Convert to the official Palace ``Solver`` JSON shape."""
+        return self.to_solver_config(palace_version=palace_version)
 
 
 __all__ = [

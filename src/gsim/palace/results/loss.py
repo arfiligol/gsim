@@ -20,7 +20,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from gsim.palace._shared import (
@@ -29,7 +28,8 @@ from gsim.palace._shared import (
     optional_int,
     optional_str,
 )
-from gsim.palace.display import DisplayValue, PlotlyFigure
+from gsim.palace.display import DisplayValue, PlotlyFigure, make_trace_figure
+from gsim.palace.results.base import DataFrameResult, NamedTableResult
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -84,6 +84,15 @@ SURFACE_LOSS_COLUMNS = (
     "role",
     "attributes",
     "interface_type",
+    "loss_channel",
+    "source_entry_name",
+    "surface_epr_summary_kind",
+    "surface_epr_exclude_below_um",
+    "source_aware_surface_epr_group_names",
+    "surface_epr_band_names",
+    "surface_epr_band_min_um",
+    "surface_epr_band_max_um",
+    "surface_epr_band_label",
     "preset_name",
     "preset_source",
     "p_surf",
@@ -119,6 +128,19 @@ LOSS_BUDGET_COLUMNS = (
     "gamma_mhz",
     "t1_us",
 )
+LOSS_CHANNEL_BUDGET_COLUMNS = (
+    "source_index",
+    "mode_index",
+    "sample_column",
+    "sample_value",
+    "frequency_ghz",
+    "source_entry_name",
+    "surface_epr_summary_kind",
+    "surface_epr_exclude_below_um",
+    "loss_channel",
+    "inverse_q",
+    "loss_fraction",
+)
 
 _COMMON_CONTEXT_COLUMNS = (
     "mode_index",
@@ -131,6 +153,11 @@ _COMMON_CONTEXT_COLUMNS = (
     "entry_name",
     "role",
     "interface_type",
+    "loss_channel",
+    "source_entry_name",
+    "surface_epr_summary_kind",
+    "surface_epr_exclude_below_um",
+    "surface_epr_band_label",
     "material_name",
     "preset_name",
 )
@@ -148,203 +175,92 @@ _COMMON_METRIC_COLUMNS = (
 
 
 @dataclass(frozen=True, kw_only=True)
-class EprLossRecord:
-    """One domain or surface EPR loss contribution in shared typed columns."""
-
-    channel: LossChannel
-    source_index: int | None
-    source_name: str | None
-    mode_index: int | None
-    frequency_ghz: float | None
-    participation: float | None
-    loss_tangent: float | None
-    inverse_q: float | None
-    q_equivalent: float | None
-    gamma_rad_per_s: float | None
-    gamma_hz: float | None
-    gamma_mhz: float | None
-    gamma_per_us: float | None
-    t1_us: float | None
-    raw: Mapping[str, Any]
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return this record as a JSON-friendly mapping."""
-        return {
-            "channel": self.channel,
-            "source_index": self.source_index,
-            "source_name": self.source_name,
-            "mode_index": self.mode_index,
-            "frequency_ghz": self.frequency_ghz,
-            "participation": self.participation,
-            "loss_tangent": self.loss_tangent,
-            "inverse_q": self.inverse_q,
-            "q_equivalent": self.q_equivalent,
-            "gamma_rad_per_s": self.gamma_rad_per_s,
-            "gamma_hz": self.gamma_hz,
-            "gamma_mhz": self.gamma_mhz,
-            "gamma_per_us": self.gamma_per_us,
-            "t1_us": self.t1_us,
-        }
-
-
-@dataclass(frozen=True, kw_only=True)
-class EprLossTable:
+class EprLossTable(DataFrameResult):
     """Shared typed table for domain and surface EPR loss contributions.
+
+    The canonical dataframe is the loader-produced source table for one loss
+    channel. ``to_epr_dataframe()`` exposes the review-facing semantic view:
+    every row becomes one domain or surface participation contribution with
+    common EPR/loss columns.
 
     Args:
         dataframe: Existing dataframe returned by the Palace report loaders.
         channel: Loss channel represented by this table.
         index_column: Channel-specific source index column.
         participation_column: Channel-specific participation column.
-
-    The input dataframe is copied so callers keep ownership of the original
-    table. Missing optional metric columns remain absent from dataframe exports
-    and appear as ``None`` in row records.
     """
 
-    dataframe: pd.DataFrame
     channel: LossChannel
     index_column: str
     participation_column: str
 
-    def __post_init__(self) -> None:
-        """Copy the incoming frame to keep wrapper methods non-mutating."""
-        object.__setattr__(self, "dataframe", self.dataframe.copy())
+    def to_epr_dataframe(self) -> pd.DataFrame:
+        """Return one semantic EPR/loss contribution per source row.
 
-    @property
-    def empty(self) -> bool:
-        """Return whether this loss table has no rows."""
-        return bool(self.dataframe.empty)
-
-    @property
-    def metric_columns(self) -> tuple[str, ...]:
-        """Return common EPR/loss metric columns present in this table."""
-        return tuple(
-            column for column in _COMMON_METRIC_COLUMNS if column in self.dataframe
-        )
-
-    def to_dataframe(self) -> pd.DataFrame:
-        """Return a copy of the original report dataframe."""
-        return self.dataframe.copy()
-
-    def save_csv(self, path: str | Path) -> Path:
-        """Persist the original report table as CSV.
-
-        Args:
-            path: Destination CSV path.
-
-        Returns:
-            Written path.
+        Domain and surface Palace reports use different raw columns. This view
+        normalizes them to the shared review vocabulary: source, participation,
+        loss tangent, inverse-Q, equivalent Q, decay rates, and T1.
         """
-        output_path = Path(path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        self.dataframe.to_csv(output_path, index=False)
-        return output_path
-
-    def metrics_dataframe(self) -> pd.DataFrame:
-        """Return this loss table normalized to common EPR/loss column names."""
         import pandas as pd
 
         columns = ["channel", *_COMMON_CONTEXT_COLUMNS, *_COMMON_METRIC_COLUMNS]
         if self.dataframe.empty:
             return pd.DataFrame(columns=columns)
 
-        rows = [record.to_dict() for record in self.to_records()]
+        rows = [
+            self._epr_row(cast("Mapping[str, Any]", row.to_dict()))
+            for _, row in self.dataframe.iterrows()
+        ]
         return cast("pd.DataFrame", pd.DataFrame.from_records(rows, columns=columns))
 
-    def to_records(self) -> tuple[EprLossRecord, ...]:
-        """Return row records with channel-specific columns normalized."""
-        return tuple(
-            self._record_from_row(cast("Mapping[str, Any]", row))
-            for _, row in self.dataframe.iterrows()
-        )
-
-    def plot_inverse_q(
-        self,
-        *,
-        label_column: str | None = None,
-        title: str | None = None,
-    ) -> PlotlyFigure | None:
-        """Plot inverse-Q contributions as a Plotly bar chart.
-
-        Args:
-            label_column: Optional column from :meth:`metrics_dataframe` to use
-                as the x-axis label.
-            title: Optional figure title.
-
-        Returns:
-            Plotly figure when inverse-Q data exists, otherwise ``None``.
-        """
-        if self.empty or "inverse_q" not in self.dataframe:
-            return None
-
-        from gsim.palace.display import make_bar_figure
-
-        frame = self.metrics_dataframe()
-        labels = label_column or _first_existing_column(
-            frame,
-            (
-                "source_name",
-                "mode_index",
-                "frequency_ghz",
-                "source_index",
-                "sample_value",
-            ),
-        )
-        if labels is None:
-            labels = "channel"
-        return make_bar_figure(
-            (
-                {
-                    "x": frame[labels],
-                    "y": frame["inverse_q"],
-                    "name": f"{self.channel} inverse Q",
-                },
-            ),
-            title=title or f"{self.channel.title()} inverse-Q contributions",
-            x_title=labels,
-            y_title="inverse Q",
-        )
-
     def tables(self) -> dict[str, pd.DataFrame]:
-        """Return original and normalized loss tables for this channel."""
+        """Return source and semantic EPR tables for direct channel review."""
         return {
             f"{self.channel}_loss_table": self.to_dataframe(),
-            f"{self.channel}_epr_loss_table": self.metrics_dataframe(),
+            f"{self.channel}_epr_loss_table": self.to_epr_dataframe(),
         }
 
-    def figures(self) -> dict[str, PlotlyFigure]:
-        """Return figures owned by this loss channel."""
-        figure = self.plot_inverse_q()
-        if figure is None:
-            return {}
-        return {f"{self.channel}_inverse_q_bar_plot": figure}
-
     def visualize(self) -> dict[str, DisplayValue]:
-        """Return all default loss-channel tables and figures."""
-        return {**self.tables(), **self.figures()}
+        """Return direct channel tables for notebooks."""
+        return self.tables()
 
-    def _record_from_row(self, row: Mapping[str, Any]) -> EprLossRecord:
+    def _epr_row(self, row: Mapping[str, Any]) -> dict[str, Any]:
         index_value = row.get("source_index")
         if is_missing_value(index_value):
             index_value = row.get(self.index_column)
-        return EprLossRecord(
-            channel=self.channel,
-            source_index=optional_int(index_value),
-            source_name=optional_str(row.get("source_name")),
-            mode_index=optional_int(row.get("mode_index")),
-            frequency_ghz=optional_float(row.get("frequency_ghz")),
-            participation=optional_float(row.get(self.participation_column)),
-            loss_tangent=optional_float(row.get("loss_tangent")),
-            inverse_q=optional_float(row.get("inverse_q")),
-            q_equivalent=optional_float(row.get("q_equivalent")),
-            gamma_rad_per_s=optional_float(row.get("gamma_rad_per_s")),
-            gamma_hz=optional_float(row.get("gamma_hz")),
-            gamma_mhz=optional_float(row.get("gamma_mhz")),
-            gamma_per_us=optional_float(row.get("gamma_per_us")),
-            t1_us=optional_float(row.get("t1_us")),
-            raw=dict(row),
-        )
+        return {
+            "channel": self.channel,
+            "source_index": optional_int(index_value),
+            "source_name": optional_str(row.get("source_name")),
+            "mode_index": optional_int(row.get("mode_index")),
+            "frequency_ghz": optional_float(row.get("frequency_ghz")),
+            "physical_name": optional_str(row.get("physical_name")),
+            "entry_name": optional_str(row.get("entry_name")),
+            "role": optional_str(row.get("role")),
+            "interface_type": optional_str(row.get("interface_type")),
+            "loss_channel": optional_str(row.get("loss_channel")),
+            "source_entry_name": optional_str(row.get("source_entry_name")),
+            "surface_epr_summary_kind": optional_str(
+                row.get("surface_epr_summary_kind")
+            ),
+            "surface_epr_exclude_below_um": optional_float(
+                row.get("surface_epr_exclude_below_um")
+            ),
+            "surface_epr_band_label": optional_str(
+                row.get("surface_epr_band_label")
+            ),
+            "material_name": optional_str(row.get("material_name")),
+            "preset_name": optional_str(row.get("preset_name")),
+            "participation": optional_float(row.get(self.participation_column)),
+            "loss_tangent": optional_float(row.get("loss_tangent")),
+            "inverse_q": optional_float(row.get("inverse_q")),
+            "q_equivalent": optional_float(row.get("q_equivalent")),
+            "gamma_rad_per_s": optional_float(row.get("gamma_rad_per_s")),
+            "gamma_hz": optional_float(row.get("gamma_hz")),
+            "gamma_mhz": optional_float(row.get("gamma_mhz")),
+            "gamma_per_us": optional_float(row.get("gamma_per_us")),
+            "t1_us": optional_float(row.get("t1_us")),
+        }
 
 
 class DomainLoss(EprLossTable):
@@ -358,13 +274,6 @@ class DomainLoss(EprLossTable):
             index_column="domain_index",
             participation_column="p_elec",
         )
-
-    @classmethod
-    def from_csv(cls, path: str | Path) -> DomainLoss:
-        """Load a domain-loss table from a CSV file."""
-        import pandas as pd
-
-        return cls(cast("pd.DataFrame", pd.read_csv(path)))
 
 
 class SurfaceLoss(EprLossTable):
@@ -385,179 +294,252 @@ class SurfaceLoss(EprLossTable):
             participation_column="p_surf",
         )
 
-    @classmethod
-    def from_csv(cls, path: str | Path) -> SurfaceLoss:
-        """Load a surface-loss table from a CSV file."""
-        import pandas as pd
-
-        return cls(cast("pd.DataFrame", pd.read_csv(path)))
-
 
 @dataclass(frozen=True, kw_only=True)
-class LossBudget:
+class LossBudget(NamedTableResult):
     """Typed aggregate inverse-Q budget for a Palace report.
 
     The budget table sums domain and surface inverse-Q contributions using the
     grouping chosen by the owning Problem Type Report. It keeps the
-    loader-produced dataframe intact while adding storage and plotting helpers
-    used by report views.
+    loader-produced dataframe intact for report views.
     """
 
-    dataframe: pd.DataFrame
-
-    def __post_init__(self) -> None:
-        """Copy the incoming frame to keep wrapper methods non-mutating."""
-        object.__setattr__(self, "dataframe", self.dataframe.copy())
-
-    @property
-    def empty(self) -> bool:
-        """Return whether this budget has no rows."""
-        return bool(self.dataframe.empty)
-
-    def to_dataframe(self) -> pd.DataFrame:
-        """Return a copy of the original budget dataframe."""
-        return self.dataframe.copy()
-
-    def save_csv(self, path: str | Path) -> Path:
-        """Persist the budget table as CSV.
-
-        Args:
-            path: Destination CSV path.
-
-        Returns:
-            Written path.
-        """
-        output_path = Path(path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        self.dataframe.to_csv(output_path, index=False)
-        return output_path
-
-    @classmethod
-    def from_csv(cls, path: str | Path) -> LossBudget:
-        """Load a loss-budget table from a CSV file."""
-        import pandas as pd
-
-        return cls(dataframe=cast("pd.DataFrame", pd.read_csv(path)))
-
-    def plot_inverse_q(self, *, title: str | None = None) -> PlotlyFigure | None:
-        """Plot domain and surface inverse-Q budget contributions.
-
-        Args:
-            title: Optional figure title.
-
-        Returns:
-            Plotly figure when budget data exists, otherwise ``None``.
-        """
-        if self.empty or "total_inverse_q_sum" not in self.dataframe:
-            return None
-
-        from gsim.palace.display import make_bar_figure
-
-        frame = self.dataframe
-        label_column = _first_existing_column(
-            frame,
-            ("mode_index", "frequency_ghz", "source_index", "sample_value"),
-        )
-        if label_column is None:
-            label_column = frame.index.name or "row"
-            x_values = frame.index
-        else:
-            x_values = frame[label_column]
-
-        bars: list[dict[str, Any]] = []
-        if "domain_inverse_q_sum" in frame.columns:
-            bars.append(
-                {"x": x_values, "y": frame["domain_inverse_q_sum"], "name": "domain"}
-            )
-        if "surface_inverse_q_sum" in frame.columns:
-            bars.append(
-                {
-                    "x": x_values,
-                    "y": frame["surface_inverse_q_sum"],
-                    "name": "surface",
-                }
-            )
-        return make_bar_figure(
-            bars,
-            title=title or "Loss budget",
-            x_title=label_column,
-            y_title="inverse Q",
-            barmode="stack",
-        )
-
-    def figures(self) -> dict[str, PlotlyFigure]:
-        """Return visual figures owned by this loss budget."""
-        figure = self.plot_inverse_q()
-        return {} if figure is None else {"loss_budget_bar_plot": figure}
-
-    def visualize(self) -> dict[str, DisplayValue]:
-        """Return all default loss-budget tables and figures."""
-        return {"loss_budget_table": self.to_dataframe(), **self.figures()}
+    table_name = "loss_budget"
 
 
 @dataclass(frozen=True, kw_only=True)
 class ReportLoss:
-    """Typed aggregate loss surface attached to a Problem Type Report."""
+    """Notebook-facing EPR/loss summary attached to a Problem Type Report."""
 
     domain: DomainLoss
     surface: SurfaceLoss
     budget: LossBudget
+    surface_convergence: pd.DataFrame | None = None
 
     @property
     def empty(self) -> bool:
         """Return whether all loss tables are empty."""
-        return self.domain.empty and self.surface.empty and self.budget.empty
+        return (
+            self.domain.empty
+            and self.surface.empty
+            and self.budget.empty
+            and (
+                self.surface_convergence is None or self.surface_convergence.empty
+            )
+        )
 
     def tables(self) -> dict[str, pd.DataFrame]:
-        """Return report-loss tables by stable view name."""
+        """Return the EPR tables that are meaningful without raw CSV context."""
         return {
-            "domain_loss_table": self.domain.to_dataframe(),
-            "surface_loss_table": self.surface.to_dataframe(),
+            "domain_epr_summary_table": _compact_epr_summary_dataframe(
+                self.domain.to_epr_dataframe()
+            ),
+            "surface_epr_summary_table": _compact_epr_summary_dataframe(
+                self.surface.to_epr_dataframe(),
+                surface_only=True,
+            ),
             "loss_budget_table": self.budget.to_dataframe(),
         }
 
-    def metrics_tables(self) -> dict[str, pd.DataFrame]:
-        """Return normalized EPR/loss metric tables by stable view name."""
-        return {
-            "domain_epr_loss_table": self.domain.metrics_dataframe(),
-            "surface_epr_loss_table": self.surface.metrics_dataframe(),
-        }
-
     def figures(self) -> dict[str, PlotlyFigure]:
-        """Return loss figures owned by this aggregate loss object."""
-        figures: dict[str, PlotlyFigure] = {}
-        domain_figure = self.domain.plot_inverse_q()
-        surface_figure = self.surface.plot_inverse_q()
-        budget_figure = self.budget.plot_inverse_q()
-        if domain_figure is not None:
-            figures["domain_inverse_q_bar_plot"] = domain_figure
-        if surface_figure is not None:
-            figures["surface_inverse_q_bar_plot"] = surface_figure
-        if budget_figure is not None:
-            figures["loss_budget_bar_plot"] = budget_figure
-        return figures
+        """Return loss figures that need report-level context."""
+        figure = _surface_epr_convergence_figure(self.surface_convergence)
+        if figure is None:
+            return {}
+        return {"surface_epr_inset_convergence_trace_plot": figure}
 
     def visualize(self) -> dict[str, DisplayValue]:
-        """Return all default loss tables, normalized metrics, and figures."""
-        return {**self.tables(), **self.metrics_tables(), **self.figures()}
+        """Return compact EPR/loss tables and convergence figures."""
+        return cast("dict[str, DisplayValue]", {**self.tables(), **self.figures()})
 
 
-def _first_existing_column(
+def _compact_epr_summary_dataframe(
     frame: pd.DataFrame,
-    candidates: tuple[str, ...],
-) -> str | None:
-    for column in candidates:
-        if column in frame.columns:
-            return column
-    return None
+    *,
+    surface_only: bool = False,
+) -> pd.DataFrame:
+    """Keep only EPR columns that answer source-local participation questions."""
+    import pandas as pd
 
+    if frame.empty:
+        return pd.DataFrame(
+            columns=[
+                "source_index",
+                "source_name",
+                "participation",
+                "participation_percent",
+            ]
+        )
+
+    result = frame.copy()
+    if surface_only:
+        result = _surface_total_summary_rows(result)
+    values = cast(
+        "pd.Series",
+        pd.to_numeric(result["participation"], errors="coerce"),
+    ).abs()
+    result["_participation_abs"] = values
+    group_columns = (
+        ["source_index"]
+        if _has_non_null_column(result, "source_index")
+        else [
+            column
+            for column in (
+                "mode_index",
+                "sample_column",
+                "sample_value",
+                "frequency_ghz",
+            )
+            if _has_non_null_column(result, column)
+        ]
+    )
+    if group_columns:
+        denominator = result.groupby(group_columns, dropna=False)[
+            "_participation_abs"
+        ].transform("sum")
+        result["participation_percent"] = (
+            values.div(denominator.where(denominator != 0)).fillna(0.0) * 100.0
+        )
+    else:
+        denominator = float(values.sum())
+        result["participation_percent"] = (
+            0.0 if denominator == 0.0 else (values / denominator) * 100.0
+        )
+
+    columns = [
+        column
+        for column in (
+            "source_index",
+            "mode_index",
+            "sample_value",
+            "frequency_ghz",
+            "source_name",
+            "physical_name",
+            "interface_type",
+            *(
+                ()
+                if surface_only
+                else (
+                    "loss_channel",
+                    "source_entry_name",
+                    "surface_epr_summary_kind",
+                    "surface_epr_exclude_below_um",
+                    "surface_epr_band_label",
+                )
+            ),
+            "material_name",
+            "preset_name",
+            "participation",
+            "participation_percent",
+            "loss_tangent",
+            "inverse_q",
+            "q_equivalent",
+            "t1_us",
+        )
+        if _has_non_null_column(result, column)
+    ]
+    return cast("pd.DataFrame", result.loc[:, columns])
+
+
+def _surface_total_summary_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    if "surface_epr_summary_kind" not in frame.columns:
+        return frame
+    kinds = frame["surface_epr_summary_kind"].astype("string")
+    return cast(
+        "pd.DataFrame",
+        frame.loc[kinds.isna() | (kinds == "") | (kinds == "total")].copy(),
+    )
+
+
+def _surface_epr_convergence_figure(
+    frame: pd.DataFrame | None,
+) -> PlotlyFigure | None:
+    if frame is None or frame.empty:
+        return None
+    required = {
+        "pass_index",
+        "interface_type",
+        "surface_epr_exclude_below_um",
+        "surface_epr_abs",
+    }
+    if not required.issubset(frame.columns):
+        return None
+
+    import pandas as pd
+
+    data = frame.copy()
+    data["pass_index"] = pd.to_numeric(data["pass_index"], errors="coerce")
+    data["surface_epr_abs"] = pd.to_numeric(data["surface_epr_abs"], errors="coerce")
+    data["surface_epr_exclude_below_um"] = pd.to_numeric(
+        data["surface_epr_exclude_below_um"],
+        errors="coerce",
+    ).fillna(0.0)
+    if "surface_epr_summary_kind" not in data.columns:
+        data["surface_epr_summary_kind"] = "total"
+    data["surface_epr_summary_kind"] = data["surface_epr_summary_kind"].fillna(
+        "total"
+    )
+    data = data.dropna(subset=["pass_index", "surface_epr_abs"])
+    if data.empty:
+        return None
+
+    traces = []
+    for (interface_type, kind, inset_um), group in data.groupby(
+        [
+            "interface_type",
+            "surface_epr_summary_kind",
+            "surface_epr_exclude_below_um",
+        ],
+        dropna=False,
+        sort=True,
+    ):
+        ordered = group.sort_values("pass_index")
+        traces.append(
+            {
+                "x": ordered["pass_index"],
+                "y": ordered["surface_epr_abs"],
+                "name": _surface_epr_trace_name(interface_type, kind, inset_um),
+                "mode": "lines+markers",
+            }
+        )
+    if not traces:
+        return None
+    return make_trace_figure(
+        traces,
+        title="Surface EPR inset convergence",
+        x_title="Adaptive pass",
+        y_title="abs(Surface EPR)",
+    )
+
+
+def _surface_epr_trace_name(
+    interface_type: object,
+    kind: object,
+    inset_um: object,
+) -> str:
+    interface = "" if is_missing_value(interface_type) else str(interface_type)
+    prefix = interface or "Surface EPR"
+    try:
+        inset_nm = float(inset_um) * 1000.0
+    except (TypeError, ValueError):
+        inset_nm = 0.0
+    if str(kind) == "total" or inset_nm == 0.0:
+        return f"{prefix} total"
+    return f"{prefix} inset >= {inset_nm:g} nm"
+
+
+def _has_non_null_column(frame: pd.DataFrame, column: str) -> bool:
+    if column not in frame.columns:
+        return False
+    series = cast("pd.Series", frame[column])
+    return bool(series.notna().any())
 
 __all__ = [
     "DOMAIN_LOSS_COLUMNS",
     "LOSS_BUDGET_COLUMNS",
+    "LOSS_CHANNEL_BUDGET_COLUMNS",
     "SURFACE_LOSS_COLUMNS",
     "DomainLoss",
-    "EprLossRecord",
     "EprLossTable",
     "LossBudget",
     "ReportLoss",

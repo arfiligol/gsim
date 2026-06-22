@@ -13,7 +13,7 @@ helpers, or notebook-facing public shortcuts.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from typing import Any, Protocol
+from typing import Any
 
 from gsim.palace.resolve.assembly.driven import load_driven_report
 from gsim.palace.resolve.assembly.eigenmode import load_eigenmode_report
@@ -24,26 +24,8 @@ from gsim.palace.resolve.problem_types import (
 )
 
 
-class ResolvedReportSource(Protocol):
-    """Structural input needed to assemble a report bundle.
-
-    Assembly deliberately depends on this structural contract instead of
-    importing Resolve model classes. That keeps the dependency direction
-    ``models -> assembly`` one-way for ``PalaceResolvedResult.load_report()``.
-    """
-
-    source: Any
-    problem_type: str | None
-    artifacts: Any
-
-    @property
-    def run_summary(self) -> Any:
-        """Return the resolved Palace run summary."""
-        ...
-
-
 def load_report_for_resolved_result[BundleT](
-    resolved: ResolvedReportSource,
+    resolved: Any,
     *,
     frequency_ghz: float | None,
     require_report: bool,

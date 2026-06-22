@@ -44,6 +44,9 @@ from gsim.palace.mesh.postprocessing import (
     build_dielectric_interface_specs_from_material_kinds,
     build_postprocessing_config_from_manifest,
 )
+from gsim.palace.mesh.surface_epr import (
+    build_interface_surface_catalog,
+)
 from gsim.palace.models.mesh import MeshConfig
 
 __all__ = [
@@ -53,6 +56,7 @@ __all__ = [
     "SurfaceFluxSpec",
     "build_dielectric_interface_specs_from_assignments",
     "build_dielectric_interface_specs_from_material_kinds",
+    "build_interface_surface_catalog",
     "build_postprocessing_config_from_manifest",
     "generate_mesh",
 ]

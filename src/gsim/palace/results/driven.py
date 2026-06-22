@@ -12,48 +12,57 @@ import json
 import logging
 import re
 import warnings
+from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import matplotlib.pyplot as plt
 import numpy as np
+from numpy.typing import NDArray
 
-from gsim.palace.display import DisplayValue, PlotlyFigure
+from gsim.palace.display import (
+    DisplayValue,
+    PlotlyFigure,
+    make_trace_subplot_figure,
+)
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     import pandas as pd
-    from numpy.typing import NDArray
+
+type RealArray = NDArray[np.float64]
+type ComplexArray = NDArray[np.complex128]
+type SParameterSource = str | Path | Mapping[str, str | Path]
 
 
 class SParam:
     """A single S-parameter entry (complex-valued vs frequency)."""
 
-    def __init__(self, db: NDArray, deg: NDArray) -> None:
+    def __init__(self, db: RealArray, deg: RealArray) -> None:
         """Create from dB magnitude and degree phase arrays."""
         self._db = db
         self._deg = deg
 
     @property
-    def db(self) -> NDArray:
+    def db(self) -> RealArray:
         """Magnitude in dB."""
         return self._db
 
     @property
-    def deg(self) -> NDArray:
+    def deg(self) -> RealArray:
         """Phase in degrees."""
         return self._deg
 
     @property
-    def mag(self) -> NDArray:
+    def mag(self) -> RealArray:
         """Linear magnitude."""
-        return 10 ** (self._db / 20)
+        return cast("RealArray", 10 ** (self._db / 20))
 
     @property
-    def complex(self) -> NDArray:
+    def complex(self) -> ComplexArray:
         """Complex S-parameter values."""
-        return self.mag * np.exp(1j * np.deg2rad(self._deg))
+        return cast("ComplexArray", self.mag * np.exp(1j * np.deg2rad(self._deg)))
 
     def __repr__(self) -> str:
         """Return string representation."""
@@ -79,7 +88,7 @@ class SParams:
 
     def __init__(
         self,
-        freq: NDArray,
+        freq: RealArray,
         data: dict[tuple[str, str], SParam],
         port_names: list[str],
         files: dict[str, Path] | None = None,
@@ -91,7 +100,7 @@ class SParams:
         self.files = files or {}
 
     @property
-    def freq(self) -> NDArray:
+    def freq(self) -> RealArray:
         """Frequency in GHz."""
         return self._freq
 
@@ -135,7 +144,7 @@ class SParams:
         """Export to a flat pandas DataFrame."""
         import pandas as pd
 
-        cols: dict[str, NDArray] = {"freq_ghz": self._freq}
+        cols: dict[str, RealArray] = {"freq_ghz": self._freq}
         for (to_p, from_p), sp in self._data.items():
             cols[f"S_{to_p}_{from_p}_db"] = sp.db
             cols[f"S_{to_p}_{from_p}_deg"] = sp.deg
@@ -192,8 +201,6 @@ class SParams:
         in notebooks and can be saved as standalone HTML via
         ``fig.write_html("sparams.html")``.
         """
-        from gsim.palace.display import make_trace_subplot_figure
-
         magnitude_traces: list[dict[str, Any]] = []
         phase_traces: list[dict[str, Any]] = []
         for label, sp in self._filtered_entries(full):
@@ -247,89 +254,48 @@ class SParams:
         """Return all default S-parameter tables and figures."""
         return {**self.tables(), **self.figures(full=full)}
 
-    def _port_index_map(self) -> dict[str, int]:
-        """Return ``{port_name: 1-based index}`` mapping."""
-        return {name: i + 1 for i, name in enumerate(self._port_names)}
-
     def _sij_label(self, to_port: str, from_port: str) -> str:
-        """Return ``Sij`` label for a port pair."""
-        idx = self._port_index_map()
-        return f"S{idx[to_port]}{idx[from_port]}"
+        """Return native ``Sij`` notation for a named port pair."""
+        return (
+            f"S{self._port_names.index(to_port) + 1}"
+            f"{self._port_names.index(from_port) + 1}"
+        )
 
     def plot_interactive(self, phase: bool = False) -> PlotlyFigure:
-        """Plot one S-parameter axis with interactive legend toggling.
+        """Plot one interactive S-parameter axis using native ``Sij`` labels.
 
-        Uses ``Sij`` notation (e.g. S11, S21). By default it shows the first
-        excitation column (S11, S21, S31, ...) and hides symmetric/redundant
-        entries. All traces are togglable via the legend.
-
-        Report visualizers use :meth:`visualize`, which returns the default
-        table plus the combined magnitude/phase trace plot. This method is for
-        manual single-axis exploration.
-
-        Args:
-            phase: If True, plot phase (deg). Default is magnitude (dB).
-
-        Returns:
-            plotly Figure
+        This preserves gsim's notebook convenience API for manual RF inspection.
+        Report visualizers use ``visualize()`` so default reports still show the
+        combined magnitude/phase trace plot through the shared display layer.
         """
-        import plotly.graph_objects as go  # type: ignore[import-untyped]
+        import plotly.graph_objects as go  # pyright: ignore[reportMissingTypeStubs]
 
-        # Build entries with Sij labels
-        entries: list[tuple[str, str, SParam]] = []
-        for (to_p, from_p), sp in self._data.items():
-            entries.append((self._sij_label(to_p, from_p), from_p, sp))
-
-        # Show first excitation column by default (Si1), hide the rest
         first_from = self._port_names[0] if self._port_names else None
-        first_col = [(l, sp) for l, fp, sp in entries if fp == first_from]
-        rest = [(l, sp) for l, fp, sp in entries if fp != first_from]
-        ordered = first_col + rest
-        visible_set = {l for l, _ in first_col}
-
         fig = go.Figure()
-
-        for label, sp in ordered:
-            y = sp.deg if phase else sp.db
-            vis = True if label in visible_set else "legendonly"
+        for (to_port, from_port), sparam in self._data.items():
+            label = self._sij_label(to_port, from_port)
             fig.add_scatter(
                 x=self._freq,
-                y=y,
+                y=sparam.deg if phase else sparam.db,
                 mode="lines",
                 name=label,
-                visible=vis,
+                visible=True if from_port == first_from else "legendonly",
             )
-
-        ylabel = "Phase (deg)" if phase else "|S| (dB)"
+        y_title = "Phase (deg)" if phase else "|S| (dB)"
         fig.update_layout(
             xaxis_title="Frequency (GHz)",
-            yaxis_title=ylabel,
-            width=650,
-            height=350,
-            margin=dict(t=40, b=40, l=60, r=140),
-            modebar=dict(orientation="v"),
-            legend=dict(
-                x=1.02,
-                y=1,
-                xanchor="left",
-                yanchor="top",
-                groupclick="toggleitem",
-                itemclick="toggle",
-                itemdoubleclick="toggleothers",
-                itemsizing="constant",
-                bordercolor="#888",
-                borderwidth=1,
-                bgcolor="rgba(245,245,245,0.9)",
-                entrywidthmode="pixels",
-                entrywidth=70,
-            ),
+            yaxis_title=y_title,
+            title="S-Parameters",
+            legend={"groupclick": "toggleitem"},
         )
-        return fig
+        return cast("PlotlyFigure", fig)
 
     def save_npz(self, filepath: str | Path) -> Path:
         """Save S-parameters to a ``.npz`` file.
 
-        The file can be reloaded with :meth:`SParams.from_file`.
+        This is an export helper for NumPy-based analysis outside the Palace
+        run folder. Loading Palace results remains the resolver/loader owner's
+        responsibility.
 
         Args:
             filepath: Destination path (``.npz`` suffix added if missing).
@@ -340,7 +306,7 @@ class SParams:
         filepath = Path(filepath).with_suffix(".npz")
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-        arrays: dict[str, NDArray] = {"freq": self._freq}
+        arrays: dict[str, object] = {"freq": self._freq}
         arrays["port_names"] = np.array(self._port_names)
         for (to_p, from_p), sp in self._data.items():
             arrays[f"S_{to_p}_{from_p}_db"] = sp.db
@@ -349,33 +315,6 @@ class SParams:
         np.savez_compressed(str(filepath), **arrays)  # pyright: ignore[reportArgumentType]
         logger.info("S-parameters saved to %s", filepath)
         return filepath
-
-    @classmethod
-    def from_file(cls, filepath: str | Path) -> SParams:
-        """Load S-parameters from a ``.npz`` file written by :meth:`save_npz`.
-
-        Args:
-            filepath: Path to the ``.npz`` file.
-
-        Returns:
-            Reconstructed :class:`SParams` object.
-        """
-        filepath = Path(filepath).with_suffix(".npz")
-        npz = np.load(filepath, allow_pickle=False)
-
-        freq = npz["freq"]
-        port_names = list(npz["port_names"])
-
-        data: dict[tuple[str, str], SParam] = {}
-        for to_p in port_names:
-            for from_p in port_names:
-                db_key = f"S_{to_p}_{from_p}_db"
-                deg_key = f"S_{to_p}_{from_p}_deg"
-                if db_key in npz and deg_key in npz:
-                    data[(to_p, from_p)] = SParam(db=npz[db_key], deg=npz[deg_key])
-
-        logger.info("S-parameters loaded from %s", filepath)
-        return cls(freq=freq, data=data, port_names=port_names)
 
     def __repr__(self) -> str:
         """Return string representation."""
@@ -390,7 +329,7 @@ class SParams:
 
 
 def load_sparams(
-    source: str | Path | dict,
+    source: SParameterSource,
     *,
     port_info_path: str | Path | None = None,
 ) -> SParams:
@@ -402,7 +341,7 @@ def load_sparams(
         msg = "port-S.csv not found"
         raise FileNotFoundError(msg)
 
-    if port_info_path is None and isinstance(source, dict):
+    if port_info_path is None and isinstance(source, Mapping):
         port_info_value = source.get("port_information.json")
         if port_info_value is not None:
             port_info_path = Path(port_info_value)
@@ -416,15 +355,21 @@ def load_sparams(
         (column for column in df.columns if column.startswith("f")),
         None,
     )
-    freq = df[freq_column].to_numpy() if freq_column else np.arange(len(df))
+    freq = cast(
+        "RealArray",
+        df[freq_column].to_numpy() if freq_column else np.arange(len(df)),
+    )
 
-    raw: dict[tuple[int, int], dict[str, NDArray]] = {}
+    raw: dict[tuple[int, int], dict[str, RealArray]] = {}
     for column in df.columns:
         parsed = _parse_sparam_column(column)
         if parsed is None:
             continue
         i, j, kind = parsed
-        raw.setdefault((i, j), {})[kind] = df[column].to_numpy()
+        raw.setdefault((i, j), {})[kind] = cast(
+            "RealArray",
+            df[column].to_numpy(),
+        )
 
     all_indices = set()
     for i, j in raw:
@@ -436,27 +381,25 @@ def load_sparams(
     for (i, j), parts in sorted(raw.items()):
         to_name = port_map.get(i, f"p{i}")
         from_name = port_map.get(j, f"p{j}")
-        db = parts.get("db", np.zeros(len(freq)))
-        deg = parts.get("deg", np.zeros(len(freq)))
+        db = parts.get("db", cast("RealArray", np.zeros(len(freq))))
+        deg = parts.get("deg", cast("RealArray", np.zeros(len(freq))))
         data[(to_name, from_name)] = SParam(db=db, deg=deg)
 
-    files = dict(source) if isinstance(source, dict) else None
+    files = (
+        {str(name): Path(value) for name, value in source.items()}
+        if isinstance(source, Mapping)
+        else None
+    )
     return SParams(freq=freq, data=data, port_names=port_names, files=files)
 
 
-def get_port_map(source: str | Path | dict) -> dict[int, str]:
-    """Return the ``{port_number: port_name}`` mapping for Driven results."""
-    csv_path, base_dir = resolve_sparameter_source(source, require_csv=False)
-    return _load_port_map(base_dir, csv_path)
-
-
 def resolve_sparameter_source(
-    source: str | Path | dict,
+    source: SParameterSource,
     *,
     require_csv: bool = True,
 ) -> tuple[Path | None, Path]:
     """Resolve a Driven S-parameter source into ``(csv_path, base_dir)``."""
-    if isinstance(source, dict):
+    if isinstance(source, Mapping):
         csv_value = source.get("port-S.csv")
         if csv_value is not None:
             csv_path = Path(csv_value)

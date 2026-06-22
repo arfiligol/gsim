@@ -1,27 +1,14 @@
 """Run-stage handoff assembly for Palace workflows.
 
-Responsibility:
-Owns the notebook-facing handoff package assembly that turns a prepared Palace
-run folder plus optional launcher/profile metadata into a ``PalaceRunHandle``.
+This module provides the notebook-facing assembly step that turns a prepared
+Palace run folder plus launcher/profile/resource metadata into a
+``PalaceRunHandle`` and a handoff archive.
 
-Does not own:
-Mesh/config generation, Slurm profile schema, sbatch rendering, tar archive
-implementation, Resolve/report construction, or display. Low-level script,
-metadata, and archive writers remain in ``gsim.palace.handoff``.
-
-Inputs:
-A canonical run folder, the simulation problem type, and caller-provided
-launcher/profile/resource metadata.
-
-Outputs:
-``metadata/palace_handoff_metadata.json``,
-``metadata/palace_handoff_archive_manifest.json``, the tar.gz handoff archive,
-and a ``PalaceRunHandle`` for Run Stage review.
-
-Pipeline position:
-``sim.generate_handoff_package()`` facade -> handoff assembly ->
-``PalaceRunHandle`` -> ``resolve_palace_result(handle.run_folder, ...)`` after
-solver execution.
+Mesh/config generation, Slurm profile schemas, sbatch rendering, tarball
+implementation, Resolve/report construction, and display live outside this
+assembly layer. Low-level script, metadata, and archive writers remain in
+``gsim.palace.handoff``. After external solver execution, notebooks pass
+``handle.run_folder`` into Resolve.
 """
 
 from __future__ import annotations
@@ -30,6 +17,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 
+from gsim.palace.resolve.problem_types import canonical_problem_type
 from gsim.palace.run_folder import (
     PalaceRunFolder,
     prepare_palace_run_folder,
@@ -38,7 +26,7 @@ from gsim.palace.run_folder import (
 from gsim.palace.run_stage import PalaceRunHandle
 
 
-def handoff_profile_payload(profile: Any) -> Mapping[str, Any] | None:
+def _handoff_profile_payload(profile: Any) -> Mapping[str, Any] | None:
     """Return JSON-ready profile metadata from a mapping or resolved profile."""
     if profile is None:
         return None
@@ -50,7 +38,7 @@ def handoff_profile_payload(profile: Any) -> Mapping[str, Any] | None:
     raise TypeError("profile must be a mapping or resolved Palace Slurm profile")
 
 
-def handoff_profile_name(profile: Any) -> str | None:
+def _handoff_profile_name(profile: Any) -> str | None:
     """Return the profile name used for a run-stage handle."""
     if profile is None:
         return None
@@ -61,7 +49,7 @@ def handoff_profile_name(profile: Any) -> str | None:
     return str(name) if name is not None else None
 
 
-def handoff_resources_payload(
+def _handoff_resources_payload(
     profile: Any,
     resources: Mapping[str, Any] | None,
 ) -> Mapping[str, Any] | None:
@@ -75,24 +63,14 @@ def handoff_resources_payload(
     return None
 
 
-def handoff_kind(launcher: Mapping[str, Any] | None) -> Literal["handoff", "slurm"]:
+def _handoff_kind(launcher: Mapping[str, Any] | None) -> Literal["handoff", "slurm"]:
     """Return the run-handle kind implied by handoff launcher metadata."""
     if launcher is not None and launcher.get("kind") == "slurm":
         return "slurm"
     return "handoff"
 
 
-def canonical_problem_type(simulation_type: str) -> str:
-    """Return public Palace problem-type spelling for run-stage metadata."""
-    return {
-        "driven": "Driven",
-        "eigenmode": "Eigenmode",
-        "electrostatic": "Electrostatic",
-        "magnetostatic": "Magnetostatic",
-    }.get(simulation_type, simulation_type)
-
-
-def run_folder_path(root: Path, path: str | Path | None) -> Path | None:
+def _run_folder_path(root: Path, path: str | Path | None) -> Path | None:
     """Resolve a run-folder-relative path for a run-stage handle."""
     if path is None:
         return None
@@ -126,8 +104,8 @@ def generate_palace_handoff_package(
         "simulation_type": simulation_type,
         **dict(metadata or {}),
     }
-    profile_payload = handoff_profile_payload(profile)
-    resources_payload = handoff_resources_payload(profile, resources)
+    profile_payload = _handoff_profile_payload(profile)
+    resources_payload = _handoff_resources_payload(profile, resources)
     script_reference: str | Path | None = script_path
     if script_path is not None:
         script_reference = relative_to_run_folder(Path(script_path), folder.root)
@@ -175,11 +153,11 @@ def generate_palace_handoff_package(
 
     return PalaceRunHandle(
         run_folder=folder.root,
-        kind=handoff_kind(launcher_payload),
+        kind=_handoff_kind(launcher_payload),
         status=status,
         problem_type=canonical_problem_type(simulation_type),
-        profile_name=handoff_profile_name(profile),
-        script_path=run_folder_path(folder.root, script_reference),
+        profile_name=_handoff_profile_name(profile),
+        script_path=_run_folder_path(folder.root, script_reference),
         archive_path=archive_result.archive_path,
         metadata_path=metadata_path,
         archive_manifest_path=archive_result.manifest_path,
@@ -188,11 +166,5 @@ def generate_palace_handoff_package(
 
 
 __all__ = [
-    "canonical_problem_type",
     "generate_palace_handoff_package",
-    "handoff_kind",
-    "handoff_profile_name",
-    "handoff_profile_payload",
-    "handoff_resources_payload",
-    "run_folder_path",
 ]

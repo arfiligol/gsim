@@ -5,6 +5,7 @@ This module contains Pydantic models for mesh generation configuration.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -48,6 +49,13 @@ class MeshConfig(BaseModel):
     fmax: float = Field(default=100e9, gt=0)
     boundary_conditions: list[str] | None = None
     planar_conductors: bool = False
+    surface_epr_inset_margins_um: tuple[float, ...] = Field(
+        default=(0.0, 0.05),
+        description=(
+            "Surface EPR inset margins in um. 0 means total; positive values "
+            "define generated finite-shell inset partitions."
+        ),
+    )
     merge_via_distance: float = Field(default=2.0, ge=0)
     curve_fit_mode: Literal["line", "spline", "bspline"] = "line"
     curve_fit_layers: list[str] = Field(default_factory=lambda: ["core", "core2"])
@@ -74,7 +82,19 @@ class MeshConfig(BaseModel):
     def set_default_boundary_conditions(self) -> Self:
         """Set default boundary conditions if not provided."""
         if self.boundary_conditions is None:
-            self.boundary_conditions = ["ABC", "ABC", "ABC", "ABC", "ABC", "ABC"]
+            object.__setattr__(
+                self,
+                "boundary_conditions",
+                ["ABC", "ABC", "ABC", "ABC", "ABC", "ABC"],
+            )
+        margins = tuple(
+            sorted({float(value) for value in self.surface_epr_inset_margins_um})
+        )
+        if any(value < 0.0 or not math.isfinite(value) for value in margins):
+            raise ValueError("surface_epr_inset_margins_um values must be finite >= 0")
+        if 0.0 not in margins:
+            margins = (0.0, *margins)
+        object.__setattr__(self, "surface_epr_inset_margins_um", margins)
         return self
 
     @classmethod

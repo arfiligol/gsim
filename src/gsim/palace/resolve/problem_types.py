@@ -12,8 +12,12 @@ from typing import Literal
 type DrivenProblemType = Literal["Driven", "driven"]
 type EigenmodeProblemType = Literal["Eigenmode", "eigenmode"]
 type ElectrostaticProblemType = Literal["Electrostatic", "electrostatic"]
+type MagnetostaticProblemType = Literal["Magnetostatic", "magnetostatic"]
 type KnownProblemType = (
-    DrivenProblemType | EigenmodeProblemType | ElectrostaticProblemType
+    DrivenProblemType
+    | EigenmodeProblemType
+    | ElectrostaticProblemType
+    | MagnetostaticProblemType
 )
 
 
@@ -26,6 +30,7 @@ def normalize_problem_type(problem_type: str | None) -> str | None:
         "driven": "driven",
         "eigenmode": "eigenmode",
         "electrostatic": "electrostatic",
+        "magnetostatic": "magnetostatic",
     }
     return aliases.get(normalized)
 
@@ -39,6 +44,8 @@ def canonical_problem_type(problem_type: str | None) -> str | None:
         return "Eigenmode"
     if normalized == "electrostatic":
         return "Electrostatic"
+    if normalized == "magnetostatic":
+        return "Magnetostatic"
     return problem_type
 
 
@@ -47,6 +54,7 @@ __all__ = [
     "EigenmodeProblemType",
     "ElectrostaticProblemType",
     "KnownProblemType",
+    "MagnetostaticProblemType",
     "canonical_problem_type",
     "normalize_problem_type",
 ]

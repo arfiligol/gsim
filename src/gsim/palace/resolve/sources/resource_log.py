@@ -221,6 +221,26 @@ def parse_palace_resource_log(log_path: str | Path) -> dict[str, Any]:
                     f"{key}_bytes": parse_resource_memory_bytes(match.group(key))
                     for key in ("min", "max", "avg", "total")
                 }
+                if scope == "node" and not any(
+                    row["pass_index"] == current_pass_index and row["stage"] == "Total"
+                    for row in stage_memory
+                ):
+                    total_bytes = parse_resource_memory_bytes(match.group("total"))
+                    row = {
+                        "pass_index": current_pass_index,
+                        "stage": "Total",
+                        "per_node": match.group("max"),
+                        "total": match.group("total"),
+                        "total_hwm": match.group("total"),
+                        "per_node_bytes": parse_resource_memory_bytes(
+                            match.group("max")
+                        ),
+                        "total_bytes": total_bytes,
+                        "total_hwm_bytes": total_bytes,
+                    }
+                    stage_memory.append(row)
+                    memory["peak_total_memory_bytes"] = row["total_bytes"]
+                    memory["peak_total_hwm_bytes"] = row["total_hwm_bytes"]
                 continue
 
             if "Elapsed Time Report (s)" in stripped:

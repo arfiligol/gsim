@@ -162,7 +162,8 @@ def test_add_patterned_dielectrics_skips_covered_dielectric_layers():
     gmsh.model.add("test")
     kernel = gmsh.model.occ
 
-    metal_tags = add_metals(kernel, geometry, stack, planar_conductors=True)
+    metal_result = add_metals(kernel, geometry, stack, planar_conductors=True)
+    metal_tags = metal_result.metal_tags
     dielectric_tags = add_dielectrics(kernel, geometry, stack, margin_x=50, margin_y=50)
     patterned_tags = add_patterned_dielectrics(kernel, geometry, stack)
 
@@ -173,7 +174,14 @@ def test_add_patterned_dielectrics_skips_covered_dielectric_layers():
         f"bulk boxes, got: {patterned_tags}"
     )
 
-    entities = build_entities(metal_tags, dielectric_tags, patterned_tags, {}, [])
+    entities = build_entities(
+        metal_tags,
+        dielectric_tags,
+        patterned_tags,
+        {},
+        [],
+        shaped_dielectric_names=metal_result.shaped_dielectric_names,
+    )
     entity_names = {e.name for e in entities}
     assert "sapphire" in entity_names, (
         f"Bulk sapphire box should be present, got entities: {entity_names}"

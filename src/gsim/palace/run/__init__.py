@@ -1,25 +1,14 @@
 """Run-stage execution helpers for Palace workflows.
 
-Responsibility:
-Owns concrete execution implementations that operate on an already prepared
-Palace run folder.
+This package contains concrete execution helpers that operate on an already
+prepared Palace run folder. Notebook-facing methods on ``PalaceSimBase`` remain
+the public composition points for local execution and handoff packaging.
 
-Does not own:
 Simulation model construction, mesh/config generation, Resolve/report loading,
-typed result models, display helpers, or PDK-specific run-profile catalogs.
-
-Inputs:
-Canonical run folders produced through ``PalaceSimBase`` methods and
-caller-supplied execution options.
-
-Outputs:
-Local solver side effects under ``results/palace`` and runtime metadata under
-``metadata``. Notebook-facing methods on ``PalaceSimBase`` remain the public
-composition points.
-
-Pipeline position:
-``sim.write_config()`` -> ``sim.run_local()`` / handoff helpers ->
-``resolve_palace_result(run_folder, ...)``.
+typed result models, display helpers, and PDK-specific run-profile catalogs live
+outside this package. Run-stage helpers consume canonical run folders and write
+solver side effects under ``results/palace`` plus runtime metadata under
+``metadata`` before Resolve picks the folder back up.
 """
 
 from __future__ import annotations

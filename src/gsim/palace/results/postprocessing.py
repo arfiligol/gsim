@@ -16,17 +16,12 @@ reports, or choose notebook display policy.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar
+from typing import ClassVar
 
-from gsim.palace.display import DisplayValue, PlotlyFigure
-
-if TYPE_CHECKING:
-    import pandas as pd
+from gsim.palace.results.base import NamedTableResult
 
 
-@dataclass(frozen=True)
-class PostprocessingTable:
+class PostprocessingTable(NamedTableResult):
     """Base typed wrapper for one Palace postprocessing table.
 
     Subclasses provide a stable ``table_name``. The wrapper prevents problem
@@ -34,26 +29,7 @@ class PostprocessingTable:
     keeping table-only data lightweight and explicit.
     """
 
-    dataframe: pd.DataFrame
-
     table_name: ClassVar[str]
-
-    def tables(self) -> dict[str, pd.DataFrame]:
-        """Return the table owned by this typed result object."""
-        return {f"{self.table_name}_table": self.dataframe}
-
-    def figures(self) -> dict[str, PlotlyFigure]:
-        """Return figures owned by this table result.
-
-        Table-only postprocessing data has no default problem-neutral plot.
-        Loss, convergence, and matrix objects provide plots where the
-        semantics are clear.
-        """
-        return {}
-
-    def visualize(self) -> dict[str, DisplayValue]:
-        """Return all default table and figure views for this typed result."""
-        return {**self.tables(), **self.figures()}
 
 
 class DomainEnergy(PostprocessingTable):

@@ -6,11 +6,18 @@ from types import SimpleNamespace
 
 import pytest
 
+from gsim.common.stack import Layer, LayerStack
 from gsim.palace import DrivenSim, EigenmodeSim, ElectrostaticSim, MagnetostaticSim
 from gsim.palace.models import (
+    ActivatedRegion,
     CurrentSourceConfig,
     CurrentSourceElementConfig,
     MeshConfig,
+    PalacePort,
+    PortConfig,
+    PortGeometry,
+    PortType,
+    SimulationLayerCatalog,
 )
 
 
@@ -33,14 +40,18 @@ def test_port_lowering_api_stays_in_owner_modules() -> None:
     assert models.PortConfig.__name__ == "PortConfig"
     assert models.TerminalConfig.__name__ == "TerminalConfig"
     assert models.WavePortConfig.__name__ == "WavePortConfig"
-    assert ports.PalacePort.__name__ == "PalacePort"
-    assert ports.PortGeometry.__name__ == "PortGeometry"
-    assert ports.PortType.__name__ == "PortType"
+    assert models.SimulationLayerCatalog.__name__ == "SimulationLayerCatalog"
+    assert models.PalacePort is PalacePort
+    assert models.PortGeometry is PortGeometry
+    assert models.PortType is PortType
     assert callable(ports.configure_cpw_port)
     assert callable(ports.configure_inplane_port)
     assert callable(ports.configure_via_port)
     assert callable(ports.configure_wave_port)
     assert callable(ports.extract_ports)
+    assert not hasattr(ports, "PalacePort")
+    assert not hasattr(ports, "PortGeometry")
+    assert not hasattr(ports, "PortType")
 
     root_only_names = (
         "CPWPortConfig",
@@ -50,6 +61,7 @@ def test_port_lowering_api_stays_in_owner_modules() -> None:
         "PortType",
         "TerminalConfig",
         "WavePortConfig",
+        "SimulationLayerCatalog",
         "configure_cpw_port",
         "configure_inplane_port",
         "configure_via_port",
@@ -67,18 +79,44 @@ def test_config_models_stay_in_models_owner_module() -> None:
         "DrivenConfig",
         "EigenmodeConfig",
         "ElectrostaticConfig",
-        "GeometryConfig",
         "MagnetostaticConfig",
         "MaterialConfig",
         "NumericalConfig",
         "PECBlockConfig",
-        "SimulationResult",
         "TransientConfig",
         "ValidationResult",
     )
     assert all(hasattr(models, name) for name in owner_model_names)
     assert all(not hasattr(palace, name) for name in owner_model_names)
     assert palace.MeshConfig is models.MeshConfig
+    assert models.ActivatedRegion is ActivatedRegion
+    assert not hasattr(palace, "ActivatedRegion")
+
+
+def test_versioned_config_setters_write_official_fragments() -> None:
+    sim = DrivenSim()
+
+    assert sim.palace_version == "0.16.0"
+    sim.set_palace_version("v0.15.0")
+    assert sim.palace_version == "0.15.0"
+    with pytest.raises(ValueError, match="Unsupported Palace config version"):
+        sim.set_palace_version("0.14.0")
+
+    sim.set_palace_version("0.16.0")
+    sim.set_refinement(max_its=4, tol=1.0e-3, uniform_levels=1)
+    refinement = sim.refinement
+    assert refinement["MaxIts"] == 4
+    assert refinement["Tol"] == 1.0e-3
+    assert refinement["UniformLevels"] == 1
+
+    sim.set_linear_solver(type="AMS", estimator_mg=True, ams_max_its=2)
+    solver = sim.numerical.to_solver_config(palace_version=sim.palace_version)
+    assert solver["Linear"]["Type"] == "AMS"
+    assert solver["Linear"]["EstimatorMG"] is True
+    assert solver["Linear"]["AMSMaxIts"] == 2
+
+    sim.set_output_formats(paraview=True, grid_function=True)
+    assert sim.output_formats == {"Paraview": True, "GridFunction": True}
 
 
 def test_common_stack_viz_cloud_helpers_stay_in_owner_modules() -> None:
@@ -186,6 +224,64 @@ class TestDrivenSimValidation:
         assert any(
             "Excitation port 'nonexistent' not found" in e for e in result.errors
         )
+
+    def test_lumped_port_direction_labels_normalize_to_vectors(self):
+        """LumpedPort labels are normalized at the port model boundary."""
+        config = PortConfig(name="o1", layer="metal1", direction="-y")
+
+        assert config.direction == (0.0, -1.0, 0.0)
+
+    def test_lumped_port_direction_vectors_normalize_to_unit_vectors(self):
+        """Arbitrary Cartesian vectors become unit Palace Direction vectors."""
+        config = PortConfig(name="o1", layer="metal1", direction=[3.0, 4.0, 0.0])
+
+        assert config.direction == pytest.approx((0.6, 0.8, 0.0))
+
+    @pytest.mark.parametrize(
+        "direction",
+        [
+            "+R",
+            "-R",
+            "diagonal",
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0],
+            [1.0, float("nan"), 0.0],
+        ],
+    )
+    def test_lumped_port_direction_rejects_invalid_inputs(self, direction):
+        """LumpedPort v1 accepts only finite nonzero Cartesian directions."""
+        with pytest.raises(ValueError, match="LumpedPort"):
+            PortConfig(name="o1", layer="metal1", direction=direction)
+
+    def test_authored_sheet_mode_is_inplane_only(self):
+        """Layout-authored horizontal sheets do not apply to vertical via ports."""
+        with pytest.raises(ValueError, match="Authored sheets"):
+            PortConfig(
+                name="junction",
+                geometry="via",
+                from_layer="metal1",
+                to_layer="metal2",
+                generate_sheet=False,
+            )
+
+    def test_set_simulation_layers_accepts_pdk_catalog_mapping(self):
+        """PDK-owned catalogs are stored as sim-level mesh inputs."""
+        sim = DrivenSim()
+
+        sim.set_simulation_layers({"sim_sheet": {"gds_layer": (202, 1), "z": 0.0}})
+
+        assert sim._simulation_layers is not None
+        assert sim._simulation_layers.for_gds_layer((202, 1)).name == "sim_sheet"
+
+    def test_simulation_layer_catalog_rejects_duplicate_gds_layers(self):
+        """A full GDS tuple can only have one simulation-layer meaning."""
+        with pytest.raises(ValueError, match="share GDS layer"):
+            SimulationLayerCatalog(
+                {
+                    "sheet_a": {"gds_layer": (202, 1), "z": 0.0},
+                    "sheet_b": {"gds_layer": (202, 1), "z": 1.0},
+                }
+            )
 
 
 class TestEigenSimValidation:
@@ -404,6 +500,134 @@ class TestMixinMethods:
         sim.set_stack()
         assert "air_above" not in sim._stack_kwargs
         assert "air_below" not in sim._stack_kwargs
+
+    def test_set_stack_copies_prebuilt_stack(self):
+        """Direct LayerStack inputs become simulation-owned copies."""
+        source_stack = LayerStack(
+            layers={
+                "D0_SUBSTRATE": Layer(
+                    name="D0_SUBSTRATE",
+                    gds_layer=(201, 0),
+                    zmin=-500.0,
+                    zmax=0.0,
+                    thickness=500.0,
+                    material="Si",
+                    layer_type="substrate",
+                )
+            },
+            materials={"Si": {"permittivity": 11.9}},
+            dielectrics=[
+                {
+                    "name": "D0_SUBSTRATE",
+                    "zmin": -500.0,
+                    "zmax": 0.0,
+                    "material": "Si",
+                }
+            ],
+        )
+        sim = DrivenSim()
+
+        sim.set_stack(source_stack)
+        source_stack.layers["D0_SUBSTRATE"].material = "mutated"
+        sim.set_material("Si", material_type="dielectric", permittivity=12.0)
+        resolved = sim._resolve_stack()
+
+        assert resolved is sim.stack
+        assert resolved.layers["D0_SUBSTRATE"].material == "Si"
+        assert resolved.materials["Si"]["permittivity"] == 12.0
+        assert source_stack.materials["Si"]["permittivity"] == 11.9
+
+    def test_activate_regions_store_explicit_stack_intent(self):
+        """Explicit region APIs record semantic stack layer names."""
+        sim = DrivenSim()
+
+        sim.activate_substrate(
+            " D0_SUBSTRATE ",
+            die=" D0 ",
+            margin_x=5.0,
+            margin_y=7.0,
+            material=" Si",
+        )
+        sim.activate_substrate("D1_SUBSTRATE", die="D1", margin_x=6.0, margin_y=8.0)
+        sim.activate_inter_die_vacuum(
+            lower_die="D0",
+            upper_die="D1",
+            margin_x=3.0,
+            margin_y=4.0,
+        )
+        sim.activate_outer_vacuum(
+            margin_x=10.0,
+            margin_y=12.0,
+            z_above=500.0,
+            z_below=20.0,
+        )
+
+        assert [region.layer for region in sim._activated_region_values()] == [
+            "D0_SUBSTRATE",
+            "D0_TO_D1_GAP",
+            "D1_SUBSTRATE",
+            "OUTER_VACUUM",
+        ]
+        assert sim._activated_regions["D0_SUBSTRATE"].role == "substrate"
+        assert sim._activated_regions["D0_SUBSTRATE"].die == "D0"
+        assert sim._activated_regions["D0_SUBSTRATE"].margin_x == 5.0
+        assert sim._activated_regions["D0_SUBSTRATE"].margin_y == 7.0
+        assert sim._activated_regions["D0_SUBSTRATE"].material == "Si"
+        assert sim._activated_regions["D0_TO_D1_GAP"].role == "inter_die_vacuum"
+        assert sim._activated_regions["D0_TO_D1_GAP"].lower_die == "D0"
+        assert sim._activated_regions["D0_TO_D1_GAP"].upper_die == "D1"
+        assert sim._activated_regions["OUTER_VACUUM"].role == "outer_vacuum"
+        assert sim._activated_regions["OUTER_VACUUM"].z_above == 500.0
+        assert sim._activated_regions["OUTER_VACUUM"].z_below == 20.0
+
+    def test_activate_region_api_validates_names_and_extents(self):
+        """Activation APIs reject empty names and negative region extents."""
+        sim = DrivenSim()
+
+        with pytest.raises(ValueError, match="non-empty"):
+            sim.activate_substrate(" ")
+        with pytest.raises(ValueError, match="non-empty"):
+            sim.activate_substrate("D0_SUBSTRATE", die=" ")
+        with pytest.raises(ValueError):
+            sim.activate_substrate("D0_SUBSTRATE", margin_x=-1.0)
+        with pytest.raises(ValueError, match="non-empty"):
+            sim.activate_inter_die_vacuum(lower_die="")
+        with pytest.raises(ValueError):
+            sim.activate_outer_vacuum(z_above=-1.0)
+
+    def test_activate_regions_reject_set_airbox_mixing(self):
+        """Explicit region mode and set_airbox mode are mutually exclusive."""
+        sim = DrivenSim()
+        sim.activate_outer_vacuum()
+
+        with pytest.raises(ValueError, match="cannot be mixed with set_airbox"):
+            sim.set_airbox(margin_x=50.0, margin_y=50.0, z_above=10.0, z_below=10.0)
+
+        sim = DrivenSim()
+        sim.set_airbox(margin_x=50.0, margin_y=50.0, z_above=10.0, z_below=10.0)
+        with pytest.raises(ValueError, match="cannot be mixed with set_airbox"):
+            sim.activate_outer_vacuum()
+
+    def test_activate_regions_reject_mesh_time_airbox_z_kwargs(self):
+        """Explicit region mode rejects mesh-time vertical airbox controls."""
+        sim = DrivenSim()
+        sim.activate_outer_vacuum()
+
+        with pytest.raises(ValueError, match="mesh-time airbox"):
+            sim._apply_airbox_overrides(z_above=10.0)
+
+        sim._apply_airbox_overrides(margin_x=50.0, margin_y=20.0)
+        assert sim._airbox_config == {}
+
+    def test_activate_regions_reject_stored_mesh_airbox_margin(self):
+        """Explicit region mode refuses stored legacy airbox expansion."""
+        sim = DrivenSim()
+        sim.activate_outer_vacuum()
+
+        with pytest.raises(ValueError, match="mesh airbox controls"):
+            sim._reject_explicit_region_airbox_config(
+                MeshConfig.default(airbox_margin=1.0)
+            )
 
     def test_set_airbox(self):
         """Test set_airbox stores explicit airbox margins and z extents."""

@@ -142,15 +142,8 @@ def relative_to_run_folder(path: Path, root: Path) -> str:
         return path.as_posix()
 
 
-def default_palace_handoff_archive_path(root: str | Path) -> Path:
-    """Return the default archive path beside a Palace run folder."""
-    run_root = Path(root)
-    return run_root.parent / f"{run_root.name}-palace.tar.gz"
-
-
 __all__ = [
     "PalaceRunFolder",
-    "default_palace_handoff_archive_path",
     "palace_run_folder",
     "prepare_palace_run_folder",
     "relative_to_run_folder",

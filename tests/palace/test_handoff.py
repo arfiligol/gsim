@@ -15,7 +15,6 @@ from gsim.palace.handoff import (
     PalaceSlurmSweepArraySpec,
     load_palace_slurm_profile_catalog,
     package_palace_run_handoff_archive,
-    palace_slurm_solver_config_hints,
     resolve_palace_slurm_profile,
     write_palace_run_handoff_archive_manifest,
     write_palace_slurm_sbatch_handoff,
@@ -37,6 +36,19 @@ def _write_minimal_palace_run(run_dir: Path) -> None:
         encoding="utf-8",
     )
     (run_dir / "palace.msh").write_text("$MeshFormat\n", encoding="utf-8")
+
+
+def test_package_palace_run_handoff_archive_defaults_beside_run_folder(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run_001"
+    _write_minimal_palace_run(run_dir)
+
+    result = package_palace_run_handoff_archive(run_dir)
+
+    assert result.archive_path == (
+        tmp_path / "run_001-palace.tar.gz"
+    )
 
 
 def test_resolve_palace_slurm_profile_accepts_mapping_and_overrides() -> None:
@@ -139,16 +151,57 @@ def test_sim_write_slurm_sbatch_handoff_uses_resolved_profile(tmp_path: Path) ->
     assert summary.handoff["profile"]["name"] == "public-slurm:cpu"
 
 
-def test_palace_slurm_solver_config_hints_maps_solver_metadata() -> None:
-    assert palace_slurm_solver_config_hints(
-        {"device": "GPU", "backend": "/gpu/cuda"}
-    ) == {
-        "Device": "GPU",
-        "Backend": "/gpu/cuda",
+def test_slurm_profile_resolution_maps_solver_metadata_to_config_hints() -> None:
+    resolution = resolve_palace_slurm_profile(
+        {
+            "public-slurm:gpu": {
+                "resources": {
+                    "account": "public_alloc",
+                    "partition": "gpu",
+                    "wall_time": "00:30:00",
+                    "nodes": 1,
+                },
+                "solver": {"device": "GPU", "backend": "/gpu/cuda"},
+            }
+        },
+        "public-slurm:gpu",
+    )
+
+    assert resolution.to_palace_config_hints() == {
+        "Solver": {"Device": "GPU", "Backend": "/gpu/cuda"}
     }
-    assert palace_slurm_solver_config_hints({"device": None, "backend": None}) == {}
+
+    resolution = resolve_palace_slurm_profile(
+        {
+            "public-slurm:cpu": {
+                "resources": {
+                    "account": "public_alloc",
+                    "partition": "cpu",
+                    "wall_time": "00:30:00",
+                    "nodes": 1,
+                },
+                "solver": {"device": None, "backend": None},
+            }
+        },
+        "public-slurm:cpu",
+    )
+    assert resolution.to_palace_config_hints() == {}
+
     with pytest.raises(ValueError, match="Unknown Slurm profile solver field"):
-        palace_slurm_solver_config_hints({"runtime": "cuda"})
+        resolve_palace_slurm_profile(
+            {
+                "public-slurm:bad": {
+                    "resources": {
+                        "account": "public_alloc",
+                        "partition": "cpu",
+                        "wall_time": "00:30:00",
+                        "nodes": 1,
+                    },
+                    "solver": {"runtime": "cuda"},
+                }
+            },
+            "public-slurm:bad",
+        )
 
 
 def test_resolve_palace_slurm_profile_accepts_spec_objects() -> None:
@@ -470,6 +523,7 @@ def test_write_palace_slurm_sbatch_handoff_supports_wrapper_flags(
         'srun "$PALACE_EXECUTABLE" -np "$PALACE_NUM_PROCESSES" '
         '-nt "$PALACE_NUM_THREADS" "$PALACE_CONFIG"'
     ) in script
+    assert '2>&1 | tee "logs/palace-${SLURM_JOB_ID:-manual}.log"' in script
 
 
 def test_write_palace_run_handoff_archive_manifest_round_trips_summary(
@@ -626,6 +680,7 @@ def test_write_palace_slurm_sweep_array_handoff_round_trips_summary(
     assert "#SBATCH --account=public_alloc" in script
     assert "POINTS_CSV=points.csv" in script
     assert 'srun --mpi=pmix "$PALACE_EXECUTABLE" "$CONFIG_PATH"' in script
+    assert '2>&1 | tee "$LOG_DIR/palace-${SLURM_ARRAY_TASK_ID:-manual}.log"' in script
     assert "sbatch" not in script
 
     csv_text = result.points_csv_path.read_text(encoding="utf-8")

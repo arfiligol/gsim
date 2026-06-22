@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from textwrap import dedent
+from typing import Self
 
 import gdsfactory as gf
 import pytest
@@ -17,6 +19,12 @@ from gsim.palace import DrivenSim, EigenmodeSim, ElectrostaticSim, Magnetostatic
 from gsim.palace.mesh import (
     SurfaceFluxSpec,
     build_postprocessing_config_from_manifest,
+)
+from gsim.palace.resolve import load_palace_run_summary
+from gsim.palace.results import SimulationBenchmark
+from gsim.palace.run.local import (
+    detect_palace_runtime_version,
+    parse_palace_runtime_version,
 )
 
 # ---------------------------------------------------------------------------
@@ -410,7 +418,106 @@ def test_run_local_direct_palace_supports_serial_wrapper_flag(tmp_path, monkeypa
         "1",
         "config.json",
     ]
+    assert metadata["paths"]["palace_log"] == "logs/palace-local.log"
     assert metadata["outputs"]["terminal-C.csv"]["bytes"] > 0
+    assert (tmp_path / "logs" / "palace-local.log").read_text() == ""
+    assert not (tmp_path / "metadata" / "palace_resource_record.json").exists()
+
+
+def test_run_local_writes_palace_log_and_resource_record(tmp_path, monkeypatch):
+    """Completed local runs convert Palace logs into benchmark sidecars."""
+    import gsim.palace.run.local as local_run
+
+    sim = ElectrostaticSim()
+    sim.set_output_dir(tmp_path)
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "palace.msh").write_text("$MeshFormat\n", encoding="utf-8")
+    palace_executable = tmp_path / "palace"
+    palace_executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    palace_log = dedent(
+        """
+        Git changeset ID: v0.16.1
+        Running with 1 MPI processes, 2 OpenMP threads
+
+        Elapsed Time Report (s)           Min.        Max.        Avg.
+        ==============================================================
+        Initialization                   1.000       1.100       1.050
+        --------------------------------------------------------------
+        Total                            2.000       2.500       2.250
+
+        Peak Memory                   Per-Node       Total   Total HWM
+        ==============================================================
+        Initialization                   1.0G        1.0G        1.5G
+        --------------------------------------------------------------
+        Total                             2.0G        2.0G        2.5G
+
+        Adaptive mesh refinement (AMR) iteration 1:
+         Indicator norm = 1.000e-01, global unknowns = 100
+         Max. iterations = 15, tol. = 1.000e-02, max. size = 5000000
+         Marked 1/10 elements for refinement (70.00% of the error, theta = 0.70)
+         Conforming mesh refinement added 5 elements (initial = 10, final = 15)
+
+        Completed 1 iterations of adaptive mesh refinement (AMR):
+         Indicator norm = 5.000e-02, global unknowns = 200
+         Max. iterations = 15, tol. = 1.000e-02, max. size = 5000000
+        """
+    ).strip()
+
+    class FakeProcess:
+        def __init__(self, *, cwd: Path) -> None:
+            postpro_dir = cwd / "results" / "palace"
+            postpro_dir.mkdir(parents=True, exist_ok=True)
+            (postpro_dir / "terminal-C.csv").write_text("i\n", encoding="utf-8")
+            self.stdout = iter(f"{line}\n" for line in palace_log.splitlines())
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(
+        local_run,
+        "detect_palace_runtime_version",
+        lambda *_args, **_kwargs: ("0.16.0", "Palace v0.16.0"),
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "Popen",
+        lambda *_args, **kwargs: FakeProcess(cwd=kwargs["cwd"]),
+    )
+
+    sim.run_local(
+        use_apptainer=False,
+        palace_executable=palace_executable,
+        num_processes=1,
+        num_threads=2,
+        verbose=True,
+    )
+
+    log_path = tmp_path / "logs" / "palace-local.log"
+    resource_path = tmp_path / "metadata" / "palace_resource_record.json"
+    assert log_path.read_text(encoding="utf-8").startswith("Git changeset ID")
+    assert resource_path.is_file()
+    assert (tmp_path / "metadata" / "palace_stage_timing.csv").is_file()
+    assert (tmp_path / "metadata" / "palace_stage_memory.csv").is_file()
+    assert (tmp_path / "metadata" / "palace_amr_passes.csv").is_file()
+
+    metadata = json.loads(
+        (tmp_path / "metadata" / "palace_run_metadata.json").read_text()
+    )
+    assert metadata["paths"]["palace_log"] == "logs/palace-local.log"
+    assert metadata["paths"]["resource_record"] == (
+        "metadata/palace_resource_record.json"
+    )
+
+    benchmark = SimulationBenchmark.from_run_summary(load_palace_run_summary(tmp_path))
+    items = benchmark.visualize()
+    assert "simulation_benchmark_adaptive_pass_table" in items
+    assert "simulation_benchmark_adaptive_pass_trace_plot" in items
 
 
 def test_run_local_direct_palace_binary_mode_omits_wrapper_flags(tmp_path, monkeypatch):
@@ -542,6 +649,159 @@ def test_run_local_direct_palace_supports_setup_commands(tmp_path, monkeypatch):
         "palace_executable_name": "palace-x86_64.bin",
     }
     assert metadata["command"]["argv"] == ["palace-x86_64.bin", "config.json"]
+
+
+def test_parse_palace_runtime_version() -> None:
+    assert parse_palace_runtime_version("Palace v0.16.0") == "0.16.0"
+    assert parse_palace_runtime_version("palace 0.15.0\n") == "0.15.0"
+    assert parse_palace_runtime_version("Palace version: 869ee5c") is None
+    assert parse_palace_runtime_version("Open MPI 5.0.8") is None
+    assert parse_palace_runtime_version("spack load palace@0.16.0") is None
+    assert (
+        parse_palace_runtime_version(
+            "/opt/spack/darwin-m3/palace-0.16.0-p5ona/bin/palace-arm64.bin"
+        )
+        == "0.16.0"
+    )
+    assert (
+        parse_palace_runtime_version(
+            "/opt/spack/darwin-m3/openmpi-5.0.8-qtk/bin/mpirun "
+            "-n 1 /opt/spack/darwin-m3/palace-0.16.0-p5ona/bin/"
+            "palace-arm64.bin --version\n"
+            "Palace version: 869ee5c"
+        )
+        == "0.16.0"
+    )
+    assert parse_palace_runtime_version("no semantic version") is None
+
+
+def test_detect_palace_runtime_version_falls_back_to_spack_package_path(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    def fake_run(
+        cmd: list[str],
+        *,
+        cwd: Path,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        env: dict[str, str],
+        timeout: int,
+    ) -> subprocess.CompletedProcess[str]:
+        assert cmd[0].endswith("palace-arm64.bin")
+        assert cwd == tmp_path
+        assert not check
+        assert capture_output
+        assert text
+        assert env
+        assert timeout == 30
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout="Palace version: 869ee5c\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    runtime_version, output = detect_palace_runtime_version(
+        [
+            "/opt/spack/darwin-m3/palace-0.16.0-p5ona/bin/palace-arm64.bin",
+            "--version",
+        ],
+        cwd=tmp_path,
+        env={"PATH": "/usr/bin"},
+        setup_commands=(),
+    )
+
+    assert runtime_version == "0.16.0"
+    assert output == "Palace version: 869ee5c"
+
+
+def test_run_local_raises_on_runtime_version_mismatch(tmp_path, monkeypatch):
+    import gsim.palace.run.local as local_run
+
+    sim = ElectrostaticSim()
+    sim.set_output_dir(tmp_path)
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "palace.msh").write_text("$MeshFormat\n", encoding="utf-8")
+    palace_binary = tmp_path / "palace-arm64.bin"
+    palace_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        local_run,
+        "detect_palace_runtime_version",
+        lambda *_args, **_kwargs: ("0.15.0", "Palace v0.15.0"),
+    )
+
+    with pytest.raises(RuntimeError, match="does not match target config version"):
+        sim.run_local(
+            use_apptainer=False,
+            executable_mode="binary",
+            palace_executable=palace_binary,
+            num_processes=1,
+            verbose=False,
+        )
+
+
+def test_run_local_records_runtime_version_mismatch_when_check_disabled(
+    tmp_path,
+    monkeypatch,
+):
+    import gsim.palace.run.local as local_run
+
+    sim = ElectrostaticSim()
+    sim.set_output_dir(tmp_path)
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "palace.msh").write_text("$MeshFormat\n", encoding="utf-8")
+    palace_binary = tmp_path / "palace-arm64.bin"
+    palace_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        local_run,
+        "detect_palace_runtime_version",
+        lambda *_args, **_kwargs: ("0.15.0", "Palace v0.15.0"),
+    )
+
+    def fake_run(
+        cmd: list[str],
+        *,
+        cwd: Path,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        env: dict[str, str],
+    ) -> subprocess.CompletedProcess[str]:
+        assert check
+        assert capture_output
+        assert text
+        assert env
+        postpro_dir = Path(cwd) / "results" / "palace"
+        postpro_dir.mkdir(parents=True, exist_ok=True)
+        (postpro_dir / "terminal-C.csv").write_text("i\n", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    sim.run_local(
+        use_apptainer=False,
+        executable_mode="binary",
+        palace_executable=palace_binary,
+        num_processes=1,
+        verbose=False,
+        check_runtime_version=False,
+    )
+
+    metadata = json.loads(
+        (tmp_path / "metadata" / "palace_run_metadata.json").read_text()
+    )
+    assert metadata["palace_version"] == {
+        "target": "0.16.0",
+        "runtime": "0.15.0",
+        "check": "mismatch",
+        "output": "Palace v0.15.0",
+    }
 
 
 def test_run_local_direct_palace_binary_mode_rejects_multi_process(tmp_path):
@@ -1153,11 +1413,10 @@ class TestNumericalConfig:
         config = json.loads(config_path.read_text())
 
         linear = config["Solver"]["Linear"]
-        assert linear["Type"] == "Default"
+        assert linear["Type"] == "AMS"
         assert linear["KSPType"] == "GMRES"
         assert linear["Tol"] == 2e-7
         assert linear["MaxIts"] == 777
-        assert linear["Preconditioner"] == "AMS"
         assert config["Solver"]["Order"] == 3
         assert config["Solver"]["Device"] == "CPU"
 

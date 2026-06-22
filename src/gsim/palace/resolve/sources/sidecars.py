@@ -1,11 +1,11 @@
 """Write Resolve-owned Palace sweep sidecar metadata.
 
-Responsibility:
-Owns sweep point sidecars consumed by Resolve sweep summaries.
+This module writes sweep point sidecars used by Resolve sweep summaries. The
+sidecars describe sweep identity and path metadata that Resolve can audit later.
 
-Does not own:
-Run Stage handoff metadata, sbatch rendering, archive packaging, solver result
-physics parsing, or typed result data.
+Run Stage handoff metadata, sbatch rendering, archive packaging, solver-result
+physics parsing, and typed result data are owned by their respective run,
+resolve, and results layers.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
-from gsim.palace._shared import duplicate_values, json_ready, optional_str, path_value
+from gsim.palace._shared import duplicate_values, json_ready, optional_str
 from gsim.palace.resolve.sources.sweep_models import (
     SWEEP_POINT_PATH_FIELDS,
     PalaceSweepPointSpec,
@@ -99,7 +99,7 @@ def _sweep_point_spec_row(
 
     for field_name in SWEEP_POINT_PATH_FIELDS:
         if row.get(field_name) is not None:
-            row[field_name] = path_value(row[field_name])
+            row[field_name] = str(row[field_name])
 
     return row
 

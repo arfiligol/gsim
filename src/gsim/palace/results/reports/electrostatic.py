@@ -35,6 +35,7 @@ class ElectrostaticReport(BasePalaceReport):
     surface_interface_summary: pd.DataFrame
     domain_epr_loss: DomainLoss
     surface_epr_loss: SurfaceLoss
+    surface_epr_convergence: pd.DataFrame
     loss_budget_result: LossBudget
 
     @property
@@ -141,6 +142,7 @@ class ElectrostaticReport(BasePalaceReport):
         return ReportLoss(
             domain=self.domain_epr_loss,
             surface=self.surface_epr_loss,
+            surface_convergence=self.surface_epr_convergence,
             budget=self.loss_budget_result,
         )
 
@@ -162,15 +164,20 @@ class ElectrostaticReport(BasePalaceReport):
         if self.terminal_cinv is not None:
             typed_data.append(self.terminal_cinv)
         typed_data.extend(
-            (
+            convergence
+            for convergence in (
                 self.terminal_c_convergence,
                 self.terminal_cm_convergence,
                 self.terminal_cinv_convergence,
-                self.domain_energy_result,
-                self.surface_q_result,
-                self.loss,
             )
+            if not convergence.history.empty
         )
+        if not self.domain_energy.empty:
+            typed_data.append(self.domain_energy_result)
+        if not self.surface_q.empty:
+            typed_data.append(self.surface_q_result)
+        if not self.loss.empty:
+            typed_data.append(self.loss)
         return tuple(typed_data)
 
     def to_sweep_metrics(self) -> dict[str, Any]:

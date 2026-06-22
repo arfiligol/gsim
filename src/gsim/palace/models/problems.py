@@ -141,8 +141,6 @@ class DrivenConfig(BaseModel):
 
     def to_palace_config(self) -> dict:
         """Convert to Palace JSON config format."""
-        freq_step = (self.fmax - self.fmin) / max(1, self.num_points - 1) / 1e9
-
         if self.fmax == self.fmin:
             freq_step = 1.0
         else:

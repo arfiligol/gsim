@@ -198,6 +198,9 @@ class DielectricInterfaceSpec:
     entry_names: tuple[str, ...] = ()
     preset_name: str | None = None
     preset_source: str | None = None
+    combine_entries: bool = False
+    entry_name: str | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -307,25 +310,46 @@ def build_postprocessing_config_from_manifest(
                 "DielectricInterfaceSpec requires either permittivity or material_name."
             )
             raise ValueError(msg)
-        for entry in _selected_entries(
+        selected_entries = _selected_entries(
             manifest=manifest,
             role=spec.role,
             entry_names=spec.entry_names,
-        ):
+        )
+        if spec.combine_entries:
+            if not selected_entries:
+                continue
+            attributes = _combined_attributes(selected_entries)
+            if not attributes:
+                continue
+            boundaries["Dielectric"].append(
+                _dielectric_entry(
+                    index=dielectric_index,
+                    spec=spec,
+                    attributes=attributes,
+                )
+            )
+            index_entries.append(
+                _combined_index_entry(
+                    section="Boundaries.Postprocessing.Dielectric",
+                    index=dielectric_index,
+                    spec=spec,
+                    entries=selected_entries,
+                    extra=_dielectric_interface_index_extra(spec),
+                )
+            )
+            dielectric_index += 1
+            continue
+
+        for entry in selected_entries:
             if not entry.attributes:
                 continue
-            dielectric_entry: dict[str, Any] = {
-                "Index": dielectric_index,
-                "Attributes": list(entry.attributes),
-                "Type": spec.interface_type,
-                "Thickness": spec.thickness,
-                "LossTan": spec.loss_tangent,
-            }
-            if spec.permittivity is not None:
-                dielectric_entry["Permittivity"] = spec.permittivity
-            if spec.material_name is not None:
-                dielectric_entry["_MaterialName"] = spec.material_name
-            boundaries["Dielectric"].append(dielectric_entry)
+            boundaries["Dielectric"].append(
+                _dielectric_entry(
+                    index=dielectric_index,
+                    spec=spec,
+                    attributes=entry.attributes,
+                )
+            )
             index_entries.append(
                 _index_entry(
                     section="Boundaries.Postprocessing.Dielectric",
@@ -403,9 +427,10 @@ def build_dielectric_interface_specs_from_material_kinds(
     """Build interface specs by classifying manifest material-kind pairs.
 
     Callers own material naming, material-kind assignment, and preset records.
-    ``gsim`` only classifies parsed manifest ``interface_of`` pairs into
-    interface types, skips non-loss kind pairs, and emits ordered Palace
-    postprocessing specs.
+    ``gsim`` only classifies parsed manifest interfaces into interface types,
+    using material provenance metadata when semantic mesh names such as
+    activated regions are present. It skips non-loss kind pairs and emits
+    ordered Palace postprocessing specs.
     """
     kind_map = {
         str(name): _normalized_material_kind(kind=kind, material_name=str(name))
@@ -426,14 +451,16 @@ def build_dielectric_interface_specs_from_material_kinds(
         if entry.interface_of is None:
             continue
         left, right = entry.interface_of
+        left_material = _interface_part_material_name(entry=entry, part=left)
+        right_material = _interface_part_material_name(entry=entry, part=right)
         left_kind = _kind_for_interface_part(
             kind_map=kind_map,
-            material_name=left,
+            material_name=left_material,
             material_name_aliases=alias_map,
         )
         right_kind = _kind_for_interface_part(
             kind_map=kind_map,
-            material_name=right,
+            material_name=right_material,
             material_name_aliases=alias_map,
         )
         interface_types = interface_type_map.get(frozenset((left_kind, right_kind)), ())
@@ -745,6 +772,15 @@ def _kind_for_interface_part(
     raise KeyError(msg)
 
 
+def _interface_part_material_name(*, entry: MeshPhysicalGroup, part: str) -> str:
+    interface_materials = entry.metadata.get("interface_materials")
+    if isinstance(interface_materials, Mapping):
+        material_name = interface_materials.get(part)
+        if isinstance(material_name, str) and material_name:
+            return material_name
+    return part
+
+
 def _interface_type_map(
     interface_types_by_kind_pair: Mapping[tuple[str, str], str | Iterable[str]] | None,
 ) -> dict[frozenset[str], tuple[str, ...]]:
@@ -853,6 +889,67 @@ def _dielectric_interface_index_extra(
     if spec.preset_source is not None:
         extra["preset_source"] = spec.preset_source
     return extra
+
+
+def _dielectric_entry(
+    *,
+    index: int,
+    spec: DielectricInterfaceSpec,
+    attributes: tuple[int, ...],
+) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "Index": index,
+        "Attributes": list(attributes),
+        "Type": spec.interface_type,
+        "Thickness": spec.thickness,
+        "LossTan": spec.loss_tangent,
+    }
+    if spec.permittivity is not None:
+        entry["Permittivity"] = spec.permittivity
+    if spec.material_name is not None:
+        entry["_MaterialName"] = spec.material_name
+    return entry
+
+
+def _combined_attributes(entries: tuple[MeshPhysicalGroup, ...]) -> tuple[int, ...]:
+    attributes: list[int] = []
+    for entry in entries:
+        attributes.extend(entry.attributes)
+    return tuple(dict.fromkeys(attributes))
+
+
+def _combined_index_entry(
+    *,
+    section: str,
+    index: int,
+    spec: DielectricInterfaceSpec,
+    entries: tuple[MeshPhysicalGroup, ...],
+    extra: Mapping[str, Any],
+) -> PostprocessingIndexEntry:
+    metadata: dict[str, Any] = {"entry_names": [entry.name for entry in entries]}
+    entry_metadata = {
+        entry.name: dict(entry.metadata) for entry in entries if entry.metadata
+    }
+    if entry_metadata:
+        metadata["entries"] = entry_metadata
+    metadata.update(dict(spec.metadata))
+    return PostprocessingIndexEntry(
+        section=section,
+        index=index,
+        entry_name=spec.entry_name or "+".join(entry.name for entry in entries),
+        role=str(spec.role),
+        attributes=_combined_attributes(entries),
+        entity_tags=tuple(
+            dict.fromkeys(tag for entry in entries for tag in entry.entity_tags)
+        ),
+        physical_names=tuple(
+            dict.fromkeys(name for entry in entries for name in entry.physical_names)
+        ),
+        dimension=entries[0].dimension,
+        source="gsim_postprocessing",
+        metadata=metadata,
+        extra=dict(extra),
+    )
 
 
 def _optional_preset_source(value: Any) -> str | None:

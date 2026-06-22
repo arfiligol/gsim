@@ -73,6 +73,15 @@ DIELECTRIC_INTERFACE_COLUMNS = (
     "interface_type",
     "preset_name",
     "preset_source",
+    "loss_channel",
+    "source_entry_name",
+    "surface_epr_summary_kind",
+    "surface_epr_exclude_below_um",
+    "source_aware_surface_epr_group_names",
+    "surface_epr_band_names",
+    "surface_epr_band_min_um",
+    "surface_epr_band_max_um",
+    "surface_epr_band_label",
     "thickness",
     "permittivity",
     "loss_tangent",
@@ -499,6 +508,7 @@ def dielectric_interface_row(
         metadata = dict(index_entry.metadata)
         preset_name = optional_str(index_entry.extra.get("preset_name"))
         preset_source = optional_str(index_entry.extra.get("preset_source"))
+        source_name = optional_str(metadata.get("source_entry_name")) or source_name
 
     return {
         "interface_row_index": interface_row_index,
@@ -515,6 +525,30 @@ def dielectric_interface_row(
         "interface_type": config_material_value(interface, "Type", "interface_type"),
         "preset_name": preset_name,
         "preset_source": preset_source,
+        "loss_channel": optional_str(metadata.get("loss_channel")),
+        "source_entry_name": optional_str(metadata.get("source_entry_name")),
+        "surface_epr_summary_kind": optional_str(
+            metadata.get("surface_epr_summary_kind")
+        ),
+        "surface_epr_exclude_below_um": optional_numeric(
+            metadata.get("surface_epr_exclude_below_um")
+        ),
+        "source_aware_surface_epr_group_names": metadata.get(
+            "source_aware_surface_epr_group_names"
+        ),
+        "surface_epr_band_names": metadata.get(
+            "surface_epr_band_names",
+            metadata.get("source_aware_surface_epr_group_names"),
+        ),
+        "surface_epr_band_min_um": optional_numeric(
+            metadata.get("surface_epr_band_min_um")
+        ),
+        "surface_epr_band_max_um": optional_numeric(
+            metadata.get("surface_epr_band_max_um")
+        ),
+        "surface_epr_band_label": optional_str(
+            metadata.get("surface_epr_band_label")
+        ),
         "thickness": optional_numeric(
             config_material_value(interface, "Thickness", "thickness")
         ),

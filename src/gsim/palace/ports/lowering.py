@@ -1,91 +1,50 @@
-"""Port configuration for Palace EM simulation.
+"""Port lowering between notebook declarations and mesh-ready Palace ports.
 
-Ports define where excitation and measurement occur in the simulation.
-This module provides helpers to configure gdsfactory ports with Palace metadata.
+This module writes Palace metadata onto gdsfactory ports and extracts that
+metadata into ``PalacePort`` records for mesh generation. It owns the metadata
+keys, live port lookup details, and CPW element intent derived from a single
+signal-center gdsfactory port.
+
+PDK simulation-layer catalogs, authored polygon selection, Gmsh surface
+creation, physical groups, and Palace JSON generation are handled by the
+surrounding model and mesh layers. The flow is notebook declaration to
+gdsfactory port metadata, then ``extract_ports()``, then ``gsim.palace.mesh``.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import Enum
 from typing import TYPE_CHECKING
+
+from gsim.palace.models.ports import (
+    PalaceDirectionInput,
+    PalacePort,
+    PortGeometry,
+    PortType,
+    normalize_palace_direction,
+    palace_direction_from_orientation,
+)
+from gsim.palace.models.simulation_layers import normalize_gds_layer
 
 if TYPE_CHECKING:
     from gsim.common.stack import LayerStack
 
 
-class PortType(Enum):
-    """Palace port types (maps to Palace config)."""
+def port_gds_layer(port) -> tuple[int, int]:
+    """Return the full GDS layer/datatype tuple for a gdsfactory port."""
+    layer_info = getattr(port, "layer_info", None)
+    if layer_info is not None:
+        layer = getattr(layer_info, "layer", None)
+        datatype = getattr(layer_info, "datatype", None)
+        if layer is not None and datatype is not None:
+            return int(layer), int(datatype)
 
-    LUMPED = "lumped"  # LumpedPort: internal boundary with circuit impedance
-    WAVEPORT = "waveport"  # WavePort: domain boundary, modal port
-    # SURFACE_CURRENT = "surface_current"  # Future: inductance matrix extraction
-    # TERMINAL = "terminal"  # Future: capacitance matrix extraction (electrostatics)
-
-
-class PortGeometry(Enum):
-    """Internal geometry type for mesh generation."""
-
-    INPLANE = "inplane"  # Horizontal surface on single metal layer (Direction: +X, +Y)
-    VIA = "via"  # Vertical surface between two metal layers (Direction: +Z)
-
-
-@dataclass
-class PalacePort:
-    """Port definition for Palace simulation."""
-
-    name: str
-    port_type: PortType = PortType.LUMPED  # Palace port type
-    geometry: PortGeometry = PortGeometry.INPLANE  # Mesh geometry type
-    center: tuple[float, float] = (0.0, 0.0)  # (x, y) in um
-    width: float = 0.0  # um
-    orientation: float = 0.0  # degrees (0=east, 90=north, 180=west, 270=south)
-
-    # Z coordinates (filled from stack)
-    zmin: float = 0.0
-    zmax: float = 0.0
-
-    # Layer info
-    layer: str | None = None  # For inplane: target layer
-    from_layer: str | None = None  # For via: bottom layer
-    to_layer: str | None = None  # For via: top layer
-
-    # Port geometry
-    length: float | None = None  # Port extent along direction (um)
-
-    # Multi-element support (for CPW)
-    multi_element: bool = False
-    centers: list[tuple[float, float]] | None = None  # Multiple centers for CPW
-    directions: list[str] | None = (
-        None  # Direction per element for CPW (e.g., ["+Y", "-Y"])
-    )
-
-    # Electrical properties
-    impedance: float = 50.0  # Ohms
-    resistance: float | None = None  # Ohms
-    inductance: float | None = None  # H
-    capacitance: float | None = None  # F
-    excited: bool = True  # Whether this port is excited (vs just measured)
-
-    # Waveport specific settings
-    z_margin: float = 0.0  # For waveports: height margin in um
-    lateral_margin: float = 0.0
-    max_size: bool = False  # When True, fill the full simulation domain
-    mode: int = 1  # Mode number to excite.
-    offset: float = 0.0  # Offset distance used for scattering parameter de-embedding.
-
-    @property
-    def direction(self) -> str:
-        """Get direction from orientation."""
-        # Normalize orientation to 0-360
-        angle = self.orientation % 360
-        if angle < 45 or angle >= 315:
-            return "x"  # East
-        if 45 <= angle < 135:
-            return "y"  # North
-        if 135 <= angle < 225:
-            return "-x"  # West
-        return "-y"  # South
+    try:
+        return normalize_gds_layer(getattr(port, "layer", None))
+    except ValueError as exc:
+        raise ValueError(
+            "Authored Palace solver sheets require the gdsfactory port to expose "
+            "a full GDS layer/datatype tuple."
+        ) from exc
 
 
 def _shift_port_center(port, offset: float) -> None:
@@ -118,6 +77,8 @@ def configure_inplane_port(
     impedance: float = 50.0,
     excited: bool = True,
     offset: float = 0.0,
+    direction: PalaceDirectionInput | None = None,
+    generate_sheet: bool = True,
 ):
     """Configure gdsfactory port(s) as inplane (lumped) ports for Palace simulation.
 
@@ -128,10 +89,15 @@ def configure_inplane_port(
         ports: Single gdsfactory Port or iterable of Ports (e.g., c.ports)
         layer: Target conductor layer name (e.g., 'topmetal2')
         length: Port extent along direction in um (perpendicular to port width)
+        direction: Optional solver field/polarization direction. Port-sheet
+            geometry still follows the gdsfactory port orientation.
         impedance: Port impedance in Ohms (default: 50)
         excited: Whether port is excited vs just measured (default: True)
         offset: Shift port inward along the waveguide (um).
             Positive moves away from the boundary, into the conductor.
+        generate_sheet: If True, mesh creates a sheet from port metadata. If
+            False, mesh selects a layout-authored solver sheet from the
+            simulation layer catalog using this gdsfactory port's layer.
 
     Examples:
         ```python
@@ -150,8 +116,13 @@ def configure_inplane_port(
         port.info["palace_type"] = "lumped"
         port.info["layer"] = layer
         port.info["length"] = length
+        port.info["direction"] = (
+            normalize_palace_direction(direction) if direction is not None else None
+        )
         port.info["impedance"] = impedance
         port.info["excited"] = excited
+        port.info["generate_sheet"] = generate_sheet
+        port.info["sheet_gds_layer"] = None if generate_sheet else port_gds_layer(port)
 
 
 def configure_via_port(
@@ -161,6 +132,7 @@ def configure_via_port(
     impedance: float = 50.0,
     excited: bool = True,
     offset: float = 0.0,
+    direction: PalaceDirectionInput | None = None,
 ):
     """Configure gdsfactory port(s) as via (vertical) lumped ports.
 
@@ -171,6 +143,8 @@ def configure_via_port(
         ports: Single gdsfactory Port or iterable of Ports (e.g., c.ports)
         from_layer: Bottom conductor layer name (e.g., 'metal1')
         to_layer: Top conductor layer name (e.g., 'topmetal2')
+        direction: Optional solver field/polarization direction. Port-sheet
+            geometry still follows the gdsfactory port orientation.
         resistance: Series resistance in Ohms (default: 50)
         inductance: Series inductance in Henries (default: 0)
         capacitance: Shunt capacitance in Farads (default: 0)
@@ -199,6 +173,9 @@ def configure_via_port(
         port.info["palace_type"] = "lumped"
         port.info["from_layer"] = from_layer
         port.info["to_layer"] = to_layer
+        port.info["direction"] = (
+            normalize_palace_direction(direction) if direction is not None else None
+        )
         port.info["impedance"] = impedance
         port.info["excited"] = excited
 
@@ -212,6 +189,7 @@ def configure_cpw_port(
     impedance: float = 50.0,
     excited: bool = True,
     offset: float | None = None,
+    generate_sheet: bool = True,
 ):
     """Configure a gdsfactory port as a CPW (multi-element) lumped port.
 
@@ -230,6 +208,9 @@ def configure_cpw_port(
         offset: Shift port inward along the waveguide (um).
             Positive moves away from the boundary, into the conductor.
             Defaults to length/2 (port flush with conductor edge).
+        generate_sheet: If True, mesh creates CPW element sheets. If False,
+            mesh selects layout-authored solver sheets from the simulation layer
+            catalog using this gdsfactory port's layer.
 
     Examples:
         ```python
@@ -278,6 +259,8 @@ def configure_cpw_port(
     port.info["length"] = length
     port.info["impedance"] = impedance
     port.info["excited"] = excited
+    port.info["generate_sheet"] = generate_sheet
+    port.info["sheet_gds_layer"] = None if generate_sheet else port_gds_layer(port)
     port.info["cpw_upper_center"] = (float(upper_center[0]), float(upper_center[1]))
     port.info["cpw_lower_center"] = (float(lower_center[0]), float(lower_center[1]))
     port.info["cpw_gap_width"] = gap_width
@@ -384,12 +367,14 @@ def extract_ports(component, stack: LayerStack) -> list[PalacePort]:
             )
             transverse = np.array([-np.sin(orientation_rad), np.cos(orientation_rad)])
 
-            def _vec_to_dir(v) -> str:
-                if abs(v[0]) >= abs(v[1]):
-                    return "+X" if v[0] > 0 else "-X"
-                return "+Y" if v[1] > 0 else "-Y"
-
-            directions = [_vec_to_dir(-transverse), _vec_to_dir(transverse)]
+            directions = [
+                normalize_palace_direction(
+                    (float(-transverse[0]), float(-transverse[1]), 0.0)
+                ),
+                normalize_palace_direction(
+                    (float(transverse[0]), float(transverse[1]), 0.0)
+                ),
+            ]
 
             cpw_port = PalacePort(
                 name=port.name,
@@ -404,6 +389,8 @@ def extract_ports(component, stack: LayerStack) -> list[PalacePort]:
                 zmax=zmax,
                 layer=layer_name,
                 length=info.get("length"),
+                generate_sheet=info.get("generate_sheet", True),
+                sheet_gds_layer=info.get("sheet_gds_layer"),
                 multi_element=True,
                 centers=centers,
                 directions=directions,
@@ -439,10 +426,18 @@ def extract_ports(component, stack: LayerStack) -> list[PalacePort]:
                     zmax = layer.zmax
             else:
                 raise ValueError(f"Lumped port '{port.name}' missing layer info")
+            direction = info.get("direction")
+            if direction is None:
+                direction = (
+                    (0.0, 0.0, 1.0)
+                    if geometry == PortGeometry.VIA
+                    else palace_direction_from_orientation(orientation)
+                )
 
         elif palace_type == "waveport":
             port_type = PortType.WAVEPORT
             geometry = PortGeometry.INPLANE  # Waveport geometry TBD
+            direction = palace_direction_from_orientation(orientation)
             if layer_name in stack.layers:
                 layer = stack.layers[layer_name]
                 zmin = layer.zmin
@@ -463,6 +458,9 @@ def extract_ports(component, stack: LayerStack) -> list[PalacePort]:
             from_layer=from_layer,
             to_layer=to_layer,
             length=info.get("length"),
+            generate_sheet=info.get("generate_sheet", True),
+            sheet_gds_layer=info.get("sheet_gds_layer"),
+            direction=direction,
             impedance=info.get("impedance", 50.0),
             resistance=info.get("resistance"),
             inductance=info.get("inductance"),

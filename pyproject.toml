@@ -15,9 +15,11 @@ dependencies = [
   "gdsfactory>=9,<10",
   "gdsfactoryplus>=1.6.4,<2",
   "gmsh",
+  "jsonschema>=4",
   "meshio>=5.0.0",
   "nbformat>=4.2.0",
   "nest_asyncio2",
+  "referencing>=0.37",
   "plotly",
   "pyvista>=0.43.0",
   "trame",
@@ -72,6 +74,9 @@ test = [
 [build-system]
 requires = ["build", "setuptools>=61", "uv", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.package-data]
+"gsim.palace.config_schemas" = ["**/*.json"]
 
 [[tool.bver.file]]
 src = "README.md"

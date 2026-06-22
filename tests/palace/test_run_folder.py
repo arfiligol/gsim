@@ -2,11 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from gsim.palace.run_folder import (
-    default_palace_handoff_archive_path,
-    palace_run_folder,
-    prepare_palace_run_folder,
-)
+from gsim.palace.run_folder import palace_run_folder, prepare_palace_run_folder
 
 
 def test_prepare_palace_run_folder_creates_canonical_directories(
@@ -45,13 +41,3 @@ def test_palace_run_folder_is_non_mutating_path_view(tmp_path: Path) -> None:
 
     assert folder.metadata_dir == run_dir / "metadata"
     assert not run_dir.exists()
-
-
-def test_default_palace_handoff_archive_path_is_beside_run_folder(
-    tmp_path: Path,
-) -> None:
-    run_dir = tmp_path / "run_001"
-
-    assert default_palace_handoff_archive_path(run_dir) == (
-        tmp_path / "run_001-palace.tar.gz"
-    )

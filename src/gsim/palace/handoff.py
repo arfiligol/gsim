@@ -1,11 +1,13 @@
 """Palace handoff helpers for Run Stage packaging.
 
-Responsibility:
-Owns Slurm profile resolution, sbatch rendering, handoff metadata writing, and
-archive manifest/package creation for prepared Palace run folders.
+This module contains the Slurm profile resolution, sbatch rendering, handoff
+metadata writing, archive manifest generation, and tarball packaging helpers
+used by prepared Palace run folders.
 
-Does not own:
-Resolve-stage result auditing, typed result parsing, or report construction.
+Resolve-stage result auditing, typed result parsing, and report construction
+remain in the Resolve/results pipeline. Handoff code records how a run folder
+should travel to an external execution environment; it does not interpret solver
+outputs.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ import tarfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from gsim.palace._shared import (
     as_mapping as _as_mapping,
@@ -31,13 +33,9 @@ from gsim.palace._shared import (
     optional_str as _optional_string,
 )
 from gsim.palace._shared import (
-    path_value as _path_value,
-)
-from gsim.palace._shared import (
     sha256_file as _sha256_file,
 )
 from gsim.palace.run_folder import (
-    default_palace_handoff_archive_path,
     prepare_palace_run_folder,
 )
 
@@ -51,6 +49,12 @@ DEFAULT_PALACE_PETSC_OPTIONS = (
     "-eps_converged_reason",
     "-log_view",
 )
+
+
+def _default_palace_handoff_archive_path(root: str | Path) -> Path:
+    """Return the default handoff archive path beside a Palace run folder."""
+    run_root = Path(root)
+    return run_root.parent / f"{run_root.name}-palace.tar.gz"
 
 
 def write_palace_handoff_metadata(
@@ -87,13 +91,13 @@ def write_palace_handoff_metadata(
     if resources is not None:
         payload["resources"] = _json_ready(dict(resources))
     if script_path is not None:
-        payload["script"] = {"path": _path_value(script_path)}
+        payload["script"] = {"path": str(script_path)}
     if archive_path is not None or archive_manifest_path is not None:
         archive = {}
         if archive_path is not None:
-            archive["path"] = _path_value(archive_path)
+            archive["path"] = str(archive_path)
         if archive_manifest_path is not None:
-            archive["manifest_path"] = _path_value(archive_manifest_path)
+            archive["manifest_path"] = str(archive_manifest_path)
         payload["archive"] = archive
     if command is not None:
         payload["command"] = _json_ready(dict(command))
@@ -268,7 +272,7 @@ class PalaceSlurmProfileResolution:
 
     def to_palace_config_hints(self) -> dict[str, Any]:
         """Return Palace config hints derived from profile solver metadata."""
-        solver_hints = palace_slurm_solver_config_hints(self.solver)
+        solver_hints = _palace_slurm_solver_config_hints(self.solver)
         return {"Solver": solver_hints} if solver_hints else {}
 
     def to_sbatch_spec(
@@ -489,7 +493,6 @@ class PalaceSlurmHandoffResult:
 
     script_path: Path
     metadata_path: Path
-    messages: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -499,7 +502,6 @@ class PalaceSlurmSweepHandoffResult:
     script_path: Path
     metadata_path: Path
     points_csv_path: Path
-    messages: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -511,7 +513,6 @@ class PalaceHandoffArchiveManifestResult:
     file_count: int
     total_bytes: int
     archive_path: Path | None = None
-    messages: tuple[str, ...] = field(default_factory=tuple)
 
 
 def resolve_palace_slurm_profile(
@@ -574,7 +575,7 @@ def load_palace_slurm_profile_catalog(
     }
 
 
-def palace_slurm_solver_config_hints(
+def _palace_slurm_solver_config_hints(
     solver: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     """Convert Slurm profile solver metadata into Palace ``Solver`` hints."""
@@ -650,7 +651,6 @@ def write_palace_slurm_sbatch_handoff(
     return PalaceSlurmHandoffResult(
         script_path=output_script_path,
         metadata_path=sidecar_path,
-        messages=(f"Wrote Palace Slurm sbatch handoff: {output_script_path}",),
     )
 
 
@@ -685,8 +685,8 @@ def write_palace_slurm_sweep_array_handoff(
     point_rows = _sweep_array_rows(sweep_root, point_specs)
     if validate_inputs:
         for row in point_rows:
-            _require_file(sweep_root / row["config_path"], "Palace config")
-            _require_file(sweep_root / row["mesh_path"], "Palace mesh")
+            _require_file(sweep_root / str(row["config_path"]), "Palace config")
+            _require_file(sweep_root / str(row["mesh_path"]), "Palace mesh")
 
     points_csv_path = sweep_root / spec.points_csv_path
     _write_sweep_array_points_csv(points_csv_path, point_rows)
@@ -731,7 +731,6 @@ def write_palace_slurm_sweep_array_handoff(
         script_path=output_script_path,
         metadata_path=sidecar_path,
         points_csv_path=points_csv_path,
-        messages=(f"Wrote Palace Slurm sweep handoff: {output_script_path}",),
     )
 
 
@@ -787,7 +786,6 @@ def write_palace_run_handoff_archive_manifest(
         file_count=int(payload["file_count"]),
         total_bytes=int(payload["total_bytes"]),
         archive_path=None if archive_path is None else Path(archive_path),
-        messages=(f"Wrote Palace handoff archive manifest: {output_manifest_path}",),
     )
 
 
@@ -841,10 +839,6 @@ def package_palace_run_handoff_archive(
         file_count=manifest_result.file_count,
         total_bytes=manifest_result.total_bytes,
         archive_path=output_archive_path,
-        messages=(
-            *manifest_result.messages,
-            f"Wrote Palace handoff archive: {output_archive_path}",
-        ),
     )
 
 
@@ -944,7 +938,6 @@ def write_palace_sweep_handoff_archive_manifest(
         metadata_path=metadata_path,
         file_count=int(payload["file_count"]),
         total_bytes=int(payload["total_bytes"]),
-        messages=(f"Wrote Palace sweep archive manifest: {output_manifest_path}",),
     )
 
 
@@ -1170,9 +1163,12 @@ def _normalize_slurm_profile_launcher(
         msg = "Unknown Slurm launcher field(s): "
         msg += ", ".join(str(field) for field in unknown_fields)
         raise ValueError(msg)
+    command_style = _optional_string(launcher.get("command_style"))
+    if command_style is not None and command_style not in {"binary", "wrapper"}:
+        raise ValueError("command_style must be 'binary' or 'wrapper'")
     return PalaceSlurmLauncherSpec(
         palace_executable=_optional_string(launcher.get("palace_executable")),
-        command_style=_optional_string(launcher.get("command_style")),
+        command_style=cast("Literal['binary', 'wrapper'] | None", command_style),
         setup_commands=_optional_tuple(launcher.get("setup_commands")),
         petsc_options=_optional_tuple(launcher.get("petsc_options")),
         srun_args=_optional_tuple(launcher.get("srun_args")),
@@ -1283,17 +1279,18 @@ def _write_sweep_array_points_csv(
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as stream:
-        writer = csv.DictWriter(
+        fieldnames: tuple[str, ...] = (
+            "array_index",
+            "point_slug",
+            "run_dir",
+            "config_path",
+            "mesh_path",
+            "log_dir",
+            "result_dir",
+        )
+        writer: csv.DictWriter[str] = csv.DictWriter(
             stream,
-            fieldnames=(
-                "array_index",
-                "point_slug",
-                "run_dir",
-                "config_path",
-                "mesh_path",
-                "log_dir",
-                "result_dir",
-            ),
+            fieldnames=fieldnames,
         )
         writer.writeheader()
         writer.writerows(rows)
@@ -1678,7 +1675,7 @@ def _resolve_handoff_archive_path(
     archive_path: str | Path | None,
 ) -> Path:
     path = (
-        default_palace_handoff_archive_path(run_dir)
+        _default_palace_handoff_archive_path(run_dir)
         if archive_path is None
         else Path(archive_path)
     )
