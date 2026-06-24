@@ -62,6 +62,8 @@ SURFACE_EPR_CONVERGENCE_COLUMNS = (
     "interface_type",
     "surface_epr_summary_kind",
     "surface_epr_exclude_below_um",
+    "surface_epr_band_min_um",
+    "surface_epr_band_max_um",
     "surface_epr_abs",
 )
 
@@ -318,6 +320,20 @@ def load_surface_epr_convergence_for_report(
             history["surface_epr_exclude_below_um"],
             errors="coerce",
         ).fillna(0.0)
+    if "surface_epr_band_min_um" not in history.columns:
+        history["surface_epr_band_min_um"] = history["surface_epr_exclude_below_um"]
+    else:
+        history["surface_epr_band_min_um"] = pd.to_numeric(
+            history["surface_epr_band_min_um"],
+            errors="coerce",
+        ).fillna(history["surface_epr_exclude_below_um"])
+    if "surface_epr_band_max_um" not in history.columns:
+        history["surface_epr_band_max_um"] = pd.NA
+    else:
+        history["surface_epr_band_max_um"] = pd.to_numeric(
+            history["surface_epr_band_max_um"],
+            errors="coerce",
+        )
 
     history = history.dropna(subset=["surface_epr_abs"])
     if history.empty:
@@ -329,6 +345,8 @@ def load_surface_epr_convergence_for_report(
             "interface_type",
             "surface_epr_summary_kind",
             "surface_epr_exclude_below_um",
+            "surface_epr_band_min_um",
+            "surface_epr_band_max_um",
         ],
         dropna=False,
         as_index=False,

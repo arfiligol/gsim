@@ -346,7 +346,32 @@ class ReportLoss:
         figure = _surface_epr_convergence_figure(self.surface_convergence)
         if figure is None:
             return {}
-        return {"surface_epr_inset_convergence_trace_plot": figure}
+        figures = {"surface_epr_inset_convergence_trace_plot": figure}
+        if (
+            self.surface_convergence is not None
+            and "interface_type" in self.surface_convergence.columns
+        ):
+            for interface_type in sorted(
+                self.surface_convergence["interface_type"].dropna().astype(str).unique()
+            ):
+                interface_frame = self.surface_convergence.loc[
+                    self.surface_convergence["interface_type"].astype(str)
+                    == interface_type
+                ]
+                interface_figure = _surface_epr_convergence_figure(interface_frame)
+                if interface_figure is None:
+                    continue
+                interface_figure.update_layout(
+                    title=f"{interface_type} Surface EPR inset convergence"
+                )
+                slug = "".join(
+                    char.lower() if char.isalnum() else "_"
+                    for char in interface_type
+                ).strip("_")
+                figures[f"surface_epr_inset_convergence_{slug}_trace_plot"] = (
+                    interface_figure
+                )
+        return figures
 
     def visualize(self) -> dict[str, DisplayValue]:
         """Return compact EPR/loss tables and convergence figures."""
@@ -474,6 +499,19 @@ def _surface_epr_convergence_figure(
         data["surface_epr_exclude_below_um"],
         errors="coerce",
     ).fillna(0.0)
+    if "surface_epr_band_min_um" not in data.columns:
+        data["surface_epr_band_min_um"] = data["surface_epr_exclude_below_um"]
+    data["surface_epr_band_min_um"] = pd.to_numeric(
+        data["surface_epr_band_min_um"],
+        errors="coerce",
+    ).fillna(data["surface_epr_exclude_below_um"])
+    if "surface_epr_band_max_um" not in data.columns:
+        data["surface_epr_band_max_um"] = pd.NA
+    else:
+        data["surface_epr_band_max_um"] = pd.to_numeric(
+            data["surface_epr_band_max_um"],
+            errors="coerce",
+        )
     if "surface_epr_summary_kind" not in data.columns:
         data["surface_epr_summary_kind"] = "total"
     data["surface_epr_summary_kind"] = data["surface_epr_summary_kind"].fillna(
@@ -484,11 +522,13 @@ def _surface_epr_convergence_figure(
         return None
 
     traces = []
-    for (interface_type, kind, inset_um), group in data.groupby(
+    for (interface_type, kind, _inset_um, min_um, max_um), group in data.groupby(
         [
             "interface_type",
             "surface_epr_summary_kind",
             "surface_epr_exclude_below_um",
+            "surface_epr_band_min_um",
+            "surface_epr_band_max_um",
         ],
         dropna=False,
         sort=True,
@@ -498,7 +538,7 @@ def _surface_epr_convergence_figure(
             {
                 "x": ordered["pass_index"],
                 "y": ordered["surface_epr_abs"],
-                "name": _surface_epr_trace_name(interface_type, kind, inset_um),
+                "name": _surface_epr_trace_name(interface_type, kind, min_um, max_um),
                 "mode": "lines+markers",
             }
         )
@@ -515,17 +555,27 @@ def _surface_epr_convergence_figure(
 def _surface_epr_trace_name(
     interface_type: object,
     kind: object,
-    inset_um: object,
+    min_um: object,
+    max_um: object,
 ) -> str:
     interface = "" if is_missing_value(interface_type) else str(interface_type)
     prefix = interface or "Surface EPR"
-    try:
-        inset_nm = float(inset_um) * 1000.0
-    except (TypeError, ValueError):
-        inset_nm = 0.0
-    if str(kind) == "total" or inset_nm == 0.0:
+    if str(kind) == "total":
         return f"{prefix} total"
-    return f"{prefix} inset >= {inset_nm:g} nm"
+    min_nm = _surface_epr_nm(min_um)
+    max_nm = _surface_epr_nm(max_um)
+    if str(kind) == "band" and max_nm is not None:
+        return f"{prefix} band {min_nm:g}-{max_nm:g} nm"
+    return f"{prefix} inset >= {min_nm:g} nm"
+
+
+def _surface_epr_nm(value: object) -> float | None:
+    if is_missing_value(value):
+        return None
+    try:
+        return float(value) * 1000.0
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _has_non_null_column(frame: pd.DataFrame, column: str) -> bool:
