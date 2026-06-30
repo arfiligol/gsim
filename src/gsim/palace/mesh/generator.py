@@ -458,7 +458,8 @@ def generate_mesh(
     material_overlay: Any | None = None,
     simulation_layers: SimulationLayerCatalog | None = None,
     activated_regions: tuple[ActivatedRegion, ...] = (),
-    surface_epr_inset_margins_um: Sequence[float] = (0.0, 0.05),
+    surface_epr_representation: Literal["A", "B", "C"] | None = None,
+    surface_epr_inset_margins_um: Sequence[float] | None = None,
 ) -> MeshResult:
     """Generate mesh for Palace EM simulation.
 
@@ -513,9 +514,12 @@ def generate_mesh(
             request layout-authored solver sheets.
         activated_regions: Stack layers explicitly selected as Palace mesh
             regions by the public simulation API.
+        surface_epr_representation: Surface EPR route geometry backend.
+            Routes A/B/C are delegated to Semantic Geometry Builder, then
+            meshed from its XAO output through this Palace mesh pipeline.
         surface_epr_inset_margins_um: Surface EPR inset margins in um.
-            0 means total; positive values define generated finite-shell
-            inset partitions.
+            0 means total; positive values define generated interface inset
+            partitions.
 
     Returns:
         MeshResult with paths and metadata
@@ -527,6 +531,44 @@ def generate_mesh(
             airbox_margin_y=airbox_margin_y,
             airbox_z_above=airbox_z_above,
             airbox_z_below=airbox_z_below,
+        )
+
+    if surface_epr_representation in {"A", "B", "C"}:
+        from gsim.palace.mesh.xao_adapter import (
+            generate_mesh_from_semantic_geometry_builder,
+        )
+
+        return generate_mesh_from_semantic_geometry_builder(
+            component=component,
+            stack=stack,
+            ports=ports,
+            output_dir=output_dir,
+            route=surface_epr_representation,
+            inset_margins_um=surface_epr_inset_margins_um,
+            activated_regions=activated_regions,
+            terminals=terminals or (),
+            model_name=model_name,
+            refined_mesh_size=refined_mesh_size,
+            max_mesh_size=max_mesh_size,
+            fmax=fmax,
+            simulation_type=simulation_type,
+            driven_config=driven_config,
+            eigenmode_config=eigenmode_config,
+            numerical_config=numerical_config,
+            refinement_config=refinement_config,
+            palace_version=palace_version,
+            validate_schema=validate_schema,
+            absorbing_boundary=absorbing_boundary,
+            problem_output_formats=problem_output_formats,
+            electrostatic_config=electrostatic_config,
+            magnetostatic_config=magnetostatic_config,
+            current_sources=current_sources or (),
+            write_config=write_config,
+            show_gui=show_gui,
+            high_order_elements=high_order_elements,
+            high_order_order=high_order_order,
+            high_order_optimize=high_order_optimize,
+            material_overlay=material_overlay,
         )
 
     output_dir = Path(output_dir)
@@ -624,6 +666,8 @@ def generate_mesh(
             merge_via_distance,
         )
         metal_tags = metal_result.metal_tags
+        shaped_dielectric_names = metal_result.shaped_dielectric_names
+        pec_surface_bboxes = metal_result.pec_surface_bboxes
 
         # Add PEC blocks if configured
         pec_block_tags: dict = {}
@@ -700,7 +744,10 @@ def generate_mesh(
         for layer_name, vol_tags in patterned_dielectric_tags.items():
             all_dielectric_tags.setdefault(layer_name, []).extend(vol_tags)
 
-        # Build entities and run boolean pipeline
+        # Native gsim path: build geometry from layout and run the standard
+        # boolean pipeline. Surface EPR A/B/C route geometry is intentionally
+        # external now; the XAO adapter starts from already-built conformal
+        # topology instead of extending this path.
         logger.info("Running boolean pipeline...")
         entities = build_entities(
             metal_tags,
@@ -711,8 +758,7 @@ def generate_mesh(
             pec_block_tags=pec_block_tags or None,
             stack=stack,
             activated_regions=activated_regions,
-            shaped_dielectric_names=metal_result.shaped_dielectric_names,
-            surface_epr_inset_margins_um=surface_epr_inset_margins_um,
+            shaped_dielectric_names=shaped_dielectric_names,
         )
         pg_map = gmsh_utils.run_boolean_pipeline(entities)
 
@@ -732,8 +778,8 @@ def generate_mesh(
             stack,
             activated_regions=activated_regions,
             pec_block_tags=pec_block_tags or None,
-            shaped_dielectric_names=metal_result.shaped_dielectric_names,
-            pec_surface_bboxes=metal_result.pec_surface_bboxes,
+            shaped_dielectric_names=shaped_dielectric_names,
+            pec_surface_bboxes=pec_surface_bboxes,
         )
 
         # After assign_physical_groups, refinement_lines may reference

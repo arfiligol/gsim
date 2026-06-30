@@ -1,7 +1,19 @@
-"""Physical group assignment for Palace mesh generation.
+"""Physical group assignment for Palace mesh manifests.
 
-This module builds the ``groups`` dict consumed by the config generator
-from the ``pg_map`` produced by ``run_boolean_pipeline``.
+Owns: turning final, live Gmsh entities and ``pg_map`` entries into the mesh
+``groups`` artifact consumed by manifests, mesh fields, and Palace config
+generation.
+
+Pipeline contract:
+- Native gsim route: classify volumes, PEC sheets, port sheets, boundary
+  surfaces, and finite-conductor shell surfaces from the boolean-pipeline
+  output. This route preserves planar_conductors semantics from
+  ``geometry.add_metals()`` and does not invent Surface EPR interfaces.
+
+Does not own: raw geometry construction, route-specific final topology build,
+post-mesh topology invention, Palace postprocessing row assembly, or result
+reports. XAO-backed Surface EPR route geometry should enter through a separate
+mesh-source adapter, not this native layout-to-mesh assignment path.
 """
 
 from __future__ import annotations
@@ -22,53 +34,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _surface_volume_owners(
-    entities: Sequence[gmsh_utils.Entity],
-) -> dict[int, tuple[str, ...]]:
-    owners: dict[int, list[str]] = {}
-    for entity in entities:
-        if entity.dim != 3:
-            continue
-        for dimtag in entity.dimtags:
-            with contextlib.suppress(Exception):
-                boundary = gmsh.model.getBoundary(
-                    [dimtag],
-                    combined=False,
-                    oriented=False,
-                    recursive=False,
-                )
-                for bdim, btag in boundary:
-                    if bdim != 2:
-                        continue
-                    names = owners.setdefault(btag, [])
-                    if entity.name not in names:
-                        names.append(entity.name)
-    return {tag: tuple(names) for tag, names in owners.items()}
-
-
-def _is_vacuum_like_name(name: str | None) -> bool:
-    if not name:
-        return False
-    normalized = name.strip().lower().replace("-", "_")
-    if normalized in {"air", "vacuum"}:
-        return True
-    tokens = [token for token in normalized.split("_") if token]
-    return "air" in tokens or "vacuum" in tokens
-
-
-def _is_vacuum_like_material(name: str, stack: LayerStack | None) -> bool:
-    if _is_vacuum_like_name(name):
-        return True
-    if stack is None:
-        return False
-    material = stack.materials.get(name)
-    eps = material.get("permittivity") if isinstance(material, Mapping) else None
-    try:
-        return eps is not None and abs(float(eps) - 1.0) <= 1e-9
-    except (TypeError, ValueError):
-        return False
-
-
 def _volume_material_name(
     owner_name: str,
     volume_info: Mapping[str, object],
@@ -81,93 +46,6 @@ def _volume_material_name(
     if layer is not None:
         return str(layer.material)
     return owner_name
-
-
-def _surface_epr_interface_metadata(
-    *,
-    layer_name: str,
-    neutral_name: str,
-    metadata: Mapping[str, object],
-    surface_tags: Sequence[int],
-    stack: LayerStack | None,
-    surface_owners: Mapping[int, tuple[str, ...]],
-    volume_material_by_name: Mapping[str, str],
-) -> tuple[str, dict[str, object]]:
-    tag_owner_names = {
-        int(surface_tag): tuple(surface_owners.get(int(surface_tag), ()))
-        for surface_tag in surface_tags
-    }
-    missing_owner_tags = [
-        surface_tag
-        for surface_tag, owner_names in tag_owner_names.items()
-        if not owner_names
-    ]
-    if missing_owner_tags:
-        raise ValueError(
-            "Surface EPR interface "
-            f"{neutral_name!r} contains non-boundary surface tags "
-            f"{missing_owner_tags!r}. Build Surface EPR interfaces from "
-            "post-fragment full-3D volume boundaries."
-        )
-    owner_names = tuple(
-        dict.fromkeys(
-            owner
-            for owners in tag_owner_names.values()
-            for owner in owners
-        )
-    )
-    face_kind = str(metadata.get("face_kind", "unsupported"))
-    owner_materials = tuple(
-        volume_material_by_name.get(owner_name, owner_name)
-        for owner_name in owner_names
-    )
-    vacuum_owners = [
-        owner_name
-        for owner_name, material_name in zip(
-            owner_names,
-            owner_materials,
-            strict=True,
-        )
-        if _is_vacuum_like_material(material_name, stack)
-        or _is_vacuum_like_name(owner_name)
-    ]
-    dielectric_owners = [
-        owner_name for owner_name in owner_names if owner_name not in vacuum_owners
-    ]
-    if face_kind == "bottom" and dielectric_owners:
-        interface_type = "MS"
-        selected_owners = tuple(dielectric_owners)
-    elif vacuum_owners:
-        interface_type = "MA"
-        selected_owners = tuple(vacuum_owners)
-    else:
-        interface_type = "MS"
-        selected_owners = owner_names
-
-    layer = stack.layers.get(layer_name) if stack is not None else None
-    metal_material = str(layer.material) if layer is not None else layer_name
-    metal_body_id = str(metadata.get("metal_body_id") or layer_name)
-    selected_materials = tuple(
-        volume_material_by_name.get(owner_name, owner_name)
-        for owner_name in selected_owners
-    )
-    label = str(metadata.get("surface_epr_band_label") or "TOTAL")
-    final_name = f"{metal_body_id}__{interface_type}__{face_kind.upper()}__{label}"
-    resolved = {
-        **dict(metadata),
-        "interface_id": final_name,
-        "interface_type": interface_type,
-        "adjacency_source": "gmsh_volume_boundary",
-        "adjacent_volume_owner_names": owner_names,
-        "surface_epr_tag_owner_names": tag_owner_names,
-        "adjacent_body_ids": (metal_body_id, *selected_owners),
-        "adjacent_materials": (metal_material, *selected_materials),
-    }
-    if label != "TOTAL":
-        resolved["parent_interface_id"] = (
-            f"{metal_body_id}__{interface_type}__{face_kind.upper()}__TOTAL"
-        )
-    return final_name, resolved
 
 
 def assign_physical_groups(
@@ -217,10 +95,8 @@ def assign_physical_groups(
         "port_surfaces": {},
         "boundary_surfaces": {},
     }
-
     # Helper: entity name -> (phys_group, surface_tags)
     entity_by_name: dict[str, gmsh_utils.Entity] = {e.name: e for e in entities}
-    surface_volume_owners = _surface_volume_owners(entities)
 
     def _surface_bbox(
         tags: list[int],
@@ -253,13 +129,13 @@ def assign_physical_groups(
         layer_name: str,
         island_index: int | None = None,
         metadata: Mapping[str, object] | None = None,
-    ) -> None:
+    ) -> dict[str, object] | None:
         pg = pg_map.get(entity_name)
         if pg is None:
-            return
+            return None
         surf_tags = [tag for dim, tag in entity.dimtags if dim == 2]
         if not surf_tags:
-            return
+            return None
         surface_info = {
             "phys_group": pg,
             "tags": surf_tags,
@@ -274,6 +150,7 @@ def assign_physical_groups(
         if metadata:
             surface_info.update(dict(metadata))
         groups["pec_surfaces"][key] = surface_info
+        return surface_info
 
     # Build set of via and shaped-dielectric layer names
     via_layers: set[str] = set()
@@ -364,6 +241,21 @@ def assign_physical_groups(
         name: _volume_material_name(name, info, _stack)
         for name, info in groups["volumes"].items()
     }
+
+    def _live_tags(dim: int, tags: Sequence[object]) -> list[int]:
+        live: list[int] = []
+        for tag in tags:
+            with contextlib.suppress(Exception):
+                kernel.getBoundingBox(dim, int(tag))
+                if dim == 2:
+                    gmsh.model.getBoundary(
+                        [(2, int(tag))],
+                        combined=False,
+                        oriented=False,
+                        recursive=False,
+                    )
+                live.append(int(tag))
+        return live
 
     # --- PEC surfaces (planar conductors) ---
     for layer_name, tag_info in metal_tags.items():
@@ -554,130 +446,6 @@ def assign_physical_groups(
         if layer_name.startswith("__") and layer_name.endswith("__"):
             continue
         if tag_info.get("volumes"):
-            for shell_name, metadata in (
-                tag_info.get("terminal_shells") or {}
-            ).items():
-                raw_tags = metadata.get("tags", ())
-                surf_tags: list[int] = []
-                for tag in raw_tags:
-                    with contextlib.suppress(Exception):
-                        kernel.getBoundingBox(2, int(tag))
-                        surf_tags.append(int(tag))
-                if not surf_tags:
-                    continue
-                unique_tags = sorted(set(surf_tags))
-                clean_metadata = dict(metadata)
-                clean_metadata.pop("tags", None)
-                surface_info = {
-                    "tags": unique_tags,
-                    "layer": layer_name,
-                    "physical_name": str(shell_name),
-                    **clean_metadata,
-                    "logical_only": True,
-                    "palace_attributes": [],
-                }
-                bbox = _surface_bbox(unique_tags)
-                if bbox is not None:
-                    surface_info["bbox"] = bbox
-                groups["conductor_surfaces"][str(shell_name)] = surface_info
-
-            aggregate_totals: dict[str, dict[str, object]] = {}
-            interface_surfaces = tag_info.get("surface_epr_interfaces") or {}
-            for name, metadata in interface_surfaces.items():
-                neutral_name = str(name)
-                entity = entity_by_name.get(neutral_name)
-                pg = pg_map.get(neutral_name)
-                if entity and pg is not None:
-                    surf_tags = [t for d, t in entity.dimtags if d == 2]
-                    if surf_tags:
-                        final_name, resolved_metadata = (
-                            _surface_epr_interface_metadata(
-                                layer_name=layer_name,
-                                neutral_name=neutral_name,
-                                metadata=metadata,
-                                surface_tags=surf_tags,
-                                stack=_stack,
-                                surface_owners=surface_volume_owners,
-                                volume_material_by_name=volume_material_by_name,
-                            )
-                        )
-                        with contextlib.suppress(Exception):
-                            gmsh.model.removePhysicalGroups([(2, pg)])
-                        try:
-                            pg = gmsh.model.addPhysicalGroup(
-                                2,
-                                surf_tags,
-                                tag=pg,
-                                name=final_name,
-                            )
-                        except Exception:
-                            pg = gmsh.model.addPhysicalGroup(
-                                2,
-                                surf_tags,
-                                name=final_name,
-                            )
-                        surface_info = {
-                            "phys_group": pg,
-                            "tags": surf_tags,
-                            "layer": layer_name,
-                            "physical_name": final_name,
-                            **resolved_metadata,
-                            "palace_attribute": pg,
-                            "palace_attributes": [pg],
-                        }
-                        bbox = _surface_bbox(surf_tags)
-                        if bbox is not None:
-                            surface_info["bbox"] = bbox
-                        groups["conductor_surfaces"][final_name] = surface_info
-                        parent_name = resolved_metadata.get("parent_interface_id")
-                        if isinstance(parent_name, str) and parent_name:
-                            aggregate = aggregate_totals.setdefault(
-                                parent_name,
-                                {
-                                    "tags": [],
-                                    "children": [],
-                                    "tag_owner_names": {},
-                                    "metadata": dict(resolved_metadata),
-                                },
-                            )
-                            aggregate["tags"].extend(surf_tags)  # type: ignore[union-attr]
-                            aggregate["children"].append(final_name)  # type: ignore[union-attr]
-                            aggregate["tag_owner_names"].update(  # type: ignore[union-attr]
-                                resolved_metadata.get("surface_epr_tag_owner_names", {})
-                            )
-            for parent_name, aggregate in aggregate_totals.items():
-                total_tags = sorted(set(aggregate["tags"]))  # type: ignore[arg-type]
-                if not total_tags:
-                    continue
-                total_metadata = dict(aggregate["metadata"])  # type: ignore[arg-type]
-                total_metadata.pop("parent_interface_id", None)
-                total_metadata.pop("surface_epr_band_label", None)
-                total_metadata.pop("tags", None)
-                total_metadata["postprocessing_only"] = True
-                total_metadata["interface_id"] = parent_name
-                total_metadata["physical_name"] = parent_name
-                total_metadata["surface_epr_band_min_um"] = 0.0
-                total_metadata["surface_epr_band_max_um"] = None
-                total_metadata["surface_epr_exclude_below_um"] = 0.0
-                total_metadata["surface_epr_summary_kind"] = "total"
-                total_metadata["surface_epr_child_interfaces"] = tuple(
-                    aggregate["children"]  # type: ignore[arg-type]
-                )
-                total_metadata["surface_epr_tag_owner_names"] = dict(
-                    aggregate["tag_owner_names"]  # type: ignore[arg-type]
-                )
-                total_metadata["logical_only"] = True
-                total_metadata["palace_attributes"] = []
-                surface_info = {
-                    "tags": total_tags,
-                    "layer": layer_name,
-                    "physical_name": parent_name,
-                    **total_metadata,
-                }
-                bbox = _surface_bbox(total_tags)
-                if bbox is not None:
-                    surface_info["bbox"] = bbox
-                groups["conductor_surfaces"][parent_name] = surface_info
             for suffix in ("_xy", "_z"):
                 name = f"{layer_name}{suffix}"
                 entity = entity_by_name.get(name)
@@ -800,7 +568,7 @@ def assign_physical_groups(
             continue
         surface_info = {
             "phys_group": pg_tag,
-            "tags": _surface_tags_for_physical_group(pg_tag),
+            "tags": _live_tags(2, _surface_tags_for_physical_group(pg_tag)),
             "physical_name": pg_name,
         }
         interface_materials = {

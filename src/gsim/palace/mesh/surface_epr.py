@@ -6,7 +6,10 @@ Does not own: discovering CAD adjacency, assigning physical groups, inset-band
 physical groups/config rows, or reports.
 Inputs: Gmsh-derived mesh groups and already-discovered planar face polygons.
 Outputs: audit metadata for Palace dielectric-interface specs.
-Pipeline position: after 3D CAD/interface discovery, before Palace config rows.
+Pipeline position: after final topology/group assignment exposes sheet or shell
+interfaces, before Palace config rows. Representation tags select A/B/C route
+materialization families; this module records them but does not generate the
+geometry behind each family.
 Source of Truth: gsim Full-3D Interface Surface EPR goal context.
 """
 

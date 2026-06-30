@@ -79,6 +79,8 @@ class ElectrostaticSim(PalaceSimBase):
         *,
         layer: str,
         center: tuple[float, float] | None = None,
+        port_name: str | None = None,
+        physical_label: str | None = None,
     ) -> None:
         """Add a terminal for capacitance extraction.
 
@@ -90,11 +92,17 @@ class ElectrostaticSim(PalaceSimBase):
             center: Optional XY point used to select one conductor island on
                 ``layer``. When omitted, all conductor surfaces on the layer
                 are assigned to the terminal.
+            port_name: Optional component port name used to derive ``center``.
+            physical_label: Optional short label for generated physical names.
 
         Example:
             >>> sim.add_terminal("T1", layer="topmetal2")
             >>> sim.add_terminal("T2", layer="topmetal2")
         """
+        if center is None and port_name is not None:
+            port = self._find_gf_port(port_name)
+            center = (float(port.center[0]), float(port.center[1]))
+
         # Remove existing terminal with same name
         self.terminals = [t for t in self.terminals if t.name != name]
         self.terminals.append(
@@ -102,6 +110,8 @@ class ElectrostaticSim(PalaceSimBase):
                 name=name,
                 layer=layer,
                 center=center,
+                port_name=port_name,
+                physical_label=physical_label,
             )
         )
 

@@ -48,6 +48,7 @@ from gsim.palace.mesh.postprocessing import (
 from gsim.palace.mesh.surface_epr import (
     build_interface_surface_catalog,
 )
+from gsim.palace.mesh.xao_adapter import generate_mesh_from_semantic_xao
 from gsim.palace.models.mesh import MeshConfig
 
 __all__ = [
@@ -61,4 +62,5 @@ __all__ = [
     "build_postprocessing_config_from_manifest",
     "build_surface_epr_dielectric_specs",
     "generate_mesh",
+    "generate_mesh_from_semantic_xao",
 ]

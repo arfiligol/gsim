@@ -400,9 +400,34 @@ def generate_palace_config(
             )
 
     # Handle PEC surfaces (planar conductors + PEC blocks)
-    pec_attrs: list[int] = [
-        info["phys_group"] for info in groups.get("pec_surfaces", {}).values()
-    ]
+    pec_attrs: list[int] = []
+    split_pec_sources: set[str] = set()
+    for name, info in groups.get("pec_surfaces", {}).items():
+        child_attrs = _finite_conductor_split_boundary_attributes(
+            groups,
+            str(name),
+            representation="A",
+        )
+        if child_attrs:
+            pec_attrs.extend(child_attrs)
+            split_pec_sources.add(str(name))
+            continue
+        pec_attrs.extend(_physical_group_values(info.get("phys_group")))
+    for source_id in _finite_conductor_split_source_ids(groups, representation="A"):
+        if source_id in split_pec_sources:
+            continue
+        pec_attrs.extend(
+            _finite_conductor_split_boundary_attributes(
+                groups,
+                source_id,
+                representation="A",
+            )
+        )
+    for representation in ("A", "B"):
+        pec_attrs.extend(
+            _volume_interface_boundary_attributes(groups, representation=representation)
+        )
+    pec_attrs = sorted(set(pec_attrs))
 
     is_electrostatic = simulation_type in ("electrostatic", "electrostatics")
     is_magnetostatic = simulation_type == "magnetostatic"
@@ -436,13 +461,32 @@ def generate_palace_config(
             )
             if child_attrs and not set(child_attrs) & assigned_pgs:
                 ground_attrs.extend(child_attrs)
-        pec_surfaces = groups.get("pec_surfaces", {})
-        for surf_info in pec_surfaces.values():
+        for representation in ("A", "B"):
             ground_attrs.extend(
                 pg
-                for pg in _physical_group_values(surf_info.get("phys_group"))
+                for pg in _volume_interface_boundary_attributes(
+                    groups,
+                    representation=representation,
+                )
                 if pg not in assigned_pgs
             )
+        pec_surfaces = groups.get("pec_surfaces", {})
+        for pec_name, surf_info in pec_surfaces.items():
+            pec_child_attrs = _finite_conductor_split_boundary_attributes(
+                groups,
+                str(pec_name),
+                representation="A",
+            )
+            if pec_child_attrs:
+                ground_attrs.extend(
+                    pg for pg in pec_child_attrs if pg not in assigned_pgs
+                )
+            else:
+                ground_attrs.extend(
+                    pg
+                    for pg in _physical_group_values(surf_info.get("phys_group"))
+                    if pg not in assigned_pgs
+                )
 
         # Vias that touch a non-terminal conductor -> tie to ground so they
         # don't float (Palace's solver has no current-flow through volumes).
@@ -833,9 +877,26 @@ def _selector_attributes(
         if surf_info.get("postprocessing_only"):
             continue
         if _conductor_matches_selector(surf_name, surf_info, selector):
-            attrs.extend(
-                _boundary_attributes_for_conductor_surface(groups, surf_info)
-            )
+            attrs.extend(_boundary_attributes_for_conductor_surface(groups, surf_info))
+    c_volume_ids = _c_volume_ids_for_selector(groups, selector)
+    for surf_info in groups.get("boundary_surfaces", {}).values():
+        if not isinstance(surf_info, dict) or surf_info.get("postprocessing_only"):
+            continue
+        if surf_info.get("source") != "volume_interface":
+            continue
+        if surf_info.get("metal_body_id") != selector.layer:
+            continue
+        volume_id = surf_info.get("metal_volume_id")
+        if selector.center is not None and volume_id not in c_volume_ids:
+            continue
+        attrs.extend(_physical_group_values(surf_info.get("phys_group")))
+    attrs.extend(
+        _volume_interface_boundary_attributes(
+            groups,
+            selector=selector,
+            volume_ids=c_volume_ids,
+        )
+    )
     for source_id in _finite_conductor_split_sources_for_selector(
         groups,
         selector,
@@ -844,7 +905,15 @@ def _selector_attributes(
 
     for pec_name, pec_info in resolved_pec_surfaces.items():
         if _pec_matches_selector(pec_name, pec_info, selector):
-            attrs.extend(_physical_group_values(pec_info.get("phys_group")))
+            child_attrs = _finite_conductor_split_boundary_attributes(
+                groups,
+                str(pec_name),
+                representation="A",
+            )
+            if child_attrs:
+                attrs.extend(child_attrs)
+            else:
+                attrs.extend(_physical_group_values(pec_info.get("phys_group")))
 
     for via_name, via_pgs in resolved_via_boundary.items():
         if _via_touches_layer(stack, via_name, selector.layer):
@@ -852,6 +921,65 @@ def _selector_attributes(
             selected_vias.add(via_name)
 
     return sorted(set(attrs)), selected_vias
+
+
+def _volume_interface_boundary_attributes(
+    groups: dict[str, Any],
+    *,
+    representation: str | None = None,
+    selector: Any | None = None,
+    volume_ids: set[str] | None = None,
+) -> list[int]:
+    attrs: list[int] = []
+    for surf_info in _volume_interface_child_surfaces(groups):
+        if (
+            representation is not None
+            and str(surf_info.get("representation", "")).upper() != representation
+        ):
+            continue
+        if selector is not None and surf_info.get("layer") != selector.layer:
+            continue
+        if (
+            selector is not None
+            and selector.center is not None
+            and surf_info.get("metal_volume_id") not in (volume_ids or set())
+        ):
+            continue
+        attrs.extend(_physical_group_values(surf_info.get("phys_group")))
+    return sorted(set(attrs))
+
+
+def _volume_interface_child_surfaces(groups: dict[str, Any]):
+    for surf_info in groups.get("boundary_surfaces", {}).values():
+        if not isinstance(surf_info, dict):
+            continue
+        if surf_info.get("source") != "volume_interface":
+            continue
+        if surf_info.get("surface_epr_summary_kind") == "total":
+            continue
+        if surf_info.get("metal_body_id") is None:
+            continue
+        yield surf_info
+
+
+def _c_volume_ids_for_selector(groups: dict[str, Any], selector: Any) -> set[str]:
+    if selector.center is None:
+        return set()
+    volume_ids: set[str] = set()
+    for surf_info in groups.get("boundary_surfaces", {}).values():
+        if not isinstance(surf_info, dict):
+            continue
+        if surf_info.get("source") != "volume_interface":
+            continue
+        if surf_info.get("metal_body_id") != selector.layer:
+            continue
+        volume_id = surf_info.get("metal_volume_id")
+        if isinstance(volume_id, str) and _bbox_contains_center(
+            surf_info.get("bbox"),
+            selector.center,
+        ):
+            volume_ids.add(volume_id)
+    return volume_ids
 
 
 def _boundary_attributes_for_conductor_surface(
@@ -873,10 +1001,17 @@ def _boundary_attributes_for_conductor_surface(
 def _finite_conductor_split_boundary_attributes(
     groups: dict[str, Any],
     source_id: str,
+    *,
+    representation: str | None = None,
 ) -> list[int]:
     attrs: list[int] = []
     for info in groups.get("conductor_surfaces", {}).values():
         if not isinstance(info, dict):
+            continue
+        if (
+            representation is not None
+            and str(info.get("representation", "")).upper() != representation
+        ):
             continue
         if info.get("source_id") != source_id:
             continue
@@ -888,10 +1023,19 @@ def _finite_conductor_split_boundary_attributes(
     return sorted(set(attrs))
 
 
-def _finite_conductor_split_source_ids(groups: dict[str, Any]) -> tuple[str, ...]:
+def _finite_conductor_split_source_ids(
+    groups: dict[str, Any],
+    *,
+    representation: str | None = None,
+) -> tuple[str, ...]:
     source_ids: list[str] = []
     for info in groups.get("conductor_surfaces", {}).values():
         if not isinstance(info, dict):
+            continue
+        if (
+            representation is not None
+            and str(info.get("representation", "")).upper() != representation
+        ):
             continue
         if not info.get("postprocessing_only") or not info.get("surface_epr"):
             continue
@@ -906,10 +1050,17 @@ def _finite_conductor_split_source_ids(groups: dict[str, Any]) -> tuple[str, ...
 def _finite_conductor_split_sources_for_selector(
     groups: dict[str, Any],
     selector: Any,
+    *,
+    representation: str | None = None,
 ) -> tuple[str, ...]:
     source_ids: list[str] = []
     for info in groups.get("conductor_surfaces", {}).values():
         if not isinstance(info, dict):
+            continue
+        if (
+            representation is not None
+            and str(info.get("representation", "")).upper() != representation
+        ):
             continue
         if not info.get("postprocessing_only") or not info.get("surface_epr"):
             continue

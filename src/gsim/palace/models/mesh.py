@@ -49,11 +49,20 @@ class MeshConfig(BaseModel):
     fmax: float = Field(default=100e9, gt=0)
     boundary_conditions: list[str] | None = None
     planar_conductors: bool = False
+    surface_epr_enabled: bool = False
+    surface_epr_representation: Literal["A", "B", "C"] = Field(
+        default="B",
+        description=(
+            "Surface EPR route representation: A/B/C share Full-3D "
+            "interface discovery; A/B remove conductor volumes during final "
+            "topology materialization, C keeps them."
+        ),
+    )
     surface_epr_inset_margins_um: tuple[float, ...] = Field(
         default=(0.0, 0.05),
         description=(
             "Surface EPR inset margins in um. 0 means total; positive values "
-            "define generated finite-shell inset partitions."
+            "define generated interface inset partitions."
         ),
     )
     merge_via_distance: float = Field(default=2.0, ge=0)
@@ -95,6 +104,11 @@ class MeshConfig(BaseModel):
         if 0.0 not in margins:
             margins = (0.0, *margins)
         object.__setattr__(self, "surface_epr_inset_margins_um", margins)
+        object.__setattr__(
+            self,
+            "surface_epr_representation",
+            str(self.surface_epr_representation).upper(),
+        )
         return self
 
     @classmethod

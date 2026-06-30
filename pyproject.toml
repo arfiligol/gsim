@@ -16,10 +16,12 @@ dependencies = [
   "gdsfactoryplus>=1.6.4,<2",
   "gmsh",
   "jsonschema>=4",
+  "kaleido>=1.0.0",
   "meshio>=5.0.0",
   "nbformat>=4.2.0",
   "nest_asyncio2",
   "referencing>=0.37",
+  "semantic-geometry-builder>=0.1.0",
   "plotly",
   "pyvista>=0.43.0",
   "trame",
@@ -74,6 +76,9 @@ test = [
 [build-system]
 requires = ["build", "setuptools>=61", "uv", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[tool.uv.sources]
+semantic-geometry-builder = { path = "../../semantic_geometry_builder", editable = true }
 
 [tool.setuptools.package-data]
 "gsim.palace.config_schemas" = ["**/*.json"]

@@ -403,12 +403,52 @@ def build_surface_epr_dielectric_specs(
         surface
         for surface in surfaces
         if getattr(surface, "interface_type", None) == base_spec.interface_type
-        and (face_kind is None or getattr(surface, "face_kind", None) == face_kind)
+        and (
+            face_kind is None
+            or getattr(surface, "geometry_kind", None) == "sgb_occ"
+            or getattr(surface, "face_kind", None) == face_kind
+        )
     )
     split_surfaces = tuple(
         surface for surface in selected_surfaces if not _surface_epr_is_total(surface)
     )
     if not split_surfaces:
+        total_surfaces = tuple(
+            surface for surface in selected_surfaces if _surface_epr_is_total(surface)
+        )
+        if total_surfaces:
+            return tuple(
+                replace(
+                    base_spec,
+                    entry_names=(_surface_epr_entry_name(surface),),
+                    combine_entries=True,
+                    entry_name=_surface_epr_entry_name(surface),
+                    metadata={
+                        "loss_channel": base_spec.interface_type,
+                        "interface_type": base_spec.interface_type,
+                        "face_kind": getattr(surface, "face_kind", None),
+                        "representation": str(getattr(surface, "representation", "B")),
+                        "source_id": _surface_epr_source_id(surface),
+                        "metal_body_id": getattr(surface, "metal_body_id", None),
+                        "physical_group_attribute": getattr(
+                            surface,
+                            "physical_group_attribute",
+                            None,
+                        ),
+                        "surface_epr_summary_kind": "total",
+                        "surface_epr_exclude_below_um": 0.0,
+                        "surface_epr_band_min_um": float(
+                            getattr(surface, "band_min_um", 0.0)
+                        ),
+                        "surface_epr_band_max_um": getattr(
+                            surface,
+                            "band_max_um",
+                            None,
+                        ),
+                    },
+                )
+                for surface in total_surfaces
+            )
         suffix = "" if face_kind is None else f" {face_kind}"
         raise ValueError(
             f"No generated {base_spec.interface_type}{suffix} Surface EPR groups found."
@@ -421,55 +461,120 @@ def build_surface_epr_dielectric_specs(
             if (source_id := _surface_epr_source_id(surface)) is not None
         )
     )
-    total_specs = tuple(
-        replace(
-            base_spec,
-            entry_names=tuple(
-                _surface_epr_entry_name(surface)
-                for surface in split_surfaces
-                if _surface_epr_source_id(surface) == source_id
-            ),
-            combine_entries=True,
-            entry_name=next(
+    total_specs = []
+    for source_id in source_ids:
+        source_surfaces = tuple(
+            surface
+            for surface in split_surfaces
+            if _surface_epr_source_id(surface) == source_id
+        )
+        representative = source_surfaces[0]
+        total_specs.append(
+            replace(
+                base_spec,
+                entry_names=tuple(
+                    _surface_epr_entry_name(surface) for surface in source_surfaces
+                ),
+                combine_entries=True,
+                entry_name=next(
+                    (
+                        _surface_epr_entry_name(surface)
+                        for surface in selected_surfaces
+                        if _surface_epr_source_id(surface) == source_id
+                        and _surface_epr_is_total(surface)
+                    ),
+                    _surface_epr_total_name(
+                        source_id=source_id,
+                        interface_type=base_spec.interface_type,
+                        face_kind=face_kind,
+                    ),
+                ),
+                metadata={
+                    "loss_channel": base_spec.interface_type,
+                    "interface_type": base_spec.interface_type,
+                    "face_kind": face_kind,
+                    "representation": str(
+                        getattr(representative, "representation", "B")
+                    ),
+                    "source_id": source_id,
+                    "metal_body_id": getattr(representative, "metal_body_id", None),
+                    "surface_epr_summary_kind": "total",
+                    "surface_epr_exclude_below_um": 0.0,
+                    "surface_epr_band_min_um": 0.0,
+                    "surface_epr_band_max_um": None,
+                },
+            )
+        )
+    inset_specs = []
+    for source_id in source_ids:
+        source_surfaces = tuple(
+            sorted(
                 (
-                    _surface_epr_entry_name(surface)
-                    for surface in selected_surfaces
+                    surface
+                    for surface in split_surfaces
                     if _surface_epr_source_id(surface) == source_id
-                    and _surface_epr_is_total(surface)
                 ),
-                _surface_epr_total_name(
-                    source_id=source_id,
-                    interface_type=base_spec.interface_type,
-                    face_kind=face_kind,
+                key=lambda surface: (
+                    float(getattr(surface, "band_min_um", 0.0)),
+                    math.inf
+                    if getattr(surface, "band_max_um", None) is None
+                    else float(surface.band_max_um),
+                    _surface_epr_entry_name(surface),
                 ),
-            ),
-            metadata={
-                "loss_channel": base_spec.interface_type,
-                "surface_epr_summary_kind": "total",
-                "surface_epr_exclude_below_um": 0.0,
-            },
+            )
         )
-        for source_id in source_ids
-    )
-    split_specs = tuple(
-        replace(
-            base_spec,
-            entry_names=(_surface_epr_entry_name(surface),),
-            combine_entries=True,
-            entry_name=_surface_epr_entry_name(surface),
-            metadata={
-                "loss_channel": base_spec.interface_type,
-                "surface_epr_summary_kind": "core"
-                if getattr(surface, "band_max_um", None) is None
-                else "band",
-                "surface_epr_exclude_below_um": float(
-                    getattr(surface, "band_min_um", 0.0)
-                ),
-            },
+        thresholds = tuple(
+            band_min
+            for band_min in dict.fromkeys(
+                float(getattr(surface, "band_min_um", 0.0))
+                for surface in source_surfaces
+            )
+            if band_min > 0.0
         )
-        for surface in split_surfaces
-    )
-    return total_specs + split_specs
+        for threshold_um in thresholds:
+            included_surfaces = tuple(
+                surface
+                for surface in source_surfaces
+                if float(getattr(surface, "band_min_um", 0.0)) >= threshold_um
+            )
+            if not included_surfaces:
+                continue
+            representative = included_surfaces[0]
+            inset_specs.append(
+                replace(
+                    base_spec,
+                    entry_names=tuple(
+                        _surface_epr_entry_name(surface)
+                        for surface in included_surfaces
+                    ),
+                    combine_entries=True,
+                    entry_name=_surface_epr_inset_name(
+                        source_id=source_id,
+                        interface_type=base_spec.interface_type,
+                        face_kind=face_kind,
+                        threshold_um=threshold_um,
+                    ),
+                    metadata={
+                        "loss_channel": base_spec.interface_type,
+                        "interface_type": base_spec.interface_type,
+                        "face_kind": face_kind,
+                        "representation": str(
+                            getattr(representative, "representation", "B")
+                        ),
+                        "source_id": source_id,
+                        "metal_body_id": getattr(
+                            representative,
+                            "metal_body_id",
+                            None,
+                        ),
+                        "surface_epr_summary_kind": "exclude_below",
+                        "surface_epr_exclude_below_um": threshold_um,
+                        "surface_epr_band_min_um": threshold_um,
+                        "surface_epr_band_max_um": None,
+                    },
+                )
+            )
+    return tuple(total_specs) + tuple(inset_specs)
 
 
 def build_dielectric_interface_specs_from_assignments(
@@ -1041,6 +1146,34 @@ def _surface_epr_total_name(
     if face_kind is None:
         return f"{source_id}__{interface_type}__TOTAL"
     return f"{source_id}__{interface_type}__{face_kind.upper()}__TOTAL"
+
+
+def _surface_epr_inset_name(
+    *,
+    source_id: str,
+    interface_type: str,
+    face_kind: str | None,
+    threshold_um: float,
+) -> str:
+    prefix = _surface_epr_total_name(
+        source_id=source_id,
+        interface_type=interface_type,
+        face_kind=face_kind,
+    ).removesuffix("__TOTAL")
+    return f"{prefix}__INSET_GE_{_surface_epr_distance_label(threshold_um)}"
+
+
+def _surface_epr_distance_label(distance_um: float) -> str:
+    distance_nm = distance_um * 1000.0
+    if distance_nm < 1000.0:
+        value_nm = round(distance_nm)
+        if math.isclose(distance_nm, value_nm, rel_tol=0.0, abs_tol=1e-9):
+            return f"{value_nm:g}NM"
+        return f"{distance_nm:g}NM"
+    value_um = round(distance_um)
+    if math.isclose(distance_um, value_um, rel_tol=0.0, abs_tol=1e-9):
+        return f"{value_um:g}UM"
+    return f"{distance_um:g}UM"
 
 
 def _combined_index_entry(

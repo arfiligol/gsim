@@ -287,6 +287,8 @@ class TerminalConfig(BaseModel):
         name: Terminal name
         layer: Target conductor layer
         center: Optional XY point used to select one conductor island on layer
+        port_name: Optional source component port used to derive center
+        physical_label: Optional label used in generated mesh physical names
     """
 
     model_config = ConfigDict(validate_assignment=True)
@@ -294,6 +296,8 @@ class TerminalConfig(BaseModel):
     name: str
     layer: str
     center: tuple[float, float] | None = None
+    port_name: str | None = None
+    physical_label: str | None = None
 
 
 class WavePortConfig(BaseModel):

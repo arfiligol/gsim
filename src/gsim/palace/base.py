@@ -22,6 +22,7 @@ import math
 import tempfile
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -83,6 +84,98 @@ def _default_refinement_config() -> dict[str, Any]:
     }
 
 
+def _surface_epr_face_kinds(
+    face_kind: str | Sequence[str] | None,
+) -> tuple[str | None, ...]:
+    if face_kind is None:
+        return (None,)
+    if isinstance(face_kind, str):
+        return (face_kind,)
+    return tuple(str(value) for value in face_kind)
+
+
+def _normalize_surface_epr_representation(representation: str) -> str:
+    value = str(representation).upper()
+    if value not in {"A", "B", "C"}:
+        msg = "Surface EPR representation must be A, B, or C."
+        raise ValueError(msg)
+    return value
+
+
+def _surface_epr_inset_margins(
+    margins_um: Sequence[float] | None,
+) -> tuple[float, ...] | None:
+    if margins_um is None:
+        return None
+    margins = tuple(sorted({float(value) for value in margins_um}))
+    if any(value < 0.0 or not math.isfinite(value) for value in margins):
+        msg = "Surface EPR inset margins must be finite values >= 0."
+        raise ValueError(msg)
+    if 0.0 not in margins:
+        margins = (0.0, *margins)
+    return margins
+
+
+def _surface_epr_interface_assignments(
+    interfaces: Mapping[str, Mapping[str, Any]] | Sequence[Mapping[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    if interfaces is None:
+        return []
+
+    if isinstance(interfaces, Mapping):
+        records = [
+            {"interface_type": interface_type, **dict(config)}
+            for interface_type, config in interfaces.items()
+        ]
+    else:
+        records = [dict(config) for config in interfaces]
+
+    assignments: list[dict[str, Any]] = []
+    for record in records:
+        interface_type = str(record.pop("interface_type", ""))
+        if interface_type not in {"MA", "MS", "SA"}:
+            msg = "Surface EPR interface_type must be MA, MS, or SA."
+            raise ValueError(msg)
+        try:
+            preset = dict(record.pop("preset"))
+        except KeyError:
+            msg = f"Surface EPR interface {interface_type!r} requires a preset."
+            raise ValueError(msg) from None
+        preset_name = record.pop("preset_name", None)
+        face_kind = record.pop("face_kind", None)
+        role = record.pop("role", None)
+        required = bool(record.pop("required", True))
+        if record:
+            keys = ", ".join(sorted(str(key) for key in record))
+            msg = f"Unknown Surface EPR interface fields: {keys}."
+            raise ValueError(msg)
+
+        preset_interface_type = preset.get("interface_type")
+        if (
+            preset_interface_type is not None
+            and preset_interface_type != interface_type
+        ):
+            msg = (
+                f"Interface preset {preset_name or interface_type!r} declares "
+                f"interface_type {preset_interface_type!r}, not {interface_type!r}."
+            )
+            raise ValueError(msg)
+        if preset_interface_type is None:
+            preset["interface_type"] = interface_type
+
+        assignments.append(
+            {
+                "interface_type": interface_type,
+                "preset_name": preset_name or interface_type.lower(),
+                "preset": preset,
+                "face_kinds": _surface_epr_face_kinds(face_kind),
+                "role": role,
+                "required": required,
+            }
+        )
+    return assignments
+
+
 class PalaceSimBase(BaseModel):
     """Pydantic base model for all Palace simulation classes.
 
@@ -114,6 +207,11 @@ class PalaceSimBase(BaseModel):
     _last_mesh_result: Any = PrivateAttr(default=None)
     _last_ports: list = PrivateAttr(default_factory=list)
     _last_postprocessing_config: Any = PrivateAttr(default=None)
+    _postprocessing_override_config: Any = PrivateAttr(default=None)
+    _surface_epr_config: dict[str, Any] = PrivateAttr(default_factory=dict)
+    _surface_epr_interface_assignments: list[dict[str, Any]] = PrivateAttr(
+        default_factory=list
+    )
     _job_id: str | None = PrivateAttr(default=None)
 
     if TYPE_CHECKING:
@@ -573,6 +671,51 @@ class PalaceSimBase(BaseModel):
             )
         )
 
+    def set_postprocessing(
+        self,
+        postprocessing: PostprocessingConfig | None = None,
+    ) -> None:
+        """Set a typed Palace postprocessing config as an explicit override.
+
+        This is the low-level escape hatch. Surface EPR interface selection,
+        inset margins, and Route A/B/C representation belong to
+        ``set_surface_epr()``.
+        """
+        self._postprocessing_override_config = postprocessing
+        self._last_postprocessing_config = postprocessing
+
+    def set_surface_epr(
+        self,
+        *,
+        representation: Literal["A", "B", "C"] = "B",
+        inset_margins_um: Sequence[float] | None = None,
+        interfaces: Mapping[str, Mapping[str, Any]]
+        | Sequence[Mapping[str, Any]]
+        | None = None,
+    ) -> None:
+        """Configure Surface EPR mesh intent and dielectric postprocessing.
+
+        ``gsim`` owns the generated interface catalog, inset/margin partitions,
+        and Palace dielectric postprocessing rows. Callers declare which
+        physical representation and interface presets they want; ``mesh()``
+        consumes the margins and ``write_config()`` consumes the interface
+        declarations. A/B/C all start from Full-3D volume adjacency and
+        MS/MA/SA classification; A and B remove conductor volumes before
+        Palace solve, while C keeps them.
+        """
+        config: dict[str, Any] = {
+            "representation": _normalize_surface_epr_representation(representation),
+        }
+        margins = _surface_epr_inset_margins(inset_margins_um)
+        if margins is not None:
+            config["inset_margins_um"] = margins
+
+        self._surface_epr_config = config
+        self._surface_epr_interface_assignments = _surface_epr_interface_assignments(
+            interfaces
+        )
+        self._postprocessing_override_config = None
+
     def set_numerical(
         self,
         *,
@@ -892,9 +1035,22 @@ class PalaceSimBase(BaseModel):
             mesh_config.high_order_elements = existing_config.high_order_elements
             mesh_config.high_order_order = existing_config.high_order_order
             mesh_config.high_order_optimize = existing_config.high_order_optimize
+            mesh_config.surface_epr_enabled = existing_config.surface_epr_enabled
+            mesh_config.surface_epr_representation = (
+                existing_config.surface_epr_representation
+            )
             mesh_config.surface_epr_inset_margins_um = (
                 existing_config.surface_epr_inset_margins_um
             )
+
+        surface_epr_representation = self._surface_epr_config.get("representation")
+        if surface_epr_representation is not None:
+            mesh_config.surface_epr_enabled = True
+            mesh_config.surface_epr_representation = surface_epr_representation
+
+        surface_epr_margins = self._surface_epr_config.get("inset_margins_um")
+        if surface_epr_inset_margins_um is None and surface_epr_margins is not None:
+            mesh_config.surface_epr_inset_margins_um = tuple(surface_epr_margins)
 
         # Preserve planar_conductors from sim.mesh_config if not
         # explicitly provided via sim.mesh(planar_conductors=...)
@@ -1368,13 +1524,14 @@ class PalaceSimBase(BaseModel):
             fmax=effective_fmax,
             show_gui=mesh_config.show_gui,
             simulation_type=self.simulation_type,
-                driven_config=driven_config,
-                eigenmode_config=self.eigenmode,
-                magnetostatic_config=getattr(self, "magnetostatic", None),
-                numerical_config=self.numerical,
-                refinement_config=self.refinement,
-                problem_output_formats=self.output_formats or None,
-                write_config=write_config,
+            driven_config=driven_config,
+            eigenmode_config=self.eigenmode,
+            magnetostatic_config=getattr(self, "magnetostatic", None),
+            numerical_config=self.numerical,
+            refinement_config=self.refinement,
+            problem_output_formats=self.output_formats or None,
+            write_config=write_config,
+            terminals=getattr(self, "terminals", None) or [],
             planar_conductors=mesh_config.planar_conductors,
             pec_blocks=self._pec_blocks or None,
             absorbing_boundary=self.absorbing_boundary,
@@ -1391,7 +1548,12 @@ class PalaceSimBase(BaseModel):
             high_order_optimize=mesh_config.high_order_optimize,
             verbosity=gmsh_verbosity,
             decimate_tolerance=decimate_tolerance,
-            surface_epr_inset_margins_um=mesh_config.surface_epr_inset_margins_um,
+            surface_epr_representation=mesh_config.surface_epr_representation
+            if mesh_config.surface_epr_enabled
+            else None,
+            surface_epr_inset_margins_um=mesh_config.surface_epr_inset_margins_um
+            if mesh_config.surface_epr_enabled
+            else None,
             simulation_layers=self._simulation_layers,
             activated_regions=self._activated_region_values(),
         )
@@ -1577,7 +1739,12 @@ class PalaceSimBase(BaseModel):
                 high_order_order=mesh_config.high_order_order,
                 high_order_optimize=mesh_config.high_order_optimize,
                 decimate_tolerance=decimate_tolerance,
-                surface_epr_inset_margins_um=mesh_config.surface_epr_inset_margins_um,
+                surface_epr_representation=mesh_config.surface_epr_representation
+                if mesh_config.surface_epr_enabled
+                else None,
+                surface_epr_inset_margins_um=mesh_config.surface_epr_inset_margins_um
+                if mesh_config.surface_epr_enabled
+                else None,
                 simulation_layers=self._simulation_layers,
                 activated_regions=self._activated_region_values(),
             )
@@ -1849,6 +2016,12 @@ class PalaceSimBase(BaseModel):
 
         if postprocessing is not None:
             self._last_postprocessing_config = postprocessing
+        elif self._postprocessing_override_config is not None:
+            postprocessing = self._postprocessing_override_config
+            self._last_postprocessing_config = postprocessing
+        elif self._surface_epr_interface_assignments:
+            postprocessing = self._build_surface_epr_postprocessing_config()
+            self._last_postprocessing_config = postprocessing
         elif reuse_postprocessing:
             postprocessing = getattr(self, "_last_postprocessing_config", None)
 
@@ -1951,6 +2124,73 @@ class PalaceSimBase(BaseModel):
             return config_path
         finally:
             self._hints = previous_hints
+
+    def _build_surface_epr_postprocessing_config(self) -> PostprocessingConfig:
+        """Build Palace postprocessing from declarative Surface EPR interfaces.
+
+        Representation selection is a catalog filter. Mesh/CAD owns whether A,
+        B, or C surfaces exist and how inset bands were generated.
+        """
+        from gsim.palace.mesh.postprocessing import (
+            build_postprocessing_config_from_manifest,
+            build_surface_epr_dielectric_specs,
+        )
+        from gsim.palace.mesh.surface_epr import build_interface_surface_catalog
+
+        if self._last_mesh_result is None:
+            msg = "No mesh result. Call mesh() before using set_surface_epr()."
+            raise ValueError(msg)
+
+        representation = self._surface_epr_config.get("representation", "B")
+        catalog = build_interface_surface_catalog(self._last_mesh_result.groups)
+        surfaces = tuple(
+            surface
+            for surface in catalog.surfaces
+            if str(getattr(surface, "representation", "B")).upper() == representation
+        )
+        specs = []
+        for assignment in self._surface_epr_interface_assignments:
+            for face_kind in assignment["face_kinds"]:
+                selected_surfaces = surfaces
+                selected_face_kind = face_kind
+                if (
+                    str(representation).upper() == "A"
+                    and assignment["interface_type"] == "MA"
+                ):
+                    selected_surfaces = tuple(
+                        replace(surface, interface_type="MA", face_kind=face_kind)
+                        for surface in surfaces
+                        if surface.interface_type == "MS"
+                    )
+                    selected_face_kind = face_kind
+                role = assignment["role"]
+                if role is None:
+                    role = (
+                        "boundary_surface"
+                        if (
+                            str(representation).upper() in {"A", "B", "C"}
+                            or assignment["interface_type"] == "SA"
+                        )
+                        else "conductor_surface"
+                    )
+                try:
+                    specs.extend(
+                        build_surface_epr_dielectric_specs(
+                            selected_surfaces,
+                            preset_name=str(assignment["preset_name"]),
+                            preset=assignment["preset"],
+                            face_kind=selected_face_kind,
+                            role=role,
+                        )
+                    )
+                except ValueError:
+                    if assignment["required"]:
+                        raise
+
+        return build_postprocessing_config_from_manifest(
+            self._last_mesh_result.manifest,
+            dielectric_interfaces=tuple(specs),
+        )
 
     def _write_geometry_snapshot(self, run_folder: PalaceRunFolder) -> Path | None:
         """Write an optional run-local GDS snapshot for review provenance."""
