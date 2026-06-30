@@ -63,7 +63,7 @@ def _default_refinement_config() -> dict[str, Any]:
         "MaxIts": 0,
         "MaxSize": 0,
         "UpdateFraction": 0.7,
-        "Nonconformal": True,
+        "Nonconformal": False,
         "UniformLevels": 0,
         "Boxes": [],
         "Spheres": [],
