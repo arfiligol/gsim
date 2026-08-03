@@ -178,7 +178,18 @@ def test_generate_palace_config_rejects_duplicate_terminal_attributes(
         },
         "pec_surfaces": {},
         "port_surfaces": {},
-        "boundary_surfaces": {},
+        "boundary_surfaces": {
+            "metal0_epr_interface": {
+                "phys_group": 66,
+                "source": "volume_interface",
+                "metal_body_id": "metal1",
+                "metal_volume_id": "metal0",
+                "layer": "metal1",
+                "postprocessing_only": True,
+                "surface_epr": True,
+                "representation": "A",
+            }
+        },
     }
     stack = LayerStack(
         layers={
@@ -1018,7 +1029,7 @@ def test_interface_assignment_specs_reject_exterior() -> None:
         )
 
 
-def test_surface_epr_specs_group_split_surfaces_by_source() -> None:
+def test_surface_epr_specs_group_total_surfaces_by_source() -> None:
     surfaces = (
         SimpleNamespace(
             interface_type="MS",
@@ -1027,28 +1038,14 @@ def test_surface_epr_specs_group_split_surfaces_by_source() -> None:
             metal_body_id=None,
             physical_group_name="shell0__MS__BOTTOM__TOTAL",
             interface_id="shell0-total",
-            band_min_um=0.0,
-            band_max_um=None,
         ),
         SimpleNamespace(
             interface_type="MS",
             face_kind="bottom",
             source_id="shell0",
             metal_body_id=None,
-            physical_group_name="shell0__MS__BOTTOM__BAND_0_50NM",
-            interface_id="shell0-band",
-            band_min_um=0.0,
-            band_max_um=0.05,
-        ),
-        SimpleNamespace(
-            interface_type="MS",
-            face_kind="bottom",
-            source_id="shell0",
-            metal_body_id=None,
-            physical_group_name="shell0__MS__BOTTOM__CORE_AFTER_50NM",
-            interface_id="shell0-core",
-            band_min_um=0.05,
-            band_max_um=None,
+            physical_group_name="shell0__MS__BOTTOM_EDGE__TOTAL",
+            interface_id="shell0-bottom-edge",
         ),
     )
 
@@ -1065,20 +1062,11 @@ def test_surface_epr_specs_group_split_surfaces_by_source() -> None:
         face_kind="bottom",
     )
 
-    assert [spec.entry_name for spec in specs] == [
-        "shell0__MS__BOTTOM__TOTAL",
-        "shell0__MS__BOTTOM__BAND_0_50NM",
-        "shell0__MS__BOTTOM__CORE_AFTER_50NM",
-    ]
+    assert [spec.entry_name for spec in specs] == ["shell0__MS__BOTTOM__TOTAL"]
     assert specs[0].entry_names == (
-        "shell0__MS__BOTTOM__BAND_0_50NM",
-        "shell0__MS__BOTTOM__CORE_AFTER_50NM",
+        "shell0__MS__BOTTOM__TOTAL",
+        "shell0__MS__BOTTOM_EDGE__TOTAL",
     )
-    assert [spec.metadata["surface_epr_summary_kind"] for spec in specs] == [
-        "total",
-        "band",
-        "core",
-    ]
 
 
 def test_interface_assignment_specs_allow_explicit_non_interface() -> None:
@@ -1856,3 +1844,82 @@ def test_write_config_merges_boundary_postprocessing(tmp_path: Path) -> None:
     assert postprocessing["SurfaceFlux"] == [
         {"Index": 1, "Attributes": [21], "Type": "Electric"}
     ]
+
+
+def test_postprocessing_surface_epr_does_not_create_solver_boundary(
+    tmp_path: Path,
+) -> None:
+    groups = {
+        "volumes": {"air": {"phys_group": 1}},
+        "conductor_surfaces": {
+            "metal0_epr_child": {
+                "phys_group": 55,
+                "source_id": "metal0",
+                "postprocessing_only": True,
+                "surface_epr": True,
+                "representation": "A",
+            }
+        },
+        "pec_surfaces": {},
+        "port_surfaces": {},
+        "boundary_surfaces": {},
+    }
+    config_path = generate_palace_config(
+        groups=groups,
+        ports=[],
+        port_info=[],
+        stack=LayerStack(materials={"air": {"permittivity": 1.0}}),
+        output_path=tmp_path,
+        model_name="palace",
+        fmax=10e9,
+        simulation_type="eigenmode",
+        absorbing_boundary=False,
+        validate_schema=False,
+    )
+
+    boundaries = json.loads(config_path.read_text()).get("Boundaries", {})
+    solver_boundary_json = json.dumps(
+        {key: value for key, value in boundaries.items() if key != "Postprocessing"}
+    )
+    assert "55" not in solver_boundary_json
+    assert "66" not in solver_boundary_json
+
+    electrostatic_config_path = generate_palace_config(
+        groups=groups,
+        ports=[],
+        port_info=[],
+        stack=LayerStack(
+            layers={
+                "metal1": Layer(
+                    name="metal1",
+                    gds_layer=(1, 0),
+                    zmin=0.0,
+                    zmax=0.1,
+                    thickness=0.1,
+                    material="metal",
+                    layer_type="conductor",
+                )
+            },
+            materials={"air": {"permittivity": 1.0}, "metal": {"conductivity": 1.0}},
+        ),
+        output_path=tmp_path / "electrostatic",
+        model_name="palace",
+        fmax=10e9,
+        simulation_type="electrostatic",
+        terminals=[TerminalConfig(name="T1", layer="metal1")],
+        absorbing_boundary=False,
+        validate_schema=False,
+    )
+    electrostatic_boundaries = json.loads(electrostatic_config_path.read_text()).get(
+        "Boundaries",
+        {},
+    )
+    electrostatic_boundary_json = json.dumps(
+        {
+            key: value
+            for key, value in electrostatic_boundaries.items()
+            if key != "Postprocessing"
+        }
+    )
+    assert "55" not in electrostatic_boundary_json
+    assert "66" not in electrostatic_boundary_json

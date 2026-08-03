@@ -2,7 +2,16 @@
 
 The Electrostatic report loader combines terminal matrices, matrix convergence,
 EPR/loss summaries, source-status tables, and benchmark data into an
-``ElectrostaticReport``.
+``ElectrostaticReport``. This module owns only assembly policy: which located
+artifacts feed an Electrostatic report, which optional source-status rows are
+recorded, and how Resolve-derived tables are passed into Typed Data objects.
+
+It does not discover run roots, parse terminal matrix CSVs directly, define
+report classes, or render notebook output. Source discovery lives in
+``gsim.palace.resolve.sources``; primitive/derived loading lives in
+``gsim.palace.resolve.loaders`` and ``gsim.palace.resolve.derived``; report
+and visualization semantics live in ``gsim.palace.results`` and
+``gsim.palace.display``.
 """
 
 from __future__ import annotations
@@ -59,12 +68,25 @@ if TYPE_CHECKING:
 
 SURFACE_EPR_CONVERGENCE_COLUMNS = (
     "pass_index",
+    "source_index",
+    "sample_column",
+    "sample_value",
+    "surface_index",
+    "source_name",
+    "physical_name",
+    "entry_name",
     "interface_type",
-    "surface_epr_summary_kind",
-    "surface_epr_exclude_below_um",
-    "surface_epr_band_min_um",
-    "surface_epr_band_max_um",
     "surface_epr_abs",
+)
+DOMAIN_EPR_CONVERGENCE_COLUMNS = (
+    "pass_index",
+    "source_index",
+    "sample_column",
+    "sample_value",
+    "domain_index",
+    "source_name",
+    "physical_name",
+    "domain_epr_abs",
 )
 
 
@@ -83,6 +105,9 @@ def load_electrostatic_report(
     Electrostatic Palace outputs do not carry a resonant frequency. Loss-rate
     and T1 columns are therefore derived only when ``frequency_ghz`` is passed
     explicitly; otherwise the report keeps inverse-Q and equivalent-Q columns.
+    Missing optional EPR reports produce empty typed tables and source-status
+    audit rows. Missing required terminal-capacitance data is handled by the
+    terminal assembly helper as a hard loader failure.
     """
     import pandas as pd
 
@@ -207,6 +232,12 @@ def load_electrostatic_report(
         frequency_ghz=frequency_ghz,
     )
     surface_interface_summary = summarize_surface_q_by_interface(surface_loss)
+    domain_epr_convergence = load_domain_epr_convergence_for_report(
+        source,
+        include_history=include_history,
+        index_map_path=resolved_index_map_path if index_map_present else None,
+        source_rows=source_rows,
+    )
     surface_epr_convergence = load_surface_epr_convergence_for_report(
         source,
         include_history=include_history,
@@ -234,6 +265,7 @@ def load_electrostatic_report(
         surface_interface_summary=surface_interface_summary,
         domain_epr_loss=DomainLoss(domain_loss),
         surface_epr_loss=SurfaceLoss(surface_loss),
+        domain_epr_convergence=domain_epr_convergence,
         surface_epr_convergence=surface_epr_convergence,
         loss_budget_result=LossBudget(dataframe=loss_budget),
         index_map=index_map_frame,
@@ -242,6 +274,91 @@ def load_electrostatic_report(
             columns=REPORT_SOURCE_COLUMNS,
         ),
         run_summary=coerce_report_run_summary(source, run_summary),
+    )
+
+
+def load_domain_epr_convergence_for_report(
+    source: str | Path | dict,
+    *,
+    include_history: bool,
+    index_map_path: Path | None,
+    source_rows: list[dict[str, Any]],
+) -> pd.DataFrame:
+    """Load AMR Domain EPR convergence rows and record their source status.
+
+    The returned dataframe is the narrow report contract consumed by
+    ``ReportLoss`` for convergence figures. ``source_rows`` is extended with
+    one audit row whether history is loaded, disabled, or absent.
+    """
+    import pandas as pd
+
+    iteration_paths = find_report_iteration_csvs(source, "domain-E.csv")
+    report_paths = append_final_report_csv(
+        source,
+        "domain-E.csv",
+        iteration_paths=iteration_paths,
+    )
+    history_row = report_source_row(
+        "iteration*/domain-E.csv",
+        None,
+        required=False,
+        present=bool(iteration_paths),
+        loaded=False,
+        message=history_source_message(
+            include_history=include_history,
+            iteration_paths=iteration_paths,
+            report_paths=report_paths,
+            csv_name="domain-E.csv",
+        ),
+    )
+    source_rows.append(history_row)
+    if not include_history or not iteration_paths:
+        return empty_domain_epr_convergence()
+
+    frames: list[pd.DataFrame] = []
+    for csv_path, pass_index in report_paths:
+        source_arg: dict[str, Path] = {"domain-E.csv": csv_path}
+        if index_map_path is not None:
+            source_arg["palace_index_map.json"] = index_map_path
+        domain_energy = load_domain_energy_summary(
+            source_arg if index_map_path is not None else csv_path,
+            index_map_path=index_map_path,
+        )
+        if domain_energy.empty or "p_elec" not in domain_energy.columns:
+            continue
+        frame = domain_energy.copy()
+        frame["pass_index"] = pass_index
+        frames.append(frame)
+
+    if not frames:
+        return empty_domain_epr_convergence()
+
+    history = pd.concat(frames, ignore_index=True)
+    history["domain_epr_abs"] = pd.to_numeric(
+        history["p_elec"],
+        errors="coerce",
+    ).abs()
+    for column in DOMAIN_EPR_CONVERGENCE_COLUMNS:
+        if column not in history.columns and column != "domain_epr_abs":
+            history[column] = pd.NA
+    history = history.dropna(subset=["domain_epr_abs"])
+    if history.empty:
+        return empty_domain_epr_convergence()
+
+    group_columns = [
+        column
+        for column in DOMAIN_EPR_CONVERGENCE_COLUMNS
+        if column != "domain_epr_abs"
+    ]
+    result = history.groupby(
+        group_columns,
+        dropna=False,
+        as_index=False,
+    )["domain_epr_abs"].sum()
+    history_row["loaded"] = not result.empty
+    return result.loc[:, DOMAIN_EPR_CONVERGENCE_COLUMNS].sort_values(
+        ["source_index", "domain_index", "source_name", "pass_index"],
+        na_position="last",
     )
 
 
@@ -254,31 +371,40 @@ def load_surface_epr_convergence_for_report(
     frequency_ghz: float | None,
     source_rows: list[dict[str, Any]],
 ) -> pd.DataFrame:
-    """Load AMR Surface EPR convergence from ``iteration*/surface-Q.csv`` files."""
+    """Load AMR Surface EPR convergence rows and record their source status.
+
+    Surface history uses the same loss summarization path as the final report
+    so source and physical-surface provenance match the final Surface EPR table.
+    ``source_rows`` is extended with one audit row whether history is loaded,
+    disabled, or absent.
+    """
     import pandas as pd
 
-    iteration_paths = find_surface_q_iteration_csvs(source)
-    source_rows.append(
-        report_source_row(
-            "iteration*/surface-Q.csv",
-            None,
-            required=False,
-            present=bool(iteration_paths),
-            loaded=include_history and bool(iteration_paths),
-            message=(
-                f"loaded {len(iteration_paths)} AMR iteration files"
-                if include_history and iteration_paths
-                else "history disabled"
-                if not include_history
-                else "no AMR iteration surface-Q.csv files found"
-            ),
-        )
+    iteration_paths = find_report_iteration_csvs(source, "surface-Q.csv")
+    report_paths = append_final_report_csv(
+        source,
+        "surface-Q.csv",
+        iteration_paths=iteration_paths,
     )
+    history_row = report_source_row(
+        "iteration*/surface-Q.csv",
+        None,
+        required=False,
+        present=bool(iteration_paths),
+        loaded=False,
+        message=history_source_message(
+            include_history=include_history,
+            iteration_paths=iteration_paths,
+            report_paths=report_paths,
+            csv_name="surface-Q.csv",
+        ),
+    )
+    source_rows.append(history_row)
     if not include_history or not iteration_paths:
         return empty_surface_epr_convergence()
 
     frames: list[pd.DataFrame] = []
-    for csv_path, pass_index in iteration_paths:
+    for csv_path, pass_index in report_paths:
         source_arg: dict[str, Path] = {"surface-Q.csv": csv_path}
         if index_map_path is not None:
             source_arg["palace_index_map.json"] = index_map_path
@@ -305,66 +431,47 @@ def load_surface_epr_convergence_for_report(
         history["p_surf"],
         errors="coerce",
     ).abs()
-    if "interface_type" not in history.columns:
-        history["interface_type"] = ""
-    if "surface_epr_summary_kind" not in history.columns:
-        history["surface_epr_summary_kind"] = "total"
-    else:
-        history["surface_epr_summary_kind"] = history[
-            "surface_epr_summary_kind"
-        ].fillna("total")
-    if "surface_epr_exclude_below_um" not in history.columns:
-        history["surface_epr_exclude_below_um"] = 0.0
-    else:
-        history["surface_epr_exclude_below_um"] = pd.to_numeric(
-            history["surface_epr_exclude_below_um"],
-            errors="coerce",
-        ).fillna(0.0)
-    if "surface_epr_band_min_um" not in history.columns:
-        history["surface_epr_band_min_um"] = history["surface_epr_exclude_below_um"]
-    else:
-        history["surface_epr_band_min_um"] = pd.to_numeric(
-            history["surface_epr_band_min_um"],
-            errors="coerce",
-        ).fillna(history["surface_epr_exclude_below_um"])
-    if "surface_epr_band_max_um" not in history.columns:
-        history["surface_epr_band_max_um"] = pd.NA
-    else:
-        history["surface_epr_band_max_um"] = pd.to_numeric(
-            history["surface_epr_band_max_um"],
-            errors="coerce",
-        )
-
+    for column in SURFACE_EPR_CONVERGENCE_COLUMNS:
+        if column not in history.columns and column != "surface_epr_abs":
+            history[column] = pd.NA
     history = history.dropna(subset=["surface_epr_abs"])
     if history.empty:
         return empty_surface_epr_convergence()
 
+    group_columns = [
+        column
+        for column in SURFACE_EPR_CONVERGENCE_COLUMNS
+        if column != "surface_epr_abs"
+    ]
     result = history.groupby(
-        [
-            "pass_index",
-            "interface_type",
-            "surface_epr_summary_kind",
-            "surface_epr_exclude_below_um",
-            "surface_epr_band_min_um",
-            "surface_epr_band_max_um",
-        ],
+        group_columns,
         dropna=False,
         as_index=False,
     )["surface_epr_abs"].sum()
+    history_row["loaded"] = not result.empty
     return result.loc[:, SURFACE_EPR_CONVERGENCE_COLUMNS].sort_values(
         [
+            "source_index",
+            "surface_index",
             "interface_type",
-            "surface_epr_exclude_below_um",
-            "surface_epr_summary_kind",
+            "source_name",
+            "sample_column",
+            "sample_value",
             "pass_index",
-        ]
+        ],
+        na_position="last",
     )
 
 
-def find_surface_q_iteration_csvs(
+def find_report_iteration_csvs(
     source: str | Path | dict,
+    csv_name: str,
 ) -> tuple[tuple[Path, int], ...]:
-    """Return ``iteration*/surface-Q.csv`` paths sorted by adaptive pass."""
+    """Return existing ``iteration*/<csv_name>`` paths sorted by adaptive pass.
+
+    Path discovery is deliberately limited to filesystem sources. Dict sources
+    represent already-located artifacts and cannot imply sibling AMR folders.
+    """
     if isinstance(source, dict):
         return ()
 
@@ -372,10 +479,58 @@ def find_surface_q_iteration_csvs(
     base = path.parent if path.is_file() else path
     output_dir = resolve_palace_output_dir(base)
     return tuple(
-        (iteration_dir / "surface-Q.csv", pass_index)
+        (iteration_dir / csv_name, pass_index)
         for iteration_dir, pass_index in iteration_dirs(output_dir)
-        if (iteration_dir / "surface-Q.csv").exists()
+        if (iteration_dir / csv_name).exists()
     )
+
+
+def append_final_report_csv(
+    source: str | Path | dict,
+    csv_name: str,
+    *,
+    iteration_paths: tuple[tuple[Path, int], ...],
+) -> tuple[tuple[Path, int], ...]:
+    """Append the top-level final report CSV as the last convergence sample.
+
+    The final Palace report is shown after adaptive passes only when history
+    already exists. This preserves the existing no-history contract for runs
+    without ``iteration*/`` directories.
+    """
+    if isinstance(source, dict) or not iteration_paths:
+        return iteration_paths
+
+    path = Path(source)
+    base = path.parent if path.is_file() else path
+    output_dir = resolve_palace_output_dir(base)
+    final_path = output_dir / csv_name
+    if not final_path.exists():
+        return iteration_paths
+    final_pass = max(pass_index for _, pass_index in iteration_paths) + 1
+    return (*iteration_paths, (final_path, final_pass))
+
+
+def history_source_message(
+    *,
+    include_history: bool,
+    iteration_paths: tuple[tuple[Path, int], ...],
+    report_paths: tuple[tuple[Path, int], ...],
+    csv_name: str,
+) -> str:
+    """Return a compact source-status message for AMR history CSVs."""
+    if not include_history:
+        return "history disabled"
+    if not iteration_paths:
+        return f"no AMR iteration {csv_name} files found"
+    suffix = " plus final report" if len(report_paths) > len(iteration_paths) else ""
+    return f"found {len(iteration_paths)} AMR iteration files{suffix}"
+
+
+def empty_domain_epr_convergence() -> pd.DataFrame:
+    """Return the empty Domain EPR convergence dataframe contract."""
+    import pandas as pd
+
+    return pd.DataFrame(columns=DOMAIN_EPR_CONVERGENCE_COLUMNS)
 
 
 def empty_surface_epr_convergence() -> pd.DataFrame:

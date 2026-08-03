@@ -1,4 +1,12 @@
-"""Driven Problem Type Report model."""
+"""Driven Problem Type Report model.
+
+This module owns the semantic aggregate for a completed Palace Driven run:
+S-parameters, optional indexed postprocessing tables, and loss summaries at
+frequency-sample grain. It does not parse raw solver files, discover run
+folders, or define plotting primitives. Resolve assembly constructs this
+report, Typed Data objects own their table/figure semantics, and Display owns
+generic rendering.
+"""
 
 from __future__ import annotations
 
@@ -22,7 +30,9 @@ class DrivenReport(BasePalaceReport):
     Driven loss is frequency-sample grouped: domain and surface postprocessing
     rows are interpreted against the sweep sample they came from. It is not a
     per-mode Eigenmode budget and it does not rely on Electrostatic's external
-    frequency convention.
+    frequency convention. Required S-parameter data is supplied by Resolve
+    assembly; optional EPR/loss tables remain empty when Palace did not produce
+    their source reports.
     """
 
     sparams: SParams

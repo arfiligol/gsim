@@ -25,6 +25,11 @@ class PalaceRunHandle:
     The handle is intentionally not a report bundle. It records execution and
     handoff artifacts only; callers enter the Resolve stage explicitly through
     ``resolve_palace_result(handle.run_folder, ...)``.
+
+    The status string is producer-owned: local execution, Slurm handoff
+    scripting, archive packaging, and future submission adapters may each use
+    the vocabulary appropriate to that boundary. Consumers should treat this
+    object as a navigation record, not as proof that solver results are present.
     """
 
     run_folder: Path
@@ -39,7 +44,12 @@ class PalaceRunHandle:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-friendly run-stage handle summary."""
+        """Return a JSON-friendly run-stage handle summary.
+
+        Paths are serialized as POSIX-style strings for notebooks, sidecars,
+        and UI display. The method does not inspect the filesystem or resolve
+        result readiness.
+        """
         return {
             "run_folder": self.run_folder.as_posix(),
             "kind": self.kind,

@@ -296,17 +296,15 @@ provenance sidecars without adding new mesh-generation knobs.
 
 Surface EPR interface metadata comes from generated mesh groups after mesh
 lowering. Source-polygon Surface EPR bands are not a supported production mesh
-input. `set_surface_epr()` selects the representation and inset margins used
-for Palace dielectric postprocessing. A/B/C all start from Full-3D stack
+input. `set_surface_epr()` selects the representation used for Palace dielectric
+postprocessing. A/B/C all start from Full-3D stack
 volume adjacency, classify MS/MA/SA interfaces, and then lower the chosen route.
 Representation A keeps only MS-derived child surfaces as PEC boundary truth and
 can use those attributes for MS/MA dielectric postprocessing. Representation B
 removes conductor volumes after emitting child interface surfaces. Representation
-C retains real 3D conductor volumes and emits physical MS/MA/SA inset band/core
-records for planar XY and vertical sidewall interfaces. Total records are logical
-postprocessing aggregates built from child physical groups. Generated
-records preserve interface type, face kind,
-representation, source identity, available summary metadata, and Palace
+C retains real 3D conductor volumes and emits physical MS/MA/SA interface
+records for planar XY and vertical sidewall interfaces. Generated records
+preserve interface type, face kind, representation, source identity, and Palace
 physical-group attributes where concrete groups exist.
 
 ## Advanced Mesh Postprocessing Authoring

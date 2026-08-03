@@ -19,7 +19,14 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class PalaceRunFolder:
-    """Typed paths for a canonical Palace run folder."""
+    """Typed path view over a canonical Palace run folder.
+
+    The view centralizes Palace run-folder naming so mesh/config generation,
+    Run Stage handoff packaging, local execution, and Resolve discovery refer
+    to the same filesystem contract. Constructing this object is non-mutating;
+    callers use :func:`prepare_palace_run_folder` when they need directories to
+    exist on disk.
+    """
 
     root: Path
 
@@ -122,12 +129,17 @@ class PalaceRunFolder:
 
 
 def palace_run_folder(root: str | Path) -> PalaceRunFolder:
-    """Return typed paths for ``root`` without mutating the filesystem."""
+    """Return a typed run-folder path view without touching the filesystem."""
     return PalaceRunFolder(root=Path(root))
 
 
 def prepare_palace_run_folder(root: str | Path) -> PalaceRunFolder:
-    """Create canonical Palace run-folder directories idempotently."""
+    """Create the canonical Palace run-folder directories idempotently.
+
+    This function owns only directory creation for the shared run-folder
+    skeleton. It never writes Palace inputs, launcher scripts, metadata
+    sidecars, solver results, or report artifacts.
+    """
     folder = palace_run_folder(root)
     for directory in folder.directories:
         directory.mkdir(parents=True, exist_ok=True)
@@ -135,7 +147,12 @@ def prepare_palace_run_folder(root: str | Path) -> PalaceRunFolder:
 
 
 def relative_to_run_folder(path: Path, root: Path) -> str:
-    """Return a stable JSON path relative to a run folder when possible."""
+    """Return a stable JSON path relative to a run folder when possible.
+
+    Absolute paths outside ``root`` are preserved because the caller has
+    intentionally referenced an external artifact. This keeps metadata honest
+    instead of pretending every file belongs to the run folder.
+    """
     try:
         return path.relative_to(root).as_posix()
     except ValueError:

@@ -71,7 +71,31 @@ def write_palace_handoff_metadata(
     metadata: Mapping[str, Any] | None = None,
     filename: str = "palace_handoff_metadata.json",
 ) -> Path:
-    """Write Run Stage handoff metadata beside a Palace run or sweep point."""
+    """Write Run Stage handoff metadata beside a Palace run or sweep point.
+
+    The sidecar records intent and provenance for external execution. It does
+    not claim that a scheduler submission happened and does not inspect Palace
+    result files.
+
+    Args:
+        source: Run directory, sweep directory, or explicit JSON sidecar path.
+        status: Producer-owned handoff status string.
+        launcher: Optional launcher metadata such as Slurm/manual handoff
+            intent.
+        profile: Optional caller-owned profile metadata.
+        resources: Optional requested/resolved resource metadata.
+        script_path: Optional launcher script path recorded relative to the
+            run or sweep root by callers.
+        archive_path: Optional handoff archive path reference.
+        archive_manifest_path: Optional archive manifest path reference.
+        command: Optional redacted command metadata.
+        metadata: Additional JSON-friendly metadata.
+        filename: Sidecar filename. The default writes under ``metadata/`` for
+            run folders; sweep metadata names write at the sweep root.
+
+    Returns:
+        Path to the written JSON sidecar.
+    """
     source_path = Path(source)
     if source_path.suffix.lower() == ".json":
         sidecar_path = source_path
@@ -110,7 +134,12 @@ def write_palace_handoff_metadata(
 
 @dataclass(frozen=True)
 class PalaceSlurmResourceSpec:
-    """Resolved Slurm resources for a Palace handoff script."""
+    """Resolved Slurm resources for a Palace handoff script.
+
+    This model is the scheduler-resource boundary for handoff rendering. It is
+    intentionally explicit and validates Slurm-facing tokens eagerly so invalid
+    profile catalogs fail before an sbatch script is written.
+    """
 
     account: str
     partition: str
@@ -162,7 +191,13 @@ class PalaceSlurmResourceSpec:
 
 @dataclass(frozen=True)
 class PalaceSlurmLauncherSpec:
-    """Optional launch hints attached to a caller-supplied Slurm profile."""
+    """Optional launch hints attached to a caller-supplied Slurm profile.
+
+    Launcher hints describe how the generated script should invoke Palace on a
+    site. They are not a submission API and do not encode private cluster
+    policy beyond caller-provided executable, setup, PETSc, and ``srun``
+    tokens.
+    """
 
     palace_executable: str | None = None
     command_style: Literal["binary", "wrapper"] | None = None
@@ -213,7 +248,13 @@ class PalaceSlurmLauncherSpec:
 
 @dataclass(frozen=True)
 class PalaceSlurmProfileSpec:
-    """Caller-supplied Slurm profile with explicit Palace resources."""
+    """Caller-supplied Slurm profile with explicit Palace resources.
+
+    ``gsim`` treats profiles as external configuration. The model validates the
+    fields it understands, preserves JSON-friendly metadata for sidecars, and
+    refuses unknown profile/resource/solver keys instead of silently accepting
+    site-specific semantics.
+    """
 
     name: str
     resources: PalaceSlurmResourceSpec
@@ -261,7 +302,12 @@ class PalaceSlurmProfileSpec:
 
 @dataclass(frozen=True)
 class PalaceSlurmProfileResolution:
-    """Resolved Slurm resources and profile metadata for a handoff."""
+    """Resolved Slurm resources and profile metadata for a handoff.
+
+    A resolution is the immutable product of selecting one caller-owned
+    profile and applying explicit resource overrides. It can feed both Palace
+    config hints and sbatch rendering without re-reading the original catalog.
+    """
 
     name: str
     resources: PalaceSlurmResourceSpec
@@ -292,7 +338,12 @@ class PalaceSlurmProfileResolution:
 
 @dataclass(frozen=True)
 class PalaceSlurmSbatchSpec:
-    """Render-ready Slurm sbatch specification for a Palace run directory."""
+    """Render-ready Slurm sbatch specification for one Palace run folder.
+
+    The spec owns script rendering only. It assumes the run folder contains
+    ``config.json`` and ``palace.msh`` and emits a manual-submission script
+    that writes logs/results under the canonical run-folder layout.
+    """
 
     job_name: str
     resources: PalaceSlurmResourceSpec
@@ -441,7 +492,12 @@ class PalaceSlurmSbatchSpec:
 
 @dataclass(frozen=True)
 class PalaceSlurmSweepArraySpec:
-    """Render-ready Slurm array specification for a Palace sweep folder."""
+    """Render-ready Slurm array specification for a Palace sweep folder.
+
+    The sweep script consumes the existing gsim ``points.json`` contract and a
+    generated CSV lookup table. Point identity remains owned by sweep metadata;
+    this class only controls scheduler array shape and Palace invocation.
+    """
 
     job_name: str
     resources: PalaceSlurmResourceSpec
@@ -489,7 +545,11 @@ class PalaceSlurmSweepArraySpec:
 
 @dataclass(frozen=True)
 class PalaceSlurmHandoffResult:
-    """Files written by a dry-run Palace Slurm handoff."""
+    """Files written by a dry-run Palace Slurm handoff.
+
+    The result names local artifacts only. It is not evidence that ``sbatch``
+    was invoked or accepted by a cluster scheduler.
+    """
 
     script_path: Path
     metadata_path: Path
@@ -497,7 +557,11 @@ class PalaceSlurmHandoffResult:
 
 @dataclass(frozen=True)
 class PalaceSlurmSweepHandoffResult:
-    """Files written by a dry-run Palace Slurm sweep-array handoff."""
+    """Files written by a dry-run Palace Slurm sweep-array handoff.
+
+    The result names the generated script, handoff sidecar, and array lookup
+    table. Scheduler submission remains a manual or caller-owned step.
+    """
 
     script_path: Path
     metadata_path: Path
@@ -506,7 +570,12 @@ class PalaceSlurmSweepHandoffResult:
 
 @dataclass(frozen=True)
 class PalaceHandoffArchiveManifestResult:
-    """Files and counts written for a generated handoff archive manifest."""
+    """Files and counts written for a generated handoff archive manifest.
+
+    ``archive_path`` is populated only when a tarball was actually written.
+    Manifest-only helpers leave it unset unless the caller supplied a path to
+    record in metadata.
+    """
 
     manifest_path: Path
     metadata_path: Path | None
@@ -526,6 +595,22 @@ def resolve_palace_slurm_profile(
     ``gsim`` intentionally does not ship private site catalogs or submit jobs.
     Callers provide a named profile mapping, and this helper validates that the
     selected profile can be converted to ``PalaceSlurmResourceSpec``.
+
+    Args:
+        profiles: Caller-owned profile catalog keyed by profile name.
+        name: Profile key to resolve.
+        resource_overrides: Explicit resource-field overrides applied after
+            catalog validation.
+
+    Returns:
+        Immutable profile resolution with rendered metadata and resource
+        objects ready for config hints or sbatch rendering.
+
+    Raises:
+        KeyError: If ``name`` is not present in ``profiles``.
+        TypeError: If profile, launcher, resource, solver, or metadata fields
+            have unsupported shapes.
+        ValueError: If unknown fields or invalid Slurm-facing tokens are found.
     """
     _validate_sbatch_token("profile name", name)
     if name not in profiles:
@@ -558,6 +643,18 @@ def load_palace_slurm_profile_catalog(
 
     The JSON file may be either a direct mapping of profile names to profile
     specs or an envelope with ``schema_version: 1`` and a ``profiles`` mapping.
+
+    Args:
+        path: JSON catalog path.
+
+    Returns:
+        Validated profile specs keyed by profile name.
+
+    Raises:
+        FileNotFoundError: If the catalog path does not exist.
+        TypeError: If the catalog payload is not a JSON object.
+        ValueError: If the catalog extension, schema version, or profile fields
+            do not match the supported contract.
     """
     catalog_path = Path(path)
     if catalog_path.suffix.lower() != ".json":
@@ -601,6 +698,10 @@ def write_palace_slurm_sbatch_handoff(
 ) -> PalaceSlurmHandoffResult:
     """Write a Slurm sbatch script and Palace handoff metadata without submitting.
 
+    The helper is intentionally a dry-run handoff writer. It prepares the
+    canonical run-folder directories, renders an executable script, and records
+    manual-submission intent in ``metadata/palace_handoff_metadata.json``.
+
     Args:
         source: Palace run directory containing ``config.json`` and
             ``palace.msh``.
@@ -613,6 +714,12 @@ def write_palace_slurm_sbatch_handoff(
 
     Returns:
         Paths to the generated script and metadata sidecar.
+
+    Raises:
+        FileNotFoundError: If validation is enabled and required Palace inputs
+            are absent.
+        ValueError: If ``source`` is not a run directory path or generated
+            paths are not run-folder-relative.
     """
     run_dir = Path(source)
     if run_dir.suffix:
@@ -668,6 +775,27 @@ def write_palace_slurm_sweep_array_handoff(
     The sweep must already provide ``points.json``. Point rows are converted to
     a Slurm array lookup table, keeping point identity in the existing gsim
     sweep metadata instead of introducing a private campaign format.
+
+    Args:
+        source: Sweep root containing ``points.json``.
+        spec: Render-ready Slurm array specification.
+        script_path: Relative path for the generated array script.
+        profile: Optional caller-supplied profile metadata.
+        metadata: Additional JSON-friendly handoff metadata.
+        validate_inputs: When true, require every referenced point config and
+            mesh before writing the script.
+
+    Returns:
+        Paths to the generated script, sweep handoff sidecar, and CSV lookup
+        table.
+
+    Raises:
+        FileNotFoundError: If ``points.json`` or required point artifacts are
+            missing.
+        TypeError: If ``points.json`` does not contain the supported object or
+            list shape.
+        ValueError: If point identity, relative paths, or scheduler parameters
+            violate the handoff contract.
     """
     sweep_root = Path(source)
     if sweep_root.suffix:
@@ -749,6 +877,23 @@ def write_palace_run_handoff_archive_manifest(
 
     The helper records which generated files would be packaged. It does not
     create an archive, submit a job, or infer site policy.
+
+    Args:
+        source: Palace run directory.
+        manifest_path: Run-folder-relative manifest path.
+        archive_path: Optional archive path reference recorded in handoff
+            metadata and manifest payload.
+        metadata: Additional JSON-friendly manifest metadata.
+        include_results: Include already-present solver results in the
+            manifest.
+        include_hashes: Include SHA-256 checksums for present files.
+        update_handoff_metadata: Update or create the handoff sidecar with the
+            manifest reference.
+        handoff_metadata_filename: Handoff sidecar filename to update/read.
+
+    Returns:
+        Manifest path, optional metadata path, file count, total bytes, and
+        optional archive reference.
     """
     run_dir = Path(source)
     if run_dir.suffix:
@@ -803,6 +948,23 @@ def package_palace_run_handoff_archive(
     The archive root is the run-folder name. By default, existing result and
     log contents are excluded while the ``results/palace`` and ``logs``
     directories remain present for HPC handoff.
+
+    Args:
+        source: Palace run directory.
+        archive_path: Optional tarball target. When omitted, the archive is
+            written beside the run folder.
+        manifest_path: Run-folder-relative manifest path.
+        metadata: Additional JSON-friendly manifest metadata.
+        include_results: Include already-present solver results and logs in the
+            archive.
+        include_hashes: Include SHA-256 checksums in the manifest.
+
+    Returns:
+        Manifest/archive summary with ``archive_path`` set to the written
+        tarball.
+
+    Raises:
+        ValueError: If ``archive_path`` resolves inside the run folder.
     """
     run_folder = prepare_palace_run_folder(source)
     output_archive_path = _resolve_handoff_archive_path(
@@ -854,7 +1016,28 @@ def write_palace_sweep_handoff_archive_manifest(
     update_handoff_metadata: bool = True,
     handoff_metadata_filename: str = "palace_sweep_handoff_metadata.json",
 ) -> PalaceHandoffArchiveManifestResult:
-    """Write a reviewable manifest for a Palace sweep handoff archive."""
+    """Write a reviewable manifest for a Palace sweep handoff archive.
+
+    The manifest can include sweep-level handoff artifacts and, by default, the
+    already-prepared point run folders referenced by ``points.json``. It does
+    not create a tarball or submit scheduler work.
+
+    Args:
+        source: Sweep root or explicit ``points.json`` path.
+        manifest_path: Sweep-root-relative manifest path.
+        archive_path: Optional archive path reference recorded in metadata.
+        metadata: Additional JSON-friendly manifest metadata.
+        include_point_files: Include artifacts for each point run folder.
+        include_results: Include already-present point solver outputs.
+        include_hashes: Include SHA-256 checksums for present files.
+        update_handoff_metadata: Update or create sweep handoff metadata with
+            the manifest reference.
+        handoff_metadata_filename: Sweep handoff sidecar filename to
+            update/read.
+
+    Returns:
+        Manifest path, optional metadata path, file count, and total bytes.
+    """
     source_path = Path(source)
     points_path = source_path if source_path.is_file() else source_path / "points.json"
     if not points_path.is_file():

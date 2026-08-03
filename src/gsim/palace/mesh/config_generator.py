@@ -953,9 +953,9 @@ def _volume_interface_child_surfaces(groups: dict[str, Any]):
     for surf_info in groups.get("boundary_surfaces", {}).values():
         if not isinstance(surf_info, dict):
             continue
-        if surf_info.get("source") != "volume_interface":
+        if surf_info.get("postprocessing_only"):
             continue
-        if surf_info.get("surface_epr_summary_kind") == "total":
+        if surf_info.get("source") != "volume_interface":
             continue
         if surf_info.get("metal_body_id") is None:
             continue
@@ -1015,9 +1015,7 @@ def _finite_conductor_split_boundary_attributes(
             continue
         if info.get("source_id") != source_id:
             continue
-        if not info.get("postprocessing_only") or not info.get("surface_epr"):
-            continue
-        if info.get("surface_epr_summary_kind") == "total":
+        if info.get("postprocessing_only") or info.get("surface_epr"):
             continue
         attrs.extend(_physical_group_values(info.get("phys_group")))
     return sorted(set(attrs))
@@ -1037,9 +1035,7 @@ def _finite_conductor_split_source_ids(
             and str(info.get("representation", "")).upper() != representation
         ):
             continue
-        if not info.get("postprocessing_only") or not info.get("surface_epr"):
-            continue
-        if info.get("surface_epr_summary_kind") == "total":
+        if info.get("postprocessing_only") or info.get("surface_epr"):
             continue
         source_id = info.get("source_id")
         if isinstance(source_id, str) and source_id:
@@ -1062,9 +1058,7 @@ def _finite_conductor_split_sources_for_selector(
             and str(info.get("representation", "")).upper() != representation
         ):
             continue
-        if not info.get("postprocessing_only") or not info.get("surface_epr"):
-            continue
-        if info.get("surface_epr_summary_kind") == "total":
+        if info.get("postprocessing_only") or info.get("surface_epr"):
             continue
         if info.get("layer") != selector.layer:
             continue

@@ -41,13 +41,6 @@ _SURFACE_INTERFACE_CONTEXT_KEYS = (
     "preset_source",
     "loss_channel",
     "source_entry_name",
-    "surface_epr_summary_kind",
-    "surface_epr_exclude_below_um",
-    "source_aware_surface_epr_group_names",
-    "surface_epr_band_names",
-    "surface_epr_band_min_um",
-    "surface_epr_band_max_um",
-    "surface_epr_band_label",
     "thickness",
     "permittivity",
     "loss_tangent",
@@ -287,8 +280,6 @@ def summarize_loss_channel_budget(loss_rows: pd.DataFrame) -> pd.DataFrame:
             "sample_value",
             "frequency_ghz",
             "source_entry_name",
-            "surface_epr_summary_kind",
-            "surface_epr_exclude_below_um",
         )
         if column in frame.columns and frame[column].notna().any()
     )
@@ -309,13 +300,8 @@ def summarize_loss_channel_budget(loss_rows: pd.DataFrame) -> pd.DataFrame:
 
 
 def select_primary_surface_loss_rows(loss_rows: pd.DataFrame) -> pd.DataFrame:
-    """Keep total Surface EPR rows plus ordinary loss rows."""
-    if loss_rows.empty or "surface_epr_summary_kind" not in loss_rows.columns:
-        return loss_rows
-    kinds = loss_rows["surface_epr_summary_kind"]
-    if not kinds.eq("total").any():
-        return loss_rows
-    return loss_rows.loc[kinds.isna() | kinds.eq("total")].copy()
+    """Keep all Surface EPR rows for source-aware surface budgeting."""
+    return loss_rows
 
 
 def rate_columns_for_frequency(

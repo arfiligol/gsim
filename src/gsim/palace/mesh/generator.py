@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from numbers import Integral
 from pathlib import Path
@@ -459,7 +459,6 @@ def generate_mesh(
     simulation_layers: SimulationLayerCatalog | None = None,
     activated_regions: tuple[ActivatedRegion, ...] = (),
     surface_epr_representation: Literal["A", "B", "C"] | None = None,
-    surface_epr_inset_margins_um: Sequence[float] | None = None,
 ) -> MeshResult:
     """Generate mesh for Palace EM simulation.
 
@@ -514,12 +513,11 @@ def generate_mesh(
             request layout-authored solver sheets.
         activated_regions: Stack layers explicitly selected as Palace mesh
             regions by the public simulation API.
-        surface_epr_representation: Surface EPR route geometry backend.
-            Routes A/B/C are delegated to Semantic Geometry Builder, then
-            meshed from its XAO output through this Palace mesh pipeline.
-        surface_epr_inset_margins_um: Surface EPR inset margins in um.
-            0 means total; positive values define generated interface inset
-            partitions.
+        surface_epr_representation: Optional Surface EPR route geometry
+            contract. The native gsim path is used when this is unset. Routes
+            A/B/C explicitly delegate topology construction to Semantic
+            Geometry Builder, then mesh its XAO and semantic sidecar output
+            through this Palace mesh pipeline.
 
     Returns:
         MeshResult with paths and metadata
@@ -544,7 +542,6 @@ def generate_mesh(
             ports=ports,
             output_dir=output_dir,
             route=surface_epr_representation,
-            inset_margins_um=surface_epr_inset_margins_um,
             activated_regions=activated_regions,
             terminals=terminals or (),
             model_name=model_name,
@@ -745,9 +742,9 @@ def generate_mesh(
             all_dielectric_tags.setdefault(layer_name, []).extend(vol_tags)
 
         # Native gsim path: build geometry from layout and run the standard
-        # boolean pipeline. Surface EPR A/B/C route geometry is intentionally
-        # external now; the XAO adapter starts from already-built conformal
-        # topology instead of extending this path.
+        # boolean pipeline. Surface EPR A/B/C route geometry is an explicit
+        # optional SGB input contract; the XAO adapter starts from already-built
+        # conformal topology instead of extending this path.
         logger.info("Running boolean pipeline...")
         entities = build_entities(
             metal_tags,

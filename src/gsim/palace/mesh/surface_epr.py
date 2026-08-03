@@ -2,7 +2,7 @@
 
 Responsibility:
 Owns: manifest-facing Surface EPR interface records.
-Does not own: discovering CAD adjacency, assigning physical groups, inset-band
+Does not own: discovering CAD adjacency, assigning physical groups, partitioned
 physical groups/config rows, or reports.
 Inputs: Gmsh-derived mesh groups and already-discovered planar face polygons.
 Outputs: audit metadata for Palace dielectric-interface specs.
@@ -39,8 +39,6 @@ class InterfaceSurface:
     face_kind: FaceKind | str | None = None
     geometry_kind: GeometryKind | str = "unsupported_3d"
     representation: str = "B"
-    band_min_um: float = 0.0
-    band_max_um: float | None = None
     physical_group_name: str | None = None
     physical_group_attribute: int | None = None
 
@@ -117,8 +115,6 @@ def _interface_surface_from_group(
         face_kind=_optional_string(info.get("face_kind")),
         geometry_kind=str(info.get("geometry_kind", "unsupported_3d")),
         representation=str(info.get("representation", "B")),
-        band_min_um=float(info.get("surface_epr_band_min_um", 0.0)),
-        band_max_um=_optional_float(info.get("surface_epr_band_max_um")),
         physical_group_name=str(info.get("physical_name", name)),
         physical_group_attribute=attrs[0] if attrs else None,
     )
@@ -136,10 +132,6 @@ def _int_tuple(value: Any) -> tuple[int, ...]:
 
 def _optional_string(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
-
-
-def _optional_float(value: Any) -> float | None:
-    return None if value is None else float(value)
 
 
 __all__ = [

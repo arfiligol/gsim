@@ -87,19 +87,24 @@ def resolve_palace_result(
     """Resolve Palace artifact identity without loading physics reports.
 
     This is the explicit boundary between Run Stage artifacts and typed result
-    parsing.
-    It inspects generated artifacts, determines the Palace problem type, and
-    reports core file presence. It does not parse S-parameter, eigenmode,
-    terminal-matrix, EPR, or loss tables.
+    parsing. It inspects generated artifacts, determines the Palace problem
+    type, and reports core file presence. It does not parse S-parameter,
+    eigenmode, terminal-matrix, EPR, or loss tables; callers opt into that work
+    with ``resolved.load_report(...)`` after reviewing the source audit.
 
     Args:
-        source: Simulation directory, Palace output directory, or results dict.
+        source: Simulation directory, Palace output directory, or mapping of
+            already-located result artifact names to paths.
         problem_type: Optional explicit Palace problem type. When omitted, the
             value is read from ``config.json`` when that artifact is present.
         include_hashes: Include SHA-256 checksums in artifact status rows.
 
     Returns:
         ``PalaceResolvedResult`` with artifact status and problem identity.
+
+    Raises:
+        FileNotFoundError: If the source path itself cannot be resolved by the
+            run-summary loader.
     """
     summary_source: str | Path | dict[str, str | Path] = (
         dict(source) if isinstance(source, Mapping) else source

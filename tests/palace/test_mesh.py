@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import Literal
 
 import numpy as np
@@ -12,12 +11,10 @@ from gsim.common.stack import LayerStack
 from gsim.common.stack.extractor import Layer
 from gsim.palace.mesh import MeshConfig, gmsh_utils
 from gsim.palace.mesh import validation as mesh_validation
-from gsim.palace.mesh.config_generator import _selector_entries
 from gsim.palace.mesh.generator import generate_mesh
 from gsim.palace.mesh.geometry import (
     GeometryData,
     _snap_via_z_range,
-    _surface_epr_split_ranges,
     add_dielectrics,
     add_metals,
     add_ports,
@@ -27,10 +24,6 @@ from gsim.palace.mesh.geometry import (
 from gsim.palace.mesh.gmsh_utils import Entity
 from gsim.palace.mesh.groups import assign_physical_groups
 from gsim.palace.mesh.manifest import build_mesh_manifest
-from gsim.palace.mesh.postprocessing import (
-    DielectricInterfaceSpec,
-    build_postprocessing_config_from_manifest,
-)
 from gsim.palace.mesh.sheets import AuthoredSheetPolygon
 from gsim.palace.mesh.surface_epr import build_interface_surface_catalog
 from gsim.palace.models import (
@@ -43,7 +36,7 @@ from gsim.palace.models import (
 from gsim.palace.ports import configure_cpw_port, extract_ports
 
 
-def test_finite_conductor_shell_surfaces_create_b_interface_catalog() -> None:
+def test_finite_conductor_shell_surfaces_do_not_claim_sgb_interface_catalog() -> None:
     import gmsh
 
     stack = LayerStack(
@@ -126,30 +119,6 @@ def test_finite_conductor_shell_surfaces_create_b_interface_catalog() -> None:
             port_info=[],
             stack=stack,
         )
-        shell_prefixes = (
-            "D0_TOP_M1__CONDUCTOR_SHELL_0",
-            "D0_TOP_M1__CONDUCTOR_SHELL_1",
-        )
-        expected_total_names = {
-            f"{prefix}__{interface_type}__{face_kind}__TOTAL"
-            for prefix in shell_prefixes
-            for interface_type, face_kind in (
-                ("MS", "BOTTOM"),
-                ("MA", "TOP"),
-                ("MA", "SIDEWALL"),
-            )
-        }
-        expected_band_names = {
-            f"{prefix}__{interface_type}__{face_kind}__{label}"
-            for prefix in shell_prefixes
-            for interface_type, face_kind in (
-                ("MS", "BOTTOM"),
-                ("MA", "TOP"),
-                ("MA", "SIDEWALL"),
-            )
-            for label in ("BAND_0_50NM", "CORE_AFTER_50NM")
-        }
-
         pg_map = gmsh_utils.run_boolean_pipeline(entities)
         groups = assign_physical_groups(
             kernel,
@@ -166,269 +135,11 @@ def test_finite_conductor_shell_surfaces_create_b_interface_catalog() -> None:
         if not already_initialized:
             gmsh.finalize()
 
-    manifest = build_mesh_manifest(groups)
-    manifest_entries = {entry.name: entry for entry in manifest.entries}
     catalog = build_interface_surface_catalog(groups)
     catalog_names = {surface.physical_group_name for surface in catalog.surfaces}
 
-    assert expected_total_names <= catalog_names
-    assert expected_band_names <= catalog_names
-    assert not {
-        "D0_TOP_M1__MS__BOTTOM__TOTAL",
-        "D0_TOP_M1__MA__TOP__TOTAL",
-        "D0_TOP_M1__MA__SIDEWALL__TOTAL",
-    } & catalog_names
-    shell_prefix = "D0_TOP_M1__CONDUCTOR_SHELL_0"
-    bottom = manifest_entries[f"{shell_prefix}__MS__BOTTOM__TOTAL"]
-    top = manifest_entries[f"{shell_prefix}__MA__TOP__TOTAL"]
-    sidewall = manifest_entries[f"{shell_prefix}__MA__SIDEWALL__TOTAL"]
-    bottom_band = manifest_entries[f"{shell_prefix}__MS__BOTTOM__BAND_0_50NM"]
-    bottom_core = manifest_entries[f"{shell_prefix}__MS__BOTTOM__CORE_AFTER_50NM"]
-    top_band = manifest_entries[f"{shell_prefix}__MA__TOP__BAND_0_50NM"]
-    top_core = manifest_entries[f"{shell_prefix}__MA__TOP__CORE_AFTER_50NM"]
-    sidewall_band = manifest_entries[f"{shell_prefix}__MA__SIDEWALL__BAND_0_50NM"]
-    sidewall_core = manifest_entries[f"{shell_prefix}__MA__SIDEWALL__CORE_AFTER_50NM"]
-    assert bottom.metadata["interface_type"] == "MS"
-    assert bottom.metadata["adjacency_source"] == "gmsh_volume_boundary"
-    assert bottom.metadata["face_kind"] == "bottom"
-    assert bottom.metadata["geometry_kind"] == "planar_xy"
-    assert bottom.metadata["metal_body_id"] == shell_prefix
-    assert bottom.metadata["source_id"] == shell_prefix
-    assert bottom.metadata["surface_epr_band_min_um"] == 0.0
-    assert bottom.metadata["surface_epr_band_max_um"] is None
-    assert bottom.attributes == ()
-    assert bottom.metadata["logical_only"] is True
-    assert bottom.metadata["palace_attributes"] == []
-    assert bottom.metadata["adjacent_body_ids"] == (shell_prefix, "silicon")
-    assert bottom.metadata["adjacent_materials"] == ("aluminum", "silicon")
-    assert top.metadata["interface_type"] == "MA"
-    assert top.metadata["adjacent_body_ids"] == (shell_prefix, "air")
-    assert top.metadata["face_kind"] == "top"
-    assert sidewall.metadata["face_kind"] == "sidewall"
-    assert sidewall.metadata["geometry_kind"] == "vertical_ruled"
-    assert sidewall.metadata["adjacent_body_ids"] == (shell_prefix, "air")
-    assert bottom_band.metadata["parent_interface_id"] == bottom.name
-    assert bottom_band.metadata["surface_epr_summary_kind"] == "band"
-    assert bottom_band.metadata["surface_epr_band_min_um"] == 0.0
-    assert bottom_band.metadata["surface_epr_band_max_um"] == 0.05
-    assert bottom_band.metadata["postprocessing_only"] is True
-    assert bottom_band.attributes
-    assert bottom_core.metadata["parent_interface_id"] == bottom.name
-    assert bottom_core.metadata["surface_epr_summary_kind"] == "core"
-    assert bottom_core.metadata["surface_epr_band_min_um"] == 0.05
-    assert bottom_core.metadata["surface_epr_band_max_um"] is None
-    assert set(bottom.entity_tags) == set(bottom_band.entity_tags) | set(
-        bottom_core.entity_tags
-    )
-    assert set(top.entity_tags) == set(top_band.entity_tags) | set(top_core.entity_tags)
-    assert set(sidewall.entity_tags) == set(sidewall_band.entity_tags) | set(
-        sidewall_core.entity_tags
-    )
-    assert sidewall_band.metadata["parent_interface_id"] == sidewall.name
-    assert sidewall_band.metadata["surface_epr_summary_kind"] == "band"
-    assert sidewall_band.metadata["surface_epr_band_min_um"] == 0.0
-    assert sidewall_band.metadata["surface_epr_band_max_um"] == 0.05
-    assert sidewall_core.metadata["parent_interface_id"] == sidewall.name
-    assert sidewall_core.metadata["surface_epr_summary_kind"] == "core"
-    assert sidewall_core.metadata["surface_epr_band_min_um"] == 0.05
-    assert sidewall_core.metadata["surface_epr_band_max_um"] is None
-    for entry in (
-        bottom_band,
-        bottom_core,
-        top_band,
-        top_core,
-        sidewall_band,
-        sidewall_core,
-    ):
-        tag_owners = entry.metadata["surface_epr_tag_owner_names"]
-        assert set(entry.entity_tags) <= set(tag_owners)
-        assert all(tag_owners[tag] for tag in entry.entity_tags)
-    for prefix in shell_prefixes:
-        for interface_type, face_kind in (
-            ("MS", "BOTTOM"),
-            ("MA", "TOP"),
-            ("MA", "SIDEWALL"),
-        ):
-            total = manifest_entries[f"{prefix}__{interface_type}__{face_kind}__TOTAL"]
-            band = manifest_entries[
-                f"{prefix}__{interface_type}__{face_kind}__BAND_0_50NM"
-            ]
-            core = manifest_entries[
-                f"{prefix}__{interface_type}__{face_kind}__CORE_AFTER_50NM"
-            ]
-            assert set(total.entity_tags) == set(band.entity_tags) | set(
-                core.entity_tags
-            )
-
-    postprocessing = build_postprocessing_config_from_manifest(
-        manifest,
-        dielectric_interfaces=(
-            DielectricInterfaceSpec(
-                role="conductor_surface",
-                entry_names=tuple(
-                    f"{prefix}__MS__BOTTOM__{label}"
-                    for prefix in shell_prefixes
-                    for label in ("BAND_0_50NM", "CORE_AFTER_50NM")
-                ),
-                interface_type="MS",
-                thickness=0.002,
-                permittivity=10.0,
-                combine_entries=True,
-                entry_name="D0_TOP_M1__MS__surface_epr_total",
-            ),
-            DielectricInterfaceSpec(
-                role="conductor_surface",
-                entry_names=tuple(
-                    f"{prefix}__MA__{face_kind}__{label}"
-                    for prefix in shell_prefixes
-                    for face_kind in ("TOP", "SIDEWALL")
-                    for label in ("BAND_0_50NM", "CORE_AFTER_50NM")
-                ),
-                interface_type="MA",
-                thickness=0.001,
-                permittivity=9.0,
-                combine_entries=True,
-                entry_name="D0_TOP_M1__MA__surface_epr_total",
-            ),
-            DielectricInterfaceSpec(
-                role="conductor_surface",
-                entry_names=tuple(
-                    f"{prefix}__MS__BOTTOM__BAND_0_50NM"
-                    for prefix in shell_prefixes
-                ),
-                interface_type="MS",
-                thickness=0.002,
-                permittivity=10.0,
-                combine_entries=True,
-                entry_name="D0_TOP_M1__MS__bottom_band_0_50nm",
-            ),
-            DielectricInterfaceSpec(
-                role="conductor_surface",
-                entry_names=tuple(
-                    f"{prefix}__MA__{face_kind}__BAND_0_50NM"
-                    for prefix in shell_prefixes
-                    for face_kind in ("TOP", "SIDEWALL")
-                ),
-                interface_type="MA",
-                thickness=0.001,
-                permittivity=9.0,
-                combine_entries=True,
-                entry_name="D0_TOP_M1__MA__band_0_50nm",
-            ),
-        ),
-        include_empty_sections=False,
-    )
-
-    dielectric_attrs = {
-        attribute
-        for row in postprocessing.boundaries["Dielectric"]
-        for attribute in row["Attributes"]
-    }
-    expected_attrs = {
-        groups["conductor_surfaces"][name]["phys_group"]
-        for name in (
-            *(
-                f"{prefix}__MS__BOTTOM__{label}"
-                for prefix in shell_prefixes
-                for label in ("BAND_0_50NM", "CORE_AFTER_50NM")
-            ),
-            *(
-                f"{prefix}__MA__{face_kind}__{label}"
-                for prefix in shell_prefixes
-                for face_kind in ("TOP", "SIDEWALL")
-                for label in ("BAND_0_50NM", "CORE_AFTER_50NM")
-            ),
-        )
-    }
-    assert dielectric_attrs == expected_attrs
-    ma_row = postprocessing.index_map.entry_for_index(
-        "Boundaries.Postprocessing.Dielectric",
-        2,
-    )
-    assert ma_row is not None
-    assert ma_row.extra["Type"] == "MA"
-    assert set(ma_row.metadata["entries"]) == {
-        f"{prefix}__MA__{face_kind}__{label}"
-        for prefix in shell_prefixes
-        for face_kind in ("TOP", "SIDEWALL")
-        for label in ("BAND_0_50NM", "CORE_AFTER_50NM")
-    }
-    assert ma_row.metadata["entries"][f"{shell_prefix}__MA__SIDEWALL__BAND_0_50NM"][
-        "face_kind"
-    ] == "sidewall"
-    band_row = postprocessing.index_map.entry_for_index(
-        "Boundaries.Postprocessing.Dielectric",
-        3,
-    )
-    assert band_row is not None
-    assert set(band_row.attributes) == {
-        manifest_entries[f"{prefix}__MS__BOTTOM__BAND_0_50NM"].attributes[0]
-        for prefix in shell_prefixes
-    }
-    assert band_row.metadata["entries"][
-        f"{shell_prefix}__MS__BOTTOM__BAND_0_50NM"
-    ]["surface_epr_summary_kind"] == "band"
-    ma_band_row = postprocessing.index_map.entry_for_index(
-        "Boundaries.Postprocessing.Dielectric",
-        4,
-    )
-    assert ma_band_row is not None
-    assert ma_band_row.extra["Type"] == "MA"
-    assert set(ma_band_row.metadata["entries"]) == {
-        f"{prefix}__MA__{face_kind}__BAND_0_50NM"
-        for prefix in shell_prefixes
-        for face_kind in ("TOP", "SIDEWALL")
-    }
-    terminal_entries, _assigned_pgs, _vias_on_terminal = _selector_entries(
-        groups=groups,
-        stack=stack,
-        selectors=[
-            SimpleNamespace(name="T0", layer="D0_TOP_M1", center=(2.0, 2.0)),
-        ],
-    )
-    terminal_attrs = set(terminal_entries[0]["Attributes"])
-    shell0 = groups["conductor_surfaces"]["D0_TOP_M1__CONDUCTOR_SHELL_0"]
-    shell1 = groups["conductor_surfaces"]["D0_TOP_M1__CONDUCTOR_SHELL_1"]
-    expected_shell0_split_attrs = {
-        groups["conductor_surfaces"][name]["phys_group"]
-        for name in expected_band_names
-        if name.startswith("D0_TOP_M1__CONDUCTOR_SHELL_0__")
-    }
-    assert terminal_attrs == expected_shell0_split_attrs
-    assert "phys_group" not in shell0
-    assert "phys_group" not in shell1
-
-
-def test_simulation_layer_catalog_rejects_source_polygon_surface_epr_role() -> None:
-    with pytest.raises(ValueError, match="Source-polygon Surface EPR"):
-        SimulationLayerCatalog(
-            {
-                "D0_TOP_M1_pec_0__SURFACE_EPR_BAND_0_50NM": {
-                    "gds_layer": (204, 0),
-                    "role": "surface_epr_band",
-                    "stack_layer": "D0_TOP_M1",
-                    "metadata": {
-                        "source_entry_name": "D0_TOP_M1_pec_0",
-                        "surface_epr_band_min_um": 0.0,
-                        "surface_epr_band_max_um": 0.05,
-                    },
-                },
-            }
-        )
-
-
-def test_surface_epr_sidewall_margins_skip_layer_thickness() -> None:
-    ranges = _surface_epr_split_ranges(
-        (0.0, 0.05, 0.1, 0.2, 0.5, 1.0),
-        max_margin_um=0.2,
-    )
-
-    assert [label for label, _lower, _upper, _kind in ranges] == [
-        "BAND_0_50NM",
-        "BAND_50NM_100NM",
-        "CORE_AFTER_100NM",
-    ]
-    assert all(upper is None or upper < 0.2 for _label, _lower, upper, _kind in ranges)
+    assert catalog_names == set()
+    assert set(groups["conductor_surfaces"]) == {"D0_TOP_M1_xy", "D0_TOP_M1_z"}
 
 
 class TestMeshConfig:
@@ -452,12 +163,6 @@ class TestMeshConfig:
         assert config.high_order_elements is False
         assert config.high_order_order == 2
         assert config.high_order_optimize is True
-        assert config.surface_epr_inset_margins_um == (0.0, 0.05)
-
-    def test_surface_epr_inset_margins_normalize(self):
-        """Surface EPR inset margins are sorted, unique, and include total."""
-        config = MeshConfig(surface_epr_inset_margins_um=(0.1, 0.0, 0.05, 0.05))
-        assert config.surface_epr_inset_margins_um == (0.0, 0.05, 0.1)
 
     def test_coarse_preset(self):
         """Test coarse mesh preset."""

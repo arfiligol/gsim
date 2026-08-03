@@ -86,13 +86,6 @@ SURFACE_LOSS_COLUMNS = (
     "interface_type",
     "loss_channel",
     "source_entry_name",
-    "surface_epr_summary_kind",
-    "surface_epr_exclude_below_um",
-    "source_aware_surface_epr_group_names",
-    "surface_epr_band_names",
-    "surface_epr_band_min_um",
-    "surface_epr_band_max_um",
-    "surface_epr_band_label",
     "preset_name",
     "preset_source",
     "p_surf",
@@ -135,8 +128,6 @@ LOSS_CHANNEL_BUDGET_COLUMNS = (
     "sample_value",
     "frequency_ghz",
     "source_entry_name",
-    "surface_epr_summary_kind",
-    "surface_epr_exclude_below_um",
     "loss_channel",
     "inverse_q",
     "loss_fraction",
@@ -152,12 +143,10 @@ _COMMON_CONTEXT_COLUMNS = (
     "physical_name",
     "entry_name",
     "role",
+    "attributes",
     "interface_type",
     "loss_channel",
     "source_entry_name",
-    "surface_epr_summary_kind",
-    "surface_epr_exclude_below_um",
-    "surface_epr_band_label",
     "material_name",
     "preset_name",
 )
@@ -237,18 +226,10 @@ class EprLossTable(DataFrameResult):
             "physical_name": optional_str(row.get("physical_name")),
             "entry_name": optional_str(row.get("entry_name")),
             "role": optional_str(row.get("role")),
+            "attributes": row.get("attributes"),
             "interface_type": optional_str(row.get("interface_type")),
             "loss_channel": optional_str(row.get("loss_channel")),
             "source_entry_name": optional_str(row.get("source_entry_name")),
-            "surface_epr_summary_kind": optional_str(
-                row.get("surface_epr_summary_kind")
-            ),
-            "surface_epr_exclude_below_um": optional_float(
-                row.get("surface_epr_exclude_below_um")
-            ),
-            "surface_epr_band_label": optional_str(
-                row.get("surface_epr_band_label")
-            ),
             "material_name": optional_str(row.get("material_name")),
             "preset_name": optional_str(row.get("preset_name")),
             "participation": optional_float(row.get(self.participation_column)),
@@ -309,28 +290,36 @@ class LossBudget(NamedTableResult):
 
 @dataclass(frozen=True, kw_only=True)
 class ReportLoss:
-    """Notebook-facing EPR/loss summary attached to a Problem Type Report."""
+    """Notebook-facing EPR/loss summary attached to a Problem Type Report.
+
+    This aggregate is created by concrete reports after Resolve assembly has
+    loaded and derived the underlying dataframes. It owns the compact
+    cross-channel EPR/loss display surface and convergence figures that require
+    both report context and typed loss tables. It does not recompute loss
+    physics, parse source files, or decide whether a source artifact was
+    required.
+    """
 
     domain: DomainLoss
     surface: SurfaceLoss
     budget: LossBudget
+    domain_convergence: pd.DataFrame | None = None
     surface_convergence: pd.DataFrame | None = None
 
     @property
     def empty(self) -> bool:
-        """Return whether all loss tables are empty."""
+        """Return whether all loss tables and convergence views are empty."""
         return (
             self.domain.empty
             and self.surface.empty
             and self.budget.empty
-            and (
-                self.surface_convergence is None or self.surface_convergence.empty
-            )
+            and (self.domain_convergence is None or self.domain_convergence.empty)
+            and (self.surface_convergence is None or self.surface_convergence.empty)
         )
 
     def tables(self) -> dict[str, pd.DataFrame]:
-        """Return the EPR tables that are meaningful without raw CSV context."""
-        return {
+        """Return compact EPR/loss tables meaningful without raw CSV context."""
+        tables = {
             "domain_epr_summary_table": _compact_epr_summary_dataframe(
                 self.domain.to_epr_dataframe()
             ),
@@ -340,13 +329,19 @@ class ReportLoss:
             ),
             "loss_budget_table": self.budget.to_dataframe(),
         }
+        return {name: table for name, table in tables.items() if not table.empty}
 
     def figures(self) -> dict[str, PlotlyFigure]:
-        """Return loss figures that need report-level context."""
+        """Return convergence figures that need report-level loss context."""
+        figures: dict[str, PlotlyFigure] = {}
+        domain_figure = _domain_epr_convergence_figure(self.domain_convergence)
+        if domain_figure is not None:
+            figures["domain_epr_convergence_trace_plot"] = domain_figure
+
         figure = _surface_epr_convergence_figure(self.surface_convergence)
         if figure is None:
-            return {}
-        figures = {"surface_epr_inset_convergence_trace_plot": figure}
+            return figures
+        figures["surface_epr_convergence_trace_plot"] = figure
         if (
             self.surface_convergence is not None
             and "interface_type" in self.surface_convergence.columns
@@ -362,15 +357,12 @@ class ReportLoss:
                 if interface_figure is None:
                     continue
                 interface_figure.update_layout(
-                    title=f"{interface_type} Surface EPR inset convergence"
+                    title=f"{interface_type} Surface EPR convergence"
                 )
                 slug = "".join(
-                    char.lower() if char.isalnum() else "_"
-                    for char in interface_type
+                    char.lower() if char.isalnum() else "_" for char in interface_type
                 ).strip("_")
-                figures[f"surface_epr_inset_convergence_{slug}_trace_plot"] = (
-                    interface_figure
-                )
+                figures[f"surface_epr_convergence_{slug}_trace_plot"] = interface_figure
         return figures
 
     def visualize(self) -> dict[str, DisplayValue]:
@@ -397,8 +389,6 @@ def _compact_epr_summary_dataframe(
         )
 
     result = frame.copy()
-    if surface_only:
-        result = _surface_total_summary_rows(result)
     values = cast(
         "pd.Series",
         pd.to_numeric(result["participation"], errors="coerce"),
@@ -440,18 +430,10 @@ def _compact_epr_summary_dataframe(
             "frequency_ghz",
             "source_name",
             "physical_name",
+            "entry_name",
+            "attributes",
             "interface_type",
-            *(
-                ()
-                if surface_only
-                else (
-                    "loss_channel",
-                    "source_entry_name",
-                    "surface_epr_summary_kind",
-                    "surface_epr_exclude_below_um",
-                    "surface_epr_band_label",
-                )
-            ),
+            *(() if surface_only else ("loss_channel", "source_entry_name")),
             "material_name",
             "preset_name",
             "participation",
@@ -466,25 +448,78 @@ def _compact_epr_summary_dataframe(
     return cast("pd.DataFrame", result.loc[:, columns])
 
 
-def _surface_total_summary_rows(frame: pd.DataFrame) -> pd.DataFrame:
-    if "surface_epr_summary_kind" not in frame.columns:
-        return frame
-    kinds = frame["surface_epr_summary_kind"].astype("string")
-    return cast(
-        "pd.DataFrame",
-        frame.loc[kinds.isna() | (kinds == "") | (kinds == "total")].copy(),
+def _domain_epr_convergence_figure(
+    frame: pd.DataFrame | None,
+) -> PlotlyFigure | None:
+    """Build a Domain EPR AMR convergence figure when history is available."""
+    if frame is None or frame.empty:
+        return None
+    required = {"pass_index", "domain_epr_abs"}
+    if not required.issubset(frame.columns):
+        return None
+
+    import pandas as pd
+
+    data = frame.copy()
+    data["pass_index"] = pd.to_numeric(data["pass_index"], errors="coerce")
+    data["domain_epr_abs"] = pd.to_numeric(data["domain_epr_abs"], errors="coerce")
+    data = data.dropna(subset=["pass_index", "domain_epr_abs"])
+    if data.empty:
+        return None
+
+    group_columns = [
+        column
+        for column in ("source_index", "physical_name", "source_name", "domain_index")
+        if column in data.columns
+    ]
+    traces = []
+    grouped = (
+        data.groupby(group_columns, dropna=False, sort=True)
+        if group_columns
+        else [((), data)]
     )
+    for group_key, group in grouped:
+        ordered = group.sort_values("pass_index")
+        traces.append(
+            {
+                "x": ordered["pass_index"],
+                "y": ordered["domain_epr_abs"],
+                "name": _domain_epr_trace_name(group_key, group_columns),
+                "mode": "lines+markers",
+            }
+        )
+    if not traces:
+        return None
+    return make_trace_figure(
+        traces,
+        title="Domain EPR convergence",
+        x_title="Adaptive pass",
+        y_title="abs(Domain EPR)",
+    )
+
+
+def _domain_epr_trace_name(group_key: object, group_columns: list[str]) -> str:
+    """Return a stable trace label for one domain convergence group."""
+    values = group_key if isinstance(group_key, tuple) else (group_key,)
+    fields = dict(zip(group_columns, values, strict=False))
+    name = fields.get("physical_name") or fields.get("source_name")
+    if is_missing_value(name) or not str(name):
+        index = fields.get("domain_index")
+        name = "Domain" if is_missing_value(index) else f"Domain {index}"
+    source_index = fields.get("source_index")
+    if is_missing_value(source_index):
+        return str(name)
+    return f"source {source_index} {name}"
 
 
 def _surface_epr_convergence_figure(
     frame: pd.DataFrame | None,
 ) -> PlotlyFigure | None:
+    """Build a Surface EPR AMR convergence figure when history is available."""
     if frame is None or frame.empty:
         return None
     required = {
         "pass_index",
-        "interface_type",
-        "surface_epr_exclude_below_um",
         "surface_epr_abs",
     }
     if not required.issubset(frame.columns):
@@ -495,50 +530,37 @@ def _surface_epr_convergence_figure(
     data = frame.copy()
     data["pass_index"] = pd.to_numeric(data["pass_index"], errors="coerce")
     data["surface_epr_abs"] = pd.to_numeric(data["surface_epr_abs"], errors="coerce")
-    data["surface_epr_exclude_below_um"] = pd.to_numeric(
-        data["surface_epr_exclude_below_um"],
-        errors="coerce",
-    ).fillna(0.0)
-    if "surface_epr_band_min_um" not in data.columns:
-        data["surface_epr_band_min_um"] = data["surface_epr_exclude_below_um"]
-    data["surface_epr_band_min_um"] = pd.to_numeric(
-        data["surface_epr_band_min_um"],
-        errors="coerce",
-    ).fillna(data["surface_epr_exclude_below_um"])
-    if "surface_epr_band_max_um" not in data.columns:
-        data["surface_epr_band_max_um"] = pd.NA
-    else:
-        data["surface_epr_band_max_um"] = pd.to_numeric(
-            data["surface_epr_band_max_um"],
-            errors="coerce",
-        )
-    if "surface_epr_summary_kind" not in data.columns:
-        data["surface_epr_summary_kind"] = "total"
-    data["surface_epr_summary_kind"] = data["surface_epr_summary_kind"].fillna(
-        "total"
-    )
     data = data.dropna(subset=["pass_index", "surface_epr_abs"])
     if data.empty:
         return None
 
-    traces = []
-    for (interface_type, kind, _inset_um, min_um, max_um), group in data.groupby(
-        [
+    group_columns = [
+        column
+        for column in (
+            "source_index",
+            "sample_column",
+            "sample_value",
+            "surface_index",
             "interface_type",
-            "surface_epr_summary_kind",
-            "surface_epr_exclude_below_um",
-            "surface_epr_band_min_um",
-            "surface_epr_band_max_um",
-        ],
-        dropna=False,
-        sort=True,
-    ):
+            "physical_name",
+            "source_name",
+            "entry_name",
+        )
+        if column in data.columns
+    ]
+    traces = []
+    grouped = (
+        data.groupby(group_columns, dropna=False, sort=True)
+        if group_columns
+        else [((), data)]
+    )
+    for group_key, group in grouped:
         ordered = group.sort_values("pass_index")
         traces.append(
             {
                 "x": ordered["pass_index"],
                 "y": ordered["surface_epr_abs"],
-                "name": _surface_epr_trace_name(interface_type, kind, min_um, max_um),
+                "name": _surface_epr_trace_name(group_key, group_columns),
                 "mode": "lines+markers",
             }
         )
@@ -546,43 +568,66 @@ def _surface_epr_convergence_figure(
         return None
     return make_trace_figure(
         traces,
-        title="Surface EPR inset convergence",
+        title="Surface EPR convergence",
         x_title="Adaptive pass",
         y_title="abs(Surface EPR)",
     )
 
 
 def _surface_epr_trace_name(
-    interface_type: object,
-    kind: object,
-    min_um: object,
-    max_um: object,
+    group_key: object,
+    group_columns: list[str],
 ) -> str:
-    interface = "" if is_missing_value(interface_type) else str(interface_type)
-    prefix = interface or "Surface EPR"
-    if str(kind) == "total":
-        return f"{prefix} total"
-    min_nm = _surface_epr_nm(min_um)
-    max_nm = _surface_epr_nm(max_um)
-    if str(kind) == "band" and max_nm is not None:
-        return f"{prefix} band {min_nm:g}-{max_nm:g} nm"
-    return f"{prefix} inset >= {min_nm:g} nm"
+    """Return a stable trace label for one surface convergence group."""
+    values = group_key if isinstance(group_key, tuple) else (group_key,)
+    fields = dict(zip(group_columns, values, strict=False))
+    parts: list[str] = []
+    source_index = fields.get("source_index")
+    if not is_missing_value(source_index):
+        parts.append(f"source {source_index}")
+    surface_index = fields.get("surface_index")
+    if not is_missing_value(surface_index):
+        parts.append(f"surface {surface_index}")
+    sample_column = fields.get("sample_column")
+    sample_value = fields.get("sample_value")
+    if not is_missing_value(sample_column) and not is_missing_value(sample_value):
+        parts.append(f"{sample_column}={_trace_label_value(sample_value)}")
+    interface = fields.get("interface_type")
+    if not is_missing_value(interface) and str(interface):
+        parts.append(str(interface))
+    name = (
+        fields.get("physical_name")
+        or fields.get("source_name")
+        or fields.get("entry_name")
+    )
+    if is_missing_value(name) or not str(name):
+        surface_index = fields.get("surface_index")
+        name = (
+            "Surface EPR"
+            if is_missing_value(surface_index)
+            else f"surface {surface_index}"
+        )
+    parts.append(str(name))
+    return " ".join(parts)
 
 
-def _surface_epr_nm(value: object) -> float | None:
+def _trace_label_value(value: object) -> str:
     if is_missing_value(value):
-        return None
+        return ""
     try:
-        return float(value) * 1000.0
+        numeric = float(value)
     except (TypeError, ValueError):
-        return 0.0
+        return str(value)
+    return str(int(numeric)) if numeric.is_integer() else str(value)
 
 
 def _has_non_null_column(frame: pd.DataFrame, column: str) -> bool:
+    """Return whether a dataframe contains any non-null values for a column."""
     if column not in frame.columns:
         return False
     series = cast("pd.Series", frame[column])
     return bool(series.notna().any())
+
 
 __all__ = [
     "DOMAIN_LOSS_COLUMNS",

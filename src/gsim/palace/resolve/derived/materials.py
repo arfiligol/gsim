@@ -75,13 +75,6 @@ DIELECTRIC_INTERFACE_COLUMNS = (
     "preset_source",
     "loss_channel",
     "source_entry_name",
-    "surface_epr_summary_kind",
-    "surface_epr_exclude_below_um",
-    "source_aware_surface_epr_group_names",
-    "surface_epr_band_names",
-    "surface_epr_band_min_um",
-    "surface_epr_band_max_um",
-    "surface_epr_band_label",
     "thickness",
     "permittivity",
     "loss_tangent",
@@ -527,28 +520,6 @@ def dielectric_interface_row(
         "preset_source": preset_source,
         "loss_channel": optional_str(metadata.get("loss_channel")),
         "source_entry_name": optional_str(metadata.get("source_entry_name")),
-        "surface_epr_summary_kind": optional_str(
-            metadata.get("surface_epr_summary_kind")
-        ),
-        "surface_epr_exclude_below_um": optional_numeric(
-            metadata.get("surface_epr_exclude_below_um")
-        ),
-        "source_aware_surface_epr_group_names": metadata.get(
-            "source_aware_surface_epr_group_names"
-        ),
-        "surface_epr_band_names": metadata.get(
-            "surface_epr_band_names",
-            metadata.get("source_aware_surface_epr_group_names"),
-        ),
-        "surface_epr_band_min_um": optional_numeric(
-            metadata.get("surface_epr_band_min_um")
-        ),
-        "surface_epr_band_max_um": optional_numeric(
-            metadata.get("surface_epr_band_max_um")
-        ),
-        "surface_epr_band_label": optional_str(
-            metadata.get("surface_epr_band_label")
-        ),
         "thickness": optional_numeric(
             config_material_value(interface, "Thickness", "thickness")
         ),

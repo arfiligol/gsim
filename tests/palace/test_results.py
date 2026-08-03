@@ -2355,6 +2355,53 @@ class TestIndexedReportSummaries:
         assert by_interface.loc["MS", "surface_count"] == 0
         assert by_interface.loc["SA", "surface_count"] == 0
 
+    def test_load_surface_q_summary_skips_native_mask_rows(
+        self, tmp_path: Path
+    ) -> None:
+        palace_dir = tmp_path / "results" / "palace"
+        palace_dir.mkdir(parents=True)
+        metadata_dir = tmp_path / "metadata"
+        metadata_dir.mkdir()
+        (metadata_dir / "palace_index_map.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "entries": [
+                        {
+                            "section": "Boundaries.Postprocessing.Dielectric",
+                            "index": 1,
+                            "entry_name": "native_mask_dielectric_ms_50nm",
+                            "role": "boundary_surface",
+                            "attributes": [4, 5],
+                            "physical_names": ["MS__metal__substrate"],
+                            "dimension": 2,
+                            "Type": "MS",
+                            "metadata": {"interface_type": "MS", "mask_margin_nm": 50},
+                        },
+                        {
+                            "section": "Boundaries.Postprocessing.Dielectric",
+                            "index": 2,
+                            "entry_name": "regular_ma",
+                            "role": "boundary_surface",
+                            "attributes": [6],
+                            "physical_names": ["MA__metal__air"],
+                            "dimension": 2,
+                            "Type": "MA",
+                        },
+                    ],
+                }
+            )
+        )
+        (palace_dir / "surface-Q.csv").write_text(
+            "i, p_surf[1], Q_surf[1], p_surf[2], Q_surf[2]\n"
+            "1, 1.0e-5, 1.0e5, 2.0e-7, 5.0e6\n"
+        )
+
+        summary = load_surface_q_summary(tmp_path)
+
+        assert summary["surface_index"].tolist() == [2]
+        assert summary["physical_name"].tolist() == ["MA__metal__air"]
+
     def test_summarize_surface_loss_joins_interface_parameters_and_rates(
         self, indexed_report_dir: Path
     ) -> None:
@@ -2399,12 +2446,6 @@ class TestIndexedReportSummaries:
             {
                 "surface_index": [1, 2, 3],
                 "loss_channel": ["MS", "SA", None],
-                "surface_epr_exclude_below_um": [0.05, 0.05, 0.05],
-                "surface_epr_band_names": [
-                    ("ms_band_50_200nm",),
-                    ("sa_band_50_200nm",),
-                    ("unlabeled",),
-                ],
             }
         )
 
@@ -2419,7 +2460,7 @@ class TestIndexedReportSummaries:
         assert by_channel.loc["SA", "loss_fraction"] == pytest.approx(1.0 / 3.0)
         assert set(budget["loss_channel"]) == {"MS", "SA"}
 
-    def test_source_aware_surface_epr_budget_uses_total_rows_by_default(
+    def test_source_aware_surface_epr_budget_uses_interface_rows(
         self,
     ) -> None:
         import pandas as pd
@@ -2440,14 +2481,7 @@ class TestIndexedReportSummaries:
                     "D0_TOP_M1_pec_0",
                     "D0_TOP_M1_pec_0",
                 ],
-                "surface_epr_summary_kind": ["total", "exclude_below", "total"],
-                "surface_epr_exclude_below_um": [0.0, 0.05, 0.0],
                 "loss_channel": ["MS", "MS", "MA"],
-                "source_aware_surface_epr_group_names": [
-                    ("band_0_50nm", "band_50_100nm", "core"),
-                    ("band_50_100nm", "core"),
-                    ("band_0_50nm", "band_50_100nm", "core"),
-                ],
             }
         )
 
@@ -2461,18 +2495,12 @@ class TestIndexedReportSummaries:
 
         surface_rows = surface_loss.set_index("surface_index")
         assert surface_rows.loc[1, "source_entry_name"] == "D0_TOP_M1_pec_0"
-        assert surface_rows.loc[2, "surface_epr_summary_kind"] == "exclude_below"
-        assert surface_rows.loc[1, "source_aware_surface_epr_group_names"] == (
-            "band_0_50nm",
-            "band_50_100nm",
-            "core",
-        )
 
         by_channel = channel_budget.set_index("loss_channel")
         assert set(channel_budget["loss_channel"]) == {"MS", "MA"}
-        assert by_channel.loc["MS", "inverse_q"] == pytest.approx(1.0e-7)
+        assert by_channel.loc["MS", "inverse_q"] == pytest.approx(1.0e-6)
         assert by_channel.loc["MA", "inverse_q"] == pytest.approx(2.0e-7)
-        assert loss_budget.iloc[0]["surface_inverse_q_sum"] == pytest.approx(3.0e-7)
+        assert loss_budget.iloc[0]["surface_inverse_q_sum"] == pytest.approx(1.2e-6)
 
     def test_summarize_loss_budget_combines_domain_and_surface_loss(
         self, eigenmode_report_dir: Path
@@ -2714,8 +2742,6 @@ class TestElectrostaticReport:
             ):
                 entry["metadata"] = {
                     "source_entry_name": "left",
-                    "surface_epr_summary_kind": "total",
-                    "surface_epr_exclude_below_um": 0.0,
                 }
         index_map["entries"].append(
             {
@@ -2728,8 +2754,6 @@ class TestElectrostaticReport:
                 "dimension": 2,
                 "metadata": {
                     "source_entry_name": "right",
-                    "surface_epr_summary_kind": "total",
-                    "surface_epr_exclude_below_um": 0.0,
                 },
             }
         )
@@ -2757,12 +2781,18 @@ class TestElectrostaticReport:
                 [-1.0e-15, 2.0e-15],
             ],
         )
+        (iteration01 / "domain-E.csv").write_text(
+            "i, E_elec[1] (J), p_elec[1]\n1, 1.0, 0.4\n"
+        )
         (iteration01 / "surface-Q.csv").write_text(
             "i, p_surf[2], Q_surf[2], p_surf[3], Q_surf[3]\n"
             "1, 1.0e-7, 1.0e7, 2.0e-7, 5.0e6\n"
         )
         iteration02 = palace_dir / "iteration02"
         iteration02.mkdir()
+        (iteration02 / "domain-E.csv").write_text(
+            "i, E_elec[1] (J), p_elec[1]\n1, 1.5, 0.45\n"
+        )
         (iteration02 / "surface-Q.csv").write_text(
             "i, p_surf[2], Q_surf[2], p_surf[3], Q_surf[3]\n"
             "1, 2.0e-7, 5.0e6, 3.0e-7, 3.333333e6\n"
@@ -2780,30 +2810,48 @@ class TestElectrostaticReport:
         assert "loaded 1 AMR iteration files" in str(
             sources.loc["iteration*/terminal-C.csv", "message"]
         )
+        assert bool(sources.loc["iteration*/domain-E.csv", "loaded"])
         assert bool(sources.loc["iteration*/surface-Q.csv", "loaded"])
+        domain_convergence = report.domain_epr_convergence
+        assert domain_convergence.columns.tolist() == [
+            "pass_index",
+            "source_index",
+            "sample_column",
+            "sample_value",
+            "domain_index",
+            "source_name",
+            "physical_name",
+            "domain_epr_abs",
+        ]
+        assert domain_convergence["pass_index"].tolist() == [1, 2, 3, 3]
+        final_domain = domain_convergence.loc[
+            domain_convergence["pass_index"] == 3
+        ].set_index("source_index")
+        assert final_domain.loc[1, "domain_epr_abs"] == pytest.approx(0.5)
+        assert final_domain.loc[2, "domain_epr_abs"] == pytest.approx(0.25)
+
         convergence = report.surface_epr_convergence
         assert convergence.columns.tolist() == [
             "pass_index",
+            "source_index",
+            "sample_column",
+            "sample_value",
+            "surface_index",
+            "source_name",
+            "physical_name",
+            "entry_name",
             "interface_type",
-            "surface_epr_summary_kind",
-            "surface_epr_exclude_below_um",
             "surface_epr_abs",
         ]
-        assert "source_entry_name" not in convergence.columns
-        by_pass = convergence.set_index(
-            [
-                "pass_index",
-                "interface_type",
-                "surface_epr_summary_kind",
-                "surface_epr_exclude_below_um",
-            ]
+        by_surface = convergence.set_index(
+            ["surface_index", "pass_index", "sample_value"]
         )
-        assert by_pass.loc[(1, "MA", "total", 0.0), "surface_epr_abs"] == (
-            pytest.approx(3.0e-7)
-        )
-        assert by_pass.loc[(2, "MA", "total", 0.0), "surface_epr_abs"] == (
-            pytest.approx(5.0e-7)
-        )
+        assert by_surface.loc[(2, 1, 1.0), "source_name"] == "left"
+        assert by_surface.loc[(3, 1, 1.0), "source_name"] == "right"
+        assert by_surface.loc[(2, 1, 1.0), "surface_epr_abs"] == pytest.approx(1.0e-7)
+        assert by_surface.loc[(3, 1, 1.0), "surface_epr_abs"] == pytest.approx(2.0e-7)
+        assert by_surface.loc[(2, 2, 1.0), "surface_epr_abs"] == pytest.approx(2.0e-7)
+        assert by_surface.loc[(3, 2, 1.0), "surface_epr_abs"] == pytest.approx(3.0e-7)
 
     def test_electrostatic_report_loader_stays_assembly_owned(self) -> None:
         import gsim.palace as palace

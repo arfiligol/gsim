@@ -8,6 +8,7 @@ loss budgets; loss-specific normalization lives in
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -70,6 +71,7 @@ def load_surface_q_summary(
         },
         index_map_path=index_map_path,
     )
+    frame = _drop_native_mask_surface_rows(frame)
     if "q_surf" in frame.columns:
         frame["inverse_q"] = _inverse_q_values(frame["q_surf"])
     return frame
@@ -221,6 +223,16 @@ def _load_indexed_quantity_summary(
     if sort_columns:
         result = result.sort_values(sort_columns).reset_index(drop=True)
     return result
+
+
+def _drop_native_mask_surface_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty or "metadata" not in frame.columns:
+        return frame
+    keep = [
+        not (isinstance(metadata, Mapping) and "mask_margin_nm" in metadata)
+        for metadata in frame["metadata"]
+    ]
+    return frame.loc[keep].reset_index(drop=True)
 
 
 def _sample_metadata(

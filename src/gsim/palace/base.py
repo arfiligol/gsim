@@ -102,20 +102,6 @@ def _normalize_surface_epr_representation(representation: str) -> str:
     return value
 
 
-def _surface_epr_inset_margins(
-    margins_um: Sequence[float] | None,
-) -> tuple[float, ...] | None:
-    if margins_um is None:
-        return None
-    margins = tuple(sorted({float(value) for value in margins_um}))
-    if any(value < 0.0 or not math.isfinite(value) for value in margins):
-        msg = "Surface EPR inset margins must be finite values >= 0."
-        raise ValueError(msg)
-    if 0.0 not in margins:
-        margins = (0.0, *margins)
-    return margins
-
-
 def _surface_epr_interface_assignments(
     interfaces: Mapping[str, Mapping[str, Any]] | Sequence[Mapping[str, Any]] | None,
 ) -> list[dict[str, Any]]:
@@ -677,9 +663,8 @@ class PalaceSimBase(BaseModel):
     ) -> None:
         """Set a typed Palace postprocessing config as an explicit override.
 
-        This is the low-level escape hatch. Surface EPR interface selection,
-        inset margins, and Route A/B/C representation belong to
-        ``set_surface_epr()``.
+        This is the low-level escape hatch. Surface EPR interface selection and
+        Route A/B/C representation belong to ``set_surface_epr()``.
         """
         self._postprocessing_override_config = postprocessing
         self._last_postprocessing_config = postprocessing
@@ -688,27 +673,20 @@ class PalaceSimBase(BaseModel):
         self,
         *,
         representation: Literal["A", "B", "C"] = "B",
-        inset_margins_um: Sequence[float] | None = None,
         interfaces: Mapping[str, Mapping[str, Any]]
         | Sequence[Mapping[str, Any]]
         | None = None,
     ) -> None:
         """Configure Surface EPR mesh intent and dielectric postprocessing.
 
-        ``gsim`` owns the generated interface catalog, inset/margin partitions,
-        and Palace dielectric postprocessing rows. Callers declare which
-        physical representation and interface presets they want; ``mesh()``
-        consumes the margins and ``write_config()`` consumes the interface
-        declarations. A/B/C all start from Full-3D volume adjacency and
-        MS/MA/SA classification; A and B remove conductor volumes before
-        Palace solve, while C keeps them.
+        ``gsim`` owns the generated interface catalog and Palace dielectric
+        postprocessing rows. Callers declare which physical representation and
+        interface presets they want; A/B/C route geometry is produced by SGB and
+        gsim consumes the resulting mesh identity.
         """
         config: dict[str, Any] = {
             "representation": _normalize_surface_epr_representation(representation),
         }
-        margins = _surface_epr_inset_margins(inset_margins_um)
-        if margins is not None:
-            config["inset_margins_um"] = margins
 
         self._surface_epr_config = config
         self._surface_epr_interface_assignments = _surface_epr_interface_assignments(
@@ -949,7 +927,6 @@ class PalaceSimBase(BaseModel):
         high_order_elements: bool | None = None,
         high_order_order: int | None = None,
         high_order_optimize: bool | None = None,
-        surface_epr_inset_margins_um: Sequence[float] | None = None,
     ) -> MeshConfig:
         """Build mesh config from preset with optional overrides.
 
@@ -1039,18 +1016,11 @@ class PalaceSimBase(BaseModel):
             mesh_config.surface_epr_representation = (
                 existing_config.surface_epr_representation
             )
-            mesh_config.surface_epr_inset_margins_um = (
-                existing_config.surface_epr_inset_margins_um
-            )
 
         surface_epr_representation = self._surface_epr_config.get("representation")
         if surface_epr_representation is not None:
             mesh_config.surface_epr_enabled = True
             mesh_config.surface_epr_representation = surface_epr_representation
-
-        surface_epr_margins = self._surface_epr_config.get("inset_margins_um")
-        if surface_epr_inset_margins_um is None and surface_epr_margins is not None:
-            mesh_config.surface_epr_inset_margins_um = tuple(surface_epr_margins)
 
         # Preserve planar_conductors from sim.mesh_config if not
         # explicitly provided via sim.mesh(planar_conductors=...)
@@ -1095,10 +1065,6 @@ class PalaceSimBase(BaseModel):
             mesh_config.high_order_order = high_order_order
         if high_order_optimize is not None:
             mesh_config.high_order_optimize = high_order_optimize
-        if surface_epr_inset_margins_um is not None:
-            mesh_config.surface_epr_inset_margins_um = tuple(
-                surface_epr_inset_margins_um
-            )
         mesh_config.show_gui = show_gui
 
         return mesh_config
@@ -1551,9 +1517,6 @@ class PalaceSimBase(BaseModel):
             surface_epr_representation=mesh_config.surface_epr_representation
             if mesh_config.surface_epr_enabled
             else None,
-            surface_epr_inset_margins_um=mesh_config.surface_epr_inset_margins_um
-            if mesh_config.surface_epr_enabled
-            else None,
             simulation_layers=self._simulation_layers,
             activated_regions=self._activated_region_values(),
         )
@@ -1602,7 +1565,6 @@ class PalaceSimBase(BaseModel):
         high_order_order: int | None = None,
         high_order_optimize: bool | None = None,
         decimate_tolerance: float | None = None,
-        surface_epr_inset_margins_um: Sequence[float] | None = None,
     ) -> None:
         """Preview the mesh without running simulation.
 
@@ -1636,9 +1598,6 @@ class PalaceSimBase(BaseModel):
             high_order_optimize: Run gmsh high-order optimization after meshing.
             decimate_tolerance: Relative tolerance for polygon decimation
                 (None = no decimation; typical 0.001-0.01).
-            surface_epr_inset_margins_um: Surface EPR inset margins in um.
-                0 means total; positive values define generated finite-shell
-                inset partitions.
 
         Example:
             >>> sim.preview(preset="fine", planar_conductors=True, show_gui=True)
@@ -1681,7 +1640,6 @@ class PalaceSimBase(BaseModel):
             high_order_elements=high_order_elements,
             high_order_order=high_order_order,
             high_order_optimize=high_order_optimize,
-            surface_epr_inset_margins_um=surface_epr_inset_margins_um,
         )
 
         # Resolve stack
@@ -1742,9 +1700,6 @@ class PalaceSimBase(BaseModel):
                 surface_epr_representation=mesh_config.surface_epr_representation
                 if mesh_config.surface_epr_enabled
                 else None,
-                surface_epr_inset_margins_um=mesh_config.surface_epr_inset_margins_um
-                if mesh_config.surface_epr_enabled
-                else None,
                 simulation_layers=self._simulation_layers,
                 activated_regions=self._activated_region_values(),
             )
@@ -1784,7 +1739,6 @@ class PalaceSimBase(BaseModel):
         high_order_elements: bool | None = None,
         high_order_order: int | None = None,
         high_order_optimize: bool | None = None,
-        surface_epr_inset_margins_um: Sequence[float] | None = None,
     ) -> MeshResult:
         """Generate the mesh for Palace simulation.
 
@@ -1832,9 +1786,6 @@ class PalaceSimBase(BaseModel):
             high_order_elements: Enable high-order geometric mesh elements.
             high_order_order: Polynomial order for high-order elements.
             high_order_optimize: Run gmsh high-order optimization after meshing.
-            surface_epr_inset_margins_um: Surface EPR inset margins in um.
-                0 means total; positive values define generated finite-shell
-                inset partitions.
 
         Returns:
             MeshResult with mesh path and generated manifest
@@ -1883,7 +1834,6 @@ class PalaceSimBase(BaseModel):
             high_order_elements=high_order_elements,
             high_order_order=high_order_order,
             high_order_optimize=high_order_optimize,
-            surface_epr_inset_margins_um=surface_epr_inset_margins_um,
         )
 
         if merge_via_distance is not None:
@@ -2129,7 +2079,7 @@ class PalaceSimBase(BaseModel):
         """Build Palace postprocessing from declarative Surface EPR interfaces.
 
         Representation selection is a catalog filter. Mesh/CAD owns whether A,
-        B, or C surfaces exist and how inset bands were generated.
+        B, or C interface surfaces exist and how they are physically grouped.
         """
         from gsim.palace.mesh.postprocessing import (
             build_postprocessing_config_from_manifest,
@@ -2350,7 +2300,27 @@ class PalaceSimBase(BaseModel):
         This is the simulation-method wrapper for the lower-level handoff
         renderer. It keeps notebooks on the explicit ``sim`` pipeline while
         leaving Slurm schema validation and rendering in
-        ``gsim.palace.handoff``.
+        ``gsim.palace.handoff``. The method writes a script and metadata for
+        manual scheduler submission; it does not call ``sbatch``.
+
+        Args:
+            profile: Resolved caller-owned Slurm profile.
+            job_name: Slurm-safe job name for the generated script.
+            script_path: Run-folder-relative script path.
+            metadata: Additional JSON-friendly handoff metadata.
+            validate_inputs: Require ``config.json`` and ``palace.msh`` before
+                writing the script.
+            **sbatch_kwargs: Additional keyword arguments forwarded to
+                ``profile.to_sbatch_spec``.
+
+        Returns:
+            Paths to the generated script and handoff metadata sidecar.
+
+        Raises:
+            ValueError: If ``set_output_dir()`` has not been called or
+                lower-level handoff validation rejects the request.
+            FileNotFoundError: If input validation is enabled and Palace inputs
+                are absent.
         """
         if self._output_dir is None:
             raise ValueError("Output directory not set. Call set_output_dir() first.")
@@ -2397,6 +2367,8 @@ class PalaceSimBase(BaseModel):
         rooted at the run-folder name. It does not run Palace or submit a job.
         It also does not load typed reports; callers enter the Resolve stage
         explicitly with ``resolve_palace_result(handle.run_folder, ...)``.
+        Profile, launcher, resource, and command metadata are recorded as
+        handoff intent only.
 
         Args:
             include_hashes: Include SHA-256 checksums for present artifacts.
@@ -2421,7 +2393,8 @@ class PalaceSimBase(BaseModel):
             profile: Optional resolved site/profile metadata.
             resources: Optional resource request metadata.
             command: Optional command metadata. When omitted, a minimal Palace
-                config/mesh command shape is recorded.
+                config/mesh command shape is recorded, or a redacted ``sbatch``
+                command is recorded when a profile and script are provided.
             metadata: Additional JSON-friendly handoff metadata.
             archive_path: Optional target archive path recorded in metadata.
 

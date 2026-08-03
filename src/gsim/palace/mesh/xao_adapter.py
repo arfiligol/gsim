@@ -1,10 +1,19 @@
-"""Mesh adapter for Semantic Geometry Builder XAO route geometry.
+"""Optional adapter for Semantic Geometry Builder XAO route geometry.
 
-This module is the handoff point between the standalone
+This module is a narrow handoff point between the standalone
 ``semantic_geometry_builder`` package and gsim's Palace mesh/config pipeline.
-The geometry builder owns route A/B/C topology and writes XAO plus
-``metadata/semantic_geometry`` sidecars. gsim owns meshing, Palace config,
-mesh manifests, and result/report semantics.
+SGB is not the native gsim geometry path: callers enter this adapter only when
+they explicitly request Surface EPR route A/B/C geometry or pass an existing SGB
+XAO plus ``metadata/semantic_geometry`` sidecar directory.
+
+The ownership split is contract-first. SGB owns route topology, physical-group
+plans, XAO export, and semantic sidecars. Today the interface ownership contract
+is encoded in final physical group names such as ``MA__...``, ``MS__...``, and
+``SA__...``; this adapter parses that grammar until SGB exports first-class
+interface fields. gsim owns mesh generation from that exported contract, Palace
+config generation, mesh manifests, and downstream result/report semantics. This
+adapter validates that the expected SGB files are present and fails loudly when
+the optional contract is unavailable or incomplete.
 """
 
 from __future__ import annotations
@@ -54,7 +63,6 @@ def generate_mesh_from_semantic_geometry_builder(
     ports: Sequence[PalacePort] = (),
     output_dir: str | Path,
     route: Literal["A", "B", "C"],
-    inset_margins_um: Sequence[float] | None,
     activated_regions: Sequence[ActivatedRegion],
     terminals: Sequence[TerminalConfig] = (),
     model_name: str = "palace",
@@ -87,7 +95,15 @@ def generate_mesh_from_semantic_geometry_builder(
     high_order_order: int = 2,
     high_order_optimize: bool = True,
 ) -> MeshResult:
-    """Build SGB route geometry, then mesh it through gsim's Palace pipeline."""
+    """Build optional SGB route geometry, then mesh the exported XAO.
+
+    This entrypoint is used only for explicit Surface EPR route A/B/C requests.
+    It lowers the gsim component/stack inputs into SGB's reviewed GDS plus stack
+    JSON contract, asks SGB to write the route XAO and semantic sidecars, and
+    then hands those artifacts back to gsim for mesh/config generation. Missing
+    SGB installation, missing component input, unsupported route names, or
+    absent route artifacts are hard failures rather than native-path fallbacks.
+    """
     if component is None:
         raise ValueError("SGB Surface EPR route meshing requires a component.")
     route = route.upper()  # type: ignore[assignment]
@@ -128,11 +144,7 @@ def generate_mesh_from_semantic_geometry_builder(
         gds_file=gds_path,
         stack_file=stack_path,
         top_cell_name=top_cell_name,
-        metadata={
-            "inset_breakpoints_um": tuple(inset_margins_um or (0.0, 0.05)),
-            "inset_routes": (route,),
-            "source": "gsim.semantic_geometry_builder",
-        },
+        metadata={"source": "gsim.semantic_geometry_builder"},
     )
     SemanticGeometryBuilder().build(
         build_input,
@@ -217,7 +229,15 @@ def generate_mesh_from_semantic_xao(
     high_order_order: int = 2,
     high_order_optimize: bool = True,
 ) -> MeshResult:
-    """Generate a Palace mesh from SGB XAO without mutating topology."""
+    """Generate a Palace mesh from an SGB XAO contract without retopologizing it.
+
+    The XAO and ``metadata/semantic_geometry/04_export_physical_groups.json``
+    sidecar are treated as the external input contract. gsim opens the exported
+    topology, maps live physical groups into its Palace ``groups`` schema,
+    applies mesh sizing/config generation, and preserves SGB identity in the
+    manifest metadata. It does not repair missing SGB sidecars or discover new
+    route semantics from native gsim geometry.
+    """
     xao = Path(xao_path)
     metadata_dir = Path(semantic_metadata_dir)
     run_folder = prepare_palace_run_folder(output_dir)
@@ -351,9 +371,7 @@ def _component_gds_top_cell_name(component: Any, path: Path) -> str | None:
             return candidate
 
     top_cells = [
-        cell.name
-        for cell in library.top_level()
-        if not cell.name.startswith("$$$")
+        cell.name for cell in library.top_level() if not cell.name.startswith("$$$")
     ]
     if len(top_cells) == 1:
         return top_cells[0]
@@ -693,10 +711,12 @@ def _groups_from_sgb_records(
     missing: list[str] = []
     for record in records:
         if not isinstance(record, Mapping):
-            continue
+            raise TypeError("SGB physical group records must be JSON objects.")
         name = str(record.get("physical_name", ""))
         dim = int(record.get("dimension", 0) or 0)
         if not name:
+            if record.get("solver_use") == "solver_active":
+                missing.append(f"{dim}:<missing physical_name>")
             continue
         if (dim, name) not in live:
             if record.get("solver_use") == "solver_active":
@@ -845,10 +865,29 @@ def _add_surface_group_records(
     record: Mapping[str, Any],
     semantic_layer_map: Mapping[str, str],
 ) -> None:
+    if str(record.get("role")) == "domain_boundary":
+        bbox = _entities_bbox(2, entity_tags)
+        groups["boundary_surfaces"][name] = {
+            "phys_group": phys_group,
+            "tags": list(entity_tags),
+            "dim": 2,
+            "source": "domain_boundary",
+            "surface_epr": False,
+            "representation": str(record.get("route", "")).upper(),
+            "geometry_kind": "sgb_occ",
+            "physical_group_attribute": phys_group,
+            "sgb_physical_name": name,
+            "sgb_role": record.get("role"),
+            "sgb_metadata": dict(record.get("metadata", {})),
+            "bbox": bbox,
+            "centroid": _bbox_centroid(bbox),
+        }
+        return
+
     parsed = _parse_surface_physical_name(name)
     if parsed is None:
         return
-    interface_type, source_id, face_kind, band_min, band_max, alias_name = parsed
+    interface_type, source_id, face_kind, alias_name = parsed
     layer = semantic_layer_map.get(source_id, source_id)
     bbox = _entities_bbox(2, entity_tags)
     info = {
@@ -866,10 +905,6 @@ def _add_surface_group_records(
         "face_kind": face_kind,
         "representation": str(record.get("route", "")).upper(),
         "geometry_kind": "sgb_occ",
-        "surface_epr_summary_kind": "core" if band_max is None else "band",
-        "surface_epr_band_min_um": band_min,
-        "surface_epr_band_max_um": band_max,
-        "surface_epr_exclude_below_um": band_min,
         "physical_group_attribute": phys_group,
         "sgb_physical_name": name,
         "sgb_role": record.get("role"),
@@ -898,43 +933,35 @@ def _add_surface_group_records(
 
 def _parse_surface_physical_name(
     name: str,
-) -> tuple[str, str, str | None, float, float | None, str] | None:
+) -> tuple[str, str, str | None, str] | None:
+    """Parse the current SGB interface physical-name grammar.
+
+    SGB does not yet export explicit ``interface_type``, ``source_id``, and
+    ``face_kind`` fields on final physical group records. Until that sidecar
+    grows those fields, names beginning with ``MA__``, ``MS__``, ``SA__``, or
+    ``MS_MA__`` are the reviewed SGB-to-gsim interface contract.
+    """
     parts = name.split("__")
     if len(parts) < 3 or parts[0] not in _SURFACE_EPR_INTERFACE_TYPES:
         return None
-    semantic_parts, band_min, band_max = _split_surface_name_segments(parts)
     prefix = parts[0]
     if prefix == "MS_MA":
         source_id = parts[1]
         alias = "MS__" + "__".join(parts[1:])
-        return ("MS", source_id, "bottom", band_min, band_max, alias)
+        return ("MS", source_id, "bottom", alias)
     interface_type = prefix
     face_kind = next(
-        (
-            _FACE_KIND_SEGMENTS[item]
-            for item in semantic_parts
-            if item in _FACE_KIND_SEGMENTS
-        ),
+        (_FACE_KIND_SEGMENTS[item] for item in parts if item in _FACE_KIND_SEGMENTS),
         None,
     )
     if interface_type == "SA" and face_kind is None:
         face_kind = "top"
     if interface_type in {"MA", "MS"}:
-        source_id = semantic_parts[1]
+        source_id = parts[1]
     else:
-        source_parts = _semantic_source_parts(semantic_parts[1:])
+        source_parts = _semantic_source_parts(parts[1:])
         source_id = "__".join(source_parts)
-    return (interface_type, source_id, face_kind, band_min, band_max, name)
-
-
-def _split_surface_name_segments(
-    parts: Sequence[str],
-) -> tuple[Sequence[str], float, float | None]:
-    label = parts[-1]
-    if label.startswith(("RING_", "CORE_AFTER_")):
-        band_min, band_max = _parse_band_label(label)
-        return parts[:-1], band_min, band_max
-    return parts, 0.0, None
+    return (interface_type, source_id, face_kind, name)
 
 
 def _semantic_source_parts(parts: Sequence[str]) -> Sequence[str]:
@@ -944,24 +971,6 @@ def _semantic_source_parts(parts: Sequence[str]) -> Sequence[str]:
     ):
         source_parts.pop()
     return tuple(source_parts)
-
-
-def _parse_band_label(label: str) -> tuple[float, float | None]:
-    if label.startswith("RING_"):
-        start, end = label.removeprefix("RING_").split("_", 1)
-        return _length_label_um(start), _length_label_um(end)
-    if label.startswith("CORE_AFTER_"):
-        return _length_label_um(label.removeprefix("CORE_AFTER_")), None
-    raise ValueError(f"Unsupported SGB Surface EPR band label: {label!r}.")
-
-
-def _length_label_um(label: str) -> float:
-    upper = label.upper()
-    if upper.endswith("NM"):
-        return float(upper.removesuffix("NM")) / 1000.0
-    if upper.endswith("UM"):
-        return float(upper.removesuffix("UM"))
-    raise ValueError(f"Unsupported length label: {label!r}.")
 
 
 def _entities_bbox(dim: int, entity_tags: Sequence[int]) -> list[float]:

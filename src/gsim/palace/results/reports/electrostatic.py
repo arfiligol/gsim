@@ -1,4 +1,13 @@
-"""Electrostatic Problem Type Report model."""
+"""Electrostatic Problem Type Report model.
+
+This module owns the semantic aggregate for a completed Palace Electrostatic
+run: terminal matrices, adaptive-pass matrix convergence, optional indexed
+postprocessing tables, and source/sample-grouped EPR loss summaries. It does
+not parse raw solver files, discover run folders, generate postprocessing
+configs, or define plotting primitives. Resolve assembly constructs this
+report, Typed Data objects own their table/figure semantics, and Display owns
+generic rendering.
+"""
 
 from __future__ import annotations
 
@@ -22,6 +31,9 @@ class ElectrostaticReport(BasePalaceReport):
     Electrostatic loss is source/sample grouped: it derives dielectric and
     material participation from electrostatic postprocessing tables, optionally
     using an external frequency to express inverse-Q and equivalent loss rates.
+    Required terminal capacitance data is supplied by Resolve assembly;
+    optional EPR/loss tables remain empty when Palace did not produce their
+    source reports.
     """
 
     terminal_c: TerminalMatrix
@@ -35,6 +47,7 @@ class ElectrostaticReport(BasePalaceReport):
     surface_interface_summary: pd.DataFrame
     domain_epr_loss: DomainLoss
     surface_epr_loss: SurfaceLoss
+    domain_epr_convergence: pd.DataFrame
     surface_epr_convergence: pd.DataFrame
     loss_budget_result: LossBudget
 
@@ -142,6 +155,7 @@ class ElectrostaticReport(BasePalaceReport):
         return ReportLoss(
             domain=self.domain_epr_loss,
             surface=self.surface_epr_loss,
+            domain_convergence=self.domain_epr_convergence,
             surface_convergence=self.surface_epr_convergence,
             budget=self.loss_budget_result,
         )

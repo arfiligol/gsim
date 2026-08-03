@@ -244,29 +244,33 @@ def test_electrostatic_report_aggregates_terminal_matrix_visualizers(
 def test_electrostatic_report_adds_surface_epr_convergence_plot(
     tmp_path: Path,
 ) -> None:
-    """Electrostatic loss display owns Surface EPR convergence presentation."""
+    """Electrostatic loss display owns EPR convergence presentation."""
     source = _write_electrostatic_fixture(tmp_path)
     report = load_electrostatic_report(source)
 
     items = report.result_items()
 
-    figure = items["surface_epr_inset_convergence_trace_plot"]
+    domain_figure = items["domain_epr_convergence_trace_plot"]
+    assert {trace.name for trace in domain_figure.data} == {"source 1 substrate"}
+    for trace in domain_figure.data:
+        assert list(trace.x) == [1, 2, 3]
+
+    figure = items["surface_epr_convergence_trace_plot"]
     assert {trace.name for trace in figure.data} == {
-        "MA inset >= 100 nm",
-        "MS inset >= 50 nm",
-        "MS total",
+        "source 1 surface 2 i=1 MS MS:metal__substrate",
+        "source 1 surface 3 i=1 MS MS:metal__air",
+        "source 1 surface 4 i=1 MA MA:metal__air",
     }
     for trace in figure.data:
-        assert list(trace.x) == [1, 2]
+        assert list(trace.x) == [1, 2, 3]
     summary = items["surface_epr_summary_table"]
     assert "loss_channel" not in summary.columns
-    assert "surface_epr_summary_kind" not in summary.columns
-    assert "surface_epr_exclude_below_um" not in summary.columns
-    assert summary["interface_type"].tolist() == ["MS"]
+    assert set(summary["interface_type"]) == {"MS", "MA"}
+    assert "attributes" in summary.columns
 
 
-def test_surface_epr_summary_table_keeps_total_and_legacy_rows() -> None:
-    """Surface summary tables hide inset detail but keep old non-inset rows."""
+def test_surface_epr_summary_table_keeps_source_provenance() -> None:
+    """Surface summary tables keep resolved source provenance."""
     import pandas as pd
 
     loss = ReportLoss(
@@ -275,10 +279,10 @@ def test_surface_epr_summary_table_keeps_total_and_legacy_rows() -> None:
             pd.DataFrame(
                 {
                     "source_index": [1, 2],
+                    "physical_name": ["MS:left", "MS:right"],
+                    "attributes": [(20,), (21,)],
                     "interface_type": ["MS", "MS"],
                     "loss_channel": ["MS", "MS"],
-                    "surface_epr_summary_kind": ["total", "exclude_below"],
-                    "surface_epr_exclude_below_um": [0.0, 0.05],
                     "p_surf": [1.0e-7, 2.0e-7],
                 }
             )
@@ -303,8 +307,10 @@ def test_surface_epr_summary_table_keeps_total_and_legacy_rows() -> None:
     table = loss.tables()["surface_epr_summary_table"]
     legacy_table = legacy_loss.tables()["surface_epr_summary_table"]
 
-    assert table["participation"].tolist() == pytest.approx([1.0e-7])
+    assert table["participation"].tolist() == pytest.approx([1.0e-7, 2.0e-7])
     assert "loss_channel" not in table.columns
+    assert table["physical_name"].tolist() == ["MS:left", "MS:right"]
+    assert table["attributes"].tolist() == [(20,), (21,)]
     assert legacy_table["participation"].tolist() == pytest.approx([1.0e-7])
 
 
@@ -775,6 +781,15 @@ def _write_electrostatic_fixture(source: Path) -> Path:
                         "terminal_name": "right",
                     },
                     {
+                        "section": "Domains.Postprocessing.Energy",
+                        "index": 1,
+                        "entry_name": "substrate",
+                        "role": "dielectric_volume",
+                        "attributes": [1],
+                        "physical_names": ["substrate"],
+                        "dimension": 3,
+                    },
+                    {
                         "section": "Boundaries.Postprocessing.Dielectric",
                         "index": 2,
                         "entry_name": "ms_total",
@@ -785,38 +800,32 @@ def _write_electrostatic_fixture(source: Path) -> Path:
                         "metadata": {
                             "loss_channel": "MS",
                             "source_entry_name": "metal",
-                            "surface_epr_summary_kind": "total",
-                            "surface_epr_exclude_below_um": 0.0,
                         },
                     },
                     {
                         "section": "Boundaries.Postprocessing.Dielectric",
                         "index": 3,
-                        "entry_name": "ms_inset",
+                        "entry_name": "ms_air",
                         "role": "boundary_surface",
                         "attributes": [21],
-                        "physical_names": ["MS:metal__substrate_inset"],
+                        "physical_names": ["MS:metal__air"],
                         "dimension": 2,
                         "metadata": {
                             "loss_channel": "MS",
                             "source_entry_name": "metal",
-                            "surface_epr_summary_kind": "exclude_below",
-                            "surface_epr_exclude_below_um": 0.05,
                         },
                     },
                     {
                         "section": "Boundaries.Postprocessing.Dielectric",
                         "index": 4,
-                        "entry_name": "ma_inset",
+                        "entry_name": "ma_air",
                         "role": "boundary_surface",
                         "attributes": [22],
-                        "physical_names": ["MA:metal__substrate_inset"],
+                        "physical_names": ["MA:metal__air"],
                         "dimension": 2,
                         "metadata": {
                             "loss_channel": "MA",
                             "source_entry_name": "metal",
-                            "surface_epr_summary_kind": "exclude_below",
-                            "surface_epr_exclude_below_um": 0.1,
                         },
                     },
                 ],
@@ -825,15 +834,24 @@ def _write_electrostatic_fixture(source: Path) -> Path:
     )
     _write_terminal_c(iteration_dir / "terminal-C.csv", scale=1.0)
     _write_terminal_c(palace_dir / "terminal-C.csv", scale=2.0)
+    (iteration_dir / "domain-E.csv").write_text(
+        "i, E_elec[1] (J), p_elec[1]\n1, 1.0, 0.2\n"
+    )
     (iteration_dir / "surface-Q.csv").write_text(
         "i, p_surf[2], Q_surf[2], p_surf[3], Q_surf[3], p_surf[4], Q_surf[4]\n"
         "1, 1.0e-7, 1.0e7, 2.0e-7, 5.0e6, 3.0e-7, 3.333333e6\n"
     )
     iteration_dir_2 = palace_dir / "iteration02"
     iteration_dir_2.mkdir()
+    (iteration_dir_2 / "domain-E.csv").write_text(
+        "i, E_elec[1] (J), p_elec[1]\n1, 1.5, 0.3\n"
+    )
     (iteration_dir_2 / "surface-Q.csv").write_text(
         "i, p_surf[2], Q_surf[2], p_surf[3], Q_surf[3], p_surf[4], Q_surf[4]\n"
         "1, 2.0e-7, 5.0e6, 3.0e-7, 3.333333e6, 4.0e-7, 2.5e6\n"
+    )
+    (palace_dir / "domain-E.csv").write_text(
+        "i, E_elec[1] (J), p_elec[1]\n1, 2.0, 0.3\n"
     )
     (palace_dir / "surface-Q.csv").write_text(
         "i, p_surf[2], Q_surf[2], p_surf[3], Q_surf[3], p_surf[4], Q_surf[4]\n"

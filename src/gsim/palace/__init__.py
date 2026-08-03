@@ -1,4 +1,4 @@
-"""Notebook-friendly Palace simulation facade.
+"""Notebook-facing facade for Palace simulation, Resolve, and Results.
 
 The package root exposes the small public surface users need for notebooks:
 problem-specific simulation classes, mesh generation entrypoints, the Resolve
@@ -18,8 +18,10 @@ Implementation responsibility is intentionally below the root:
 * ``gsim.palace.handoff`` owns Palace archive/script packaging around that
   run folder. AEDT/HFSS export and result packaging belong to public PDK code,
   not to this package.
-* ``gsim.palace.resolve`` adapts Palace run folders/cloud mappings into
-  resolved source-audit objects and report bundles.
+* ``gsim.palace.resolve`` adapts completed Palace run folders/cloud mappings
+  into source-audit objects. Its root entrypoint is
+  ``resolve_palace_result(...)``; report loading remains an explicit second
+  step through ``PalaceResolvedResult.load_report(...)``.
 * ``gsim.palace.results`` owns semantic Typed Data and Problem Type Reports.
 * ``gsim.palace.display`` owns generic table/plot primitives used by Typed
   Data visualizers.
@@ -28,6 +30,9 @@ Implementation responsibility is intentionally below the root:
 The root does not expose direct problem-specific report loaders. Review code
 should use ``resolve_palace_result(...).load_report()`` so the source audit,
 typed report construction, and concrete report type remain visible.
+Missing artifacts are represented by the Resolve summary until callers choose
+``require_report=True`` or call ``require_report()``, which raise instead of
+returning placeholder reports.
 
 Usage:
     from gsim.palace import DrivenSim

@@ -93,7 +93,40 @@ def generate_palace_handoff_package(
     metadata: Mapping[str, Any] | None = None,
     archive_path: str | Path | None = None,
 ) -> PalaceRunHandle:
-    """Package a canonical Palace run folder and return a Run Stage handle."""
+    """Package a Palace run folder for external execution.
+
+    This is the Run Stage assembly point used by ``PalaceSimBase``. It ensures
+    the canonical directory skeleton exists, writes handoff metadata, creates
+    the archive manifest and tarball through ``gsim.palace.handoff``, and
+    returns a lightweight handle for later Resolve-stage loading.
+
+    Args:
+        run_folder: Existing Palace run folder or typed run-folder view.
+        simulation_type: Problem type used to annotate the returned handle.
+        include_hashes: Include SHA-256 checksums in the archive manifest.
+        include_results: Include already-present solver outputs in the archive.
+        status: Handoff metadata status recorded in the sidecar.
+        launcher: Optional launcher metadata, for example Slurm submission
+            intent. This function records it but does not submit jobs.
+        script_path: Optional run-folder-relative launcher script path to
+            include in metadata and the archive manifest.
+        profile: Optional mapping or resolved Slurm profile metadata.
+        resources: Optional resource metadata. If omitted and ``profile`` has
+            resource details, those are recorded as requested resources.
+        command: Optional redacted command metadata.
+        metadata: Additional JSON-friendly package metadata.
+        archive_path: Optional target tarball path. Relative paths are resolved
+            beside the run folder by the lower-level handoff helper.
+
+    Returns:
+        Run-stage handle pointing at the packaged folder, metadata sidecar,
+        archive manifest, optional script, and archive path.
+
+    Raises:
+        TypeError: If ``profile`` is neither a mapping nor a resolved profile.
+        ValueError: If archive paths or generated manifest entries violate the
+            lower-level handoff package contract.
+    """
     folder = (
         prepare_palace_run_folder(run_folder.root)
         if isinstance(run_folder, PalaceRunFolder)

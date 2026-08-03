@@ -135,12 +135,24 @@ def indexed_column_provenance(
     index_name: str,
 ) -> dict[str, Any]:
     """Return physical-name provenance for one indexed Palace CSV column."""
-    source_name = column.physical_name or column.entry_name or f"Index {column.index}"
+    metadata = dict(column.metadata)
+    source_name = _metadata_string(metadata, "source_name")
+    if source_name is None:
+        source_name = _metadata_string(metadata, "source_entry_name")
+    if source_name is None:
+        source_name = _metadata_string(metadata, "source")
+    if source_name is None:
+        source_name = (
+            column.physical_name or column.entry_name or f"Index {column.index}"
+        )
+    physical_name = _metadata_string(metadata, "physical_name")
+    if physical_name is None:
+        physical_name = column.physical_name
     row: dict[str, Any] = {
         index_name: column.index,
         "section": column.section,
         "source_name": source_name,
-        "physical_name": column.physical_name,
+        "physical_name": physical_name,
         "entry_name": column.entry_name,
         "role": column.role,
         "attributes": column.attributes,
@@ -154,6 +166,13 @@ def indexed_column_provenance(
     if postprocessing_type is not None and interface_type is None:
         row["postprocessing_type"] = postprocessing_type
     return row
+
+
+def _metadata_string(metadata: dict[str, Any], key: str) -> str | None:
+    value = metadata.get(key)
+    if isinstance(value, str) and value:
+        return value
+    return None
 
 
 def interface_type_for_column(column: IndexedCsvColumn) -> str | None:

@@ -1,4 +1,12 @@
-"""Eigenmode Problem Type Report model."""
+"""Eigenmode Problem Type Report model.
+
+This module owns the semantic aggregate for a completed Palace Eigenmode run:
+final mode rows, adaptive-pass convergence, optional indexed postprocessing
+tables, and mode-indexed loss summaries. It does not parse raw solver files,
+discover run folders, or define plotting primitives. Resolve assembly
+constructs this report, Typed Data objects own their table/figure semantics,
+and Display owns generic rendering.
+"""
 
 from __future__ import annotations
 
@@ -25,6 +33,8 @@ class EigenmodeReport(BasePalaceReport):
 
     Eigenmode loss is mode-indexed: domain and surface loss rows are tied to
     eigenmodes, and the budget summarizes inverse-Q contributions per mode.
+    Required eigenmode data is supplied by Resolve assembly; optional EPR/loss
+    tables remain empty when Palace did not produce their source reports.
     """
 
     eigenmodes: Eigenmodes

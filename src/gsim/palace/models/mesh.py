@@ -5,7 +5,6 @@ This module contains Pydantic models for mesh generation configuration.
 
 from __future__ import annotations
 
-import math
 from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -53,16 +52,10 @@ class MeshConfig(BaseModel):
     surface_epr_representation: Literal["A", "B", "C"] = Field(
         default="B",
         description=(
-            "Surface EPR route representation: A/B/C share Full-3D "
-            "interface discovery; A/B remove conductor volumes during final "
-            "topology materialization, C keeps them."
-        ),
-    )
-    surface_epr_inset_margins_um: tuple[float, ...] = Field(
-        default=(0.0, 0.05),
-        description=(
-            "Surface EPR inset margins in um. 0 means total; positive values "
-            "define generated interface inset partitions."
+            "Optional SGB Surface EPR route contract. Native gsim meshing is "
+            "used unless the caller explicitly enables Surface EPR route "
+            "geometry; routes A/B/C are delegated to Semantic Geometry "
+            "Builder XAO plus sidecar artifacts."
         ),
     )
     merge_via_distance: float = Field(default=2.0, ge=0)
@@ -96,14 +89,6 @@ class MeshConfig(BaseModel):
                 "boundary_conditions",
                 ["ABC", "ABC", "ABC", "ABC", "ABC", "ABC"],
             )
-        margins = tuple(
-            sorted({float(value) for value in self.surface_epr_inset_margins_um})
-        )
-        if any(value < 0.0 or not math.isfinite(value) for value in margins):
-            raise ValueError("surface_epr_inset_margins_um values must be finite >= 0")
-        if 0.0 not in margins:
-            margins = (0.0, *margins)
-        object.__setattr__(self, "surface_epr_inset_margins_um", margins)
         object.__setattr__(
             self,
             "surface_epr_representation",
