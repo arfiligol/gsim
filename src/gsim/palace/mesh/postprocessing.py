@@ -405,7 +405,6 @@ def build_surface_epr_dielectric_specs(
         if getattr(surface, "interface_type", None) == base_spec.interface_type
         and (
             face_kind is None
-            or getattr(surface, "geometry_kind", None) == "sgb_occ"
             or getattr(surface, "face_kind", None) == face_kind
         )
     )

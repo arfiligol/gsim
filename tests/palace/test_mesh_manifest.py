@@ -1069,6 +1069,48 @@ def test_surface_epr_specs_group_total_surfaces_by_source() -> None:
     )
 
 
+def test_surface_epr_specs_filter_sgb_occ_surfaces_by_face_kind() -> None:
+    surfaces = (
+        SimpleNamespace(
+            interface_type="MA",
+            face_kind="top",
+            geometry_kind="sgb_occ",
+            source_id="sgb-occ-metal0",
+            metal_body_id="metal0",
+            physical_group_name="metal0__MA__TOP",
+            interface_id="metal0-ma-top",
+        ),
+        SimpleNamespace(
+            interface_type="MA",
+            face_kind="sidewall",
+            geometry_kind="sgb_occ",
+            source_id="sgb-occ-metal0",
+            metal_body_id="metal0",
+            physical_group_name="metal0__MA__SIDEWALL",
+            interface_id="metal0-ma-sidewall",
+        ),
+    )
+
+    specs = build_surface_epr_dielectric_specs(
+        surfaces,
+        preset_name="martinis2022_ma",
+        preset={
+            "interface_type": "MA",
+            "thickness": 0.002,
+            "permittivity": 9.8,
+            "loss_tangent": 0.005,
+            "source": "paper",
+        },
+        face_kind="top",
+    )
+
+    assert len(specs) == 1
+    assert specs[0].entry_names == ("metal0__MA__TOP",)
+    assert specs[0].entry_name == "metal0__MA__TOP"
+    assert specs[0].metadata["face_kind"] == "top"
+    assert specs[0].metadata["source_id"] == "sgb-occ-metal0"
+
+
 def test_interface_assignment_specs_allow_explicit_non_interface() -> None:
     manifest = build_mesh_manifest(_minimal_groups())
 
