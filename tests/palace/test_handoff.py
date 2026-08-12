@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 from pathlib import Path
 
@@ -46,9 +47,7 @@ def test_package_palace_run_handoff_archive_defaults_beside_run_folder(
 
     result = package_palace_run_handoff_archive(run_dir)
 
-    assert result.archive_path == (
-        tmp_path / "run_001-palace.tar.gz"
-    )
+    assert result.archive_path == (tmp_path / "run_001-palace.tar.gz")
 
 
 def test_resolve_palace_slurm_profile_accepts_mapping_and_overrides() -> None:
@@ -458,7 +457,8 @@ def test_write_palace_slurm_sbatch_handoff_round_trips_summary(
 
     script = result.script_path.read_text(encoding="utf-8")
     assert result.script_path.name == "run_palace.sbatch"
-    assert result.script_path.stat().st_mode & stat.S_IXUSR
+    if os.name != "nt":
+        assert result.script_path.stat().st_mode & stat.S_IXUSR
     assert "#SBATCH --account=public_alloc" in script
     assert "#SBATCH --partition=cpu" in script
     assert "#SBATCH --time=2-00:00:00" in script
@@ -675,7 +675,8 @@ def test_write_palace_slurm_sweep_array_handoff_round_trips_summary(
 
     script = result.script_path.read_text(encoding="utf-8")
     assert result.script_path.name == "run_sweep_array.sbatch"
-    assert result.script_path.stat().st_mode & stat.S_IXUSR
+    if os.name != "nt":
+        assert result.script_path.stat().st_mode & stat.S_IXUSR
     assert "#SBATCH --array=0-1%2" in script
     assert "#SBATCH --account=public_alloc" in script
     assert "POINTS_CSV=points.csv" in script

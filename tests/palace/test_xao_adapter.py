@@ -22,6 +22,11 @@ def test_domain_boundary_surface_records_map_to_boundary_surfaces(monkeypatch):
         "_live_physical_groups",
         lambda: {(2, "BOUNDARY__outer"): (7, (101, 102))},
     )
+    monkeypatch.setattr(
+        xao_adapter.gmsh.model,
+        "getBoundingBox",
+        lambda _dimension, _tag: (0.0, 0.0, 0.0, 10.0, 20.0, 30.0),
+    )
     groups = xao_adapter._groups_from_sgb_records(
         records=records,
         semantic_layer_map={},
@@ -34,6 +39,7 @@ def test_domain_boundary_surface_records_map_to_boundary_surfaces(monkeypatch):
 
     assert boundary_info["surface_epr"] is False
     assert boundary_info["source"] == "domain_boundary"
+    assert boundary_info["bbox"] == [0.0, 0.0, 0.0, 10.0, 20.0, 30.0]
     assert "interface_type" not in boundary_info
 
     catalog = surface_epr_catalog.build_interface_surface_catalog(groups)

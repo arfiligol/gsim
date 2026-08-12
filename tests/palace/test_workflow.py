@@ -938,52 +938,17 @@ class TestElectrostaticSimWorkflow:
         mesh_path = Path(electrostatic_sim._output_dir) / "palace.msh"
         assert mesh_path.exists()
 
-    def test_write_config_generates_valid_json(self, electrostatic_sim):
-        """Electrostatic config generation produces valid Palace JSON."""
-        electrostatic_sim.write_config()
-        config_path = Path(electrostatic_sim._output_dir) / "config.json"
-        assert config_path.exists()
-        config = json.loads(config_path.read_text())
-        assert config["Problem"]["Type"] == "Electrostatic"
-        assert "Electrostatic" in config["Solver"]
-        boundaries = config["Boundaries"]
-        assert "Terminal" in boundaries
-        assert len(boundaries["Terminal"]) == 2
-        # Each terminal must have at least one attribute (regression: planar
-        # conductor terminals were silently grounded when the loop only
-        # scanned conductor_surfaces).
-        for term in boundaries["Terminal"]:
-            assert term["Attributes"], (
-                f"Terminal {term['Index']} has no attributes — "
-                "likely a layer/surface lookup miss"
-            )
-        assert "LumpedPort" not in boundaries
-        assert "WavePort" not in boundaries
+    def test_write_config_rejects_duplicate_same_layer_terminals(
+        self, electrostatic_sim
+    ):
+        """Duplicate same-layer terminal selectors fail closed."""
+        with pytest.raises(ValueError, match="already selected"):
+            electrostatic_sim.write_config()
 
-        index_map_path = (
-            Path(electrostatic_sim._output_dir) / "metadata" / "palace_index_map.json"
-        )
-        assert index_map_path.exists()
-        index_map = json.loads(index_map_path.read_text())
-        terminal_rows = [
-            row
-            for row in index_map["entries"]
-            if row["section"] == "Boundaries.Terminal"
-        ]
-        assert {row["index"] for row in terminal_rows} == {1, 2}
-        assert {row["terminal_name"] for row in terminal_rows} == {"T1", "T2"}
-
-    def test_planar_conductor_terminal_not_grounded(
+    def test_planar_conductor_rejects_duplicate_same_layer_terminals(
         self, tmp_path_factory, cpw_component
     ):
-        """Terminals on planar (thin) conductor layers must be picked up.
-
-        Regression: the terminal loop previously only scanned
-        ``conductor_surfaces`` (thick metals with shell surfaces) and
-        seeded ``ground_attrs`` with ``pec_attrs``. A terminal defined on
-        a planar layer therefore ended up with empty attributes and the
-        layer's PG was sent to Ground instead.
-        """
+        """Duplicate planar-conductor terminal selectors fail closed."""
         tmp_path = tmp_path_factory.mktemp("electrostatic_planar")
         sim = ElectrostaticSim()
         sim.set_output_dir(str(tmp_path / "palace-sim"))
@@ -993,21 +958,8 @@ class TestElectrostaticSimWorkflow:
         sim.add_terminal("T2", layer="metal1")
         sim.set_electrostatic()
         sim.mesh(preset="coarse", planar_conductors=True)
-        sim.write_config()
-
-        output_dir = sim._output_dir
-        assert output_dir is not None
-        config = json.loads((Path(output_dir) / "config.json").read_text())
-        boundaries = config["Boundaries"]
-        terminal_attrs: set[int] = set()
-        for term in boundaries["Terminal"]:
-            assert term["Attributes"], "Planar-conductor terminal has no attributes"
-            terminal_attrs.update(term["Attributes"])
-        # And the terminal's PG must not also appear in Ground.
-        ground_attrs = set(boundaries.get("Ground", {}).get("Attributes", []))
-        assert terminal_attrs.isdisjoint(ground_attrs), (
-            f"Terminal attrs {terminal_attrs} overlap Ground {ground_attrs}"
-        )
+        with pytest.raises(ValueError, match="already selected"):
+            sim.write_config()
 
     def test_same_layer_planar_terminals_can_select_islands_by_center(
         self,
