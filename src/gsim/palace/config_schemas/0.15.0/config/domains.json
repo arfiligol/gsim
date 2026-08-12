@@ -4,126 +4,103 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["Materials"],
-  "properties":
-  {
-    "Materials":
-    {
+  "properties": {
+    "Materials": {
       "type": "array",
       "additionalItems": false,
-      "items":
-      {
+      "items": {
         "type": "object",
         "additionalProperties": false,
         "required": ["Attributes"],
-        "properties":
-        {
+        "properties": {
           "Attributes": { "$ref": "#/$defs/Attributes" },
-          "Permeability":
-          {
-            "oneOf" :
-            [
-              {"type": "number" },
+          "Permeability": {
+            "oneOf": [
+              { "type": "number" },
               {
                 "type": "array",
-                "items" : { "type" :"number" },
-                "minItems" : 3,
-                "maxItems" : 3
+                "items": { "type": "number" },
+                "minItems": 3,
+                "maxItems": 3
               }
             ]
           },
-          "Permittivity":
-          {
-            "oneOf" :
-            [
-              {"type": "number" },
+          "Permittivity": {
+            "oneOf": [
+              { "type": "number" },
               {
                 "type": "array",
-                "items" : { "type" :"number" },
-                "minItems" : 3,
-                "maxItems" : 3
+                "items": { "type": "number" },
+                "minItems": 3,
+                "maxItems": 3
               }
             ]
           },
-          "LossTan":
-          {
-            "oneOf" :
-            [
-              {"type": "number" },
+          "LossTan": {
+            "oneOf": [
+              { "type": "number" },
               {
                 "type": "array",
-                "items" : { "type" :"number" },
-                "minItems" : 3,
-                "maxItems" : 3
+                "items": { "type": "number" },
+                "minItems": 3,
+                "maxItems": 3
               }
             ]
           },
-          "Conductivity":
-          {
-            "oneOf" :
-            [
-              {"type": "number" },
+          "Conductivity": {
+            "oneOf": [
+              { "type": "number" },
               {
                 "type": "array",
-                "items" : { "type" :"number" },
-                "minItems" : 3,
-                "maxItems" : 3
+                "items": { "type": "number" },
+                "minItems": 3,
+                "maxItems": 3
               }
             ]
           },
           "LondonDepth": { "type": "number" },
-          "MaterialAxes":
-          {
-            "type" : "array",
-            "items" :
-            {
-              "type" : "array",
-              "items" : "number",
-              "minItems" : 3,
-              "maxItems" : 3
+          "MaterialAxes": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": "number",
+              "minItems": 3,
+              "maxItems": 3
             },
-            "minItems" : 3,
-            "maxItems" : 3
+            "minItems": 3,
+            "maxItems": 3
           }
         }
       }
     },
-    "Postprocessing":
-    {
+    "Postprocessing": {
       "type": "object",
       "additionalProperties": false,
       "required": [],
-      "properties":
-      {
-        "Energy":
-        {
+      "properties": {
+        "Energy": {
           "type": "array",
           "additionalItems": false,
-          "items":
-          {
+          "items": {
             "type": "object",
             "additionalProperties": false,
             "required": ["Index", "Attributes"],
-            "properties":
-            {
+            "properties": {
               "Index": { "type": "integer" },
               "Attributes": { "$ref": "#/$defs/Attributes" }
             }
           }
         },
-        "Probe":
-        {
+        "Probe": {
           "type": "array",
           "additionalItems": false,
-          "items":
-          {
+          "items": {
             "type": "object",
             "additionalProperties": false,
             "required": ["Index", "Center"],
-            "properties":
-            {
+            "properties": {
               "Index": { "type": "integer" },
-              "Center":
-              {
+              "Center": {
                 "type": "array",
                 "additionalItems": false,
                 "items": { "type": "number" },
@@ -136,13 +113,11 @@
       }
     }
   },
-  "$defs":
-  {
-    "Attributes":
-    {
+  "$defs": {
+    "Attributes": {
       "type": "array",
       "additionalItems": false,
-      "items": { "type": "integer"},
+      "items": { "type": "integer" },
       "minItems": 1
     }
   }

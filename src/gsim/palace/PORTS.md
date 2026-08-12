@@ -39,42 +39,35 @@ layers, similar to how a via connects layers.
 A lumped port is a **2D surface** with:
 
 - `R` = impedance (typically 50Ω)
-- `Direction` = positive solver field/polarization direction as a unit
-  Cartesian vector
+- `Direction` = positive solver field/polarization direction as a unit Cartesian vector
 
 Palace integrates the E-field across this surface to compute voltage. The port acts as a lumped resistor connected
 between whatever conductors touch the port surface.
 
-`gsim` accepts legacy Manhattan labels such as `X`, `+X`, and `-Y` on
-`add_port(direction=...)`, but normalizes them to vectors such as
-`[1.0, 0.0, 0.0]` before writing Palace config. Arbitrary finite nonzero
-3-vectors are accepted and normalized. Radial labels (`+R`, `-R`) are not valid
-for LumpedPort v1; they remain specific to current-source models.
+`gsim` accepts legacy Manhattan labels such as `X`, `+X`, and `-Y` on `add_port(direction=...)`, but normalizes them to
+vectors such as `[1.0, 0.0, 0.0]` before writing Palace config. Arbitrary finite nonzero 3-vectors are accepted and
+normalized. Radial labels (`+R`, `-R`) are not valid for LumpedPort v1; they remain specific to current-source models.
 
-`Direction` is solver intent only. Generated port-sheet geometry is determined
-from the GDSFactory port `center`, `width`, `orientation`, and layer. Changing
-`direction` does not rotate or resize the generated sheet.
+`Direction` is solver intent only. Generated port-sheet geometry is determined from the GDSFactory port `center`,
+`width`, `orientation`, and layer. Changing `direction` does not rotate or resize the generated sheet.
 
 ## Port Sheet Geometry Sources
 
-`gsim` supports two horizontal sheet sources for in-plane LumpedPorts and CPW
-LumpedPort elements:
+`gsim` supports two horizontal sheet sources for in-plane LumpedPorts and CPW LumpedPort elements:
 
-1. Generated sheets: `generate_sheet=True` (default). Mesh generation creates
-   the solver sheet from the GDSFactory port anchor.
-1. Layout-authored sheets: `generate_sheet=False`. Mesh generation selects an
-   existing polygon from a PDK-declared simulation layer catalog.
+1. Generated sheets: `generate_sheet=True` (default). Mesh generation creates the solver sheet from the GDSFactory port
+   anchor.
+1. Layout-authored sheets: `generate_sheet=False`. Mesh generation selects an existing polygon from a PDK-declared
+   simulation layer catalog.
 
-The high-level port declaration stays the same in both cases. `add_port()` and
-`add_cpw_port()` declare solver port intent; `set_simulation_layers()` supplies
-PDK-owned simulation-only layer meaning; mesh generation owns selecting or
-creating the final solver boundary surface. Config generation only receives the
-resulting physical group.
+The high-level port declaration stays the same in both cases. `add_port()` and `add_cpw_port()` declare solver port
+intent; `set_simulation_layers()` supplies PDK-owned simulation-only layer meaning; mesh generation owns selecting or
+creating the final solver boundary surface. Config generation only receives the resulting physical group.
 
 ### Layout-Authored Horizontal Sheets
 
-Use layout-authored sheets when the port sheet is too geometry-specific for a
-generic rectangle. The PDK/project passes a catalog:
+Use layout-authored sheets when the port sheet is too geometry-specific for a generic rectangle. The PDK/project passes
+a catalog:
 
 ```python
 sim.set_simulation_layers(
@@ -87,9 +80,8 @@ sim.set_simulation_layers(
 )
 ```
 
-Then the component port used by `add_port()` must live on that simulation
-layer. Passing `generate_sheet=False` tells mesh generation to select the
-unique polygon on that layer that covers the port center:
+Then the component port used by `add_port()` must live on that simulation layer. Passing `generate_sheet=False` tells
+mesh generation to select the unique polygon on that layer that covers the port center:
 
 ```python
 sim.add_port(
@@ -100,20 +92,18 @@ sim.add_port(
 )
 ```
 
-The `layer` argument remains the target stack/material layer. The authored
-sheet layer comes from `component.ports["o1"].layer` and must be registered in
-the simulation layer catalog. If no catalog is set, the port layer is not in the
-catalog, or the port center matches zero or multiple polygons, meshing fails.
+The `layer` argument remains the target stack/material layer. The authored sheet layer comes from
+`component.ports["o1"].layer` and must be registered in the simulation layer catalog. If no catalog is set, the port
+layer is not in the catalog, or the port center matches zero or multiple polygons, meshing fails.
 
-Via ports remain generated vertical sheets because their geometry spans between
-`from_layer` and `to_layer` in z rather than selecting a horizontal GDS polygon.
+Via ports remain generated vertical sheets because their geometry spans between `from_layer` and `to_layer` in z rather
+than selecting a horizontal GDS polygon.
 
 ## Generated Port Geometry
 
 ### In-Plane Ports: Oriented Rectangle
 
-In-plane lumped ports generate a rectangular sheet in the XY plane from the
-GDSFactory port metadata:
+In-plane lumped ports generate a rectangular sheet in the XY plane from the GDSFactory port metadata:
 
 ```python
 center = port.center
@@ -122,16 +112,14 @@ orientation = port.orientation
 length = palace_port.length
 ```
 
-The sheet length follows `orientation`; the sheet width is transverse to
-`orientation`. This supports non-Manhattan GDSFactory ports without coupling
-sheet rotation to the solver `Direction` vector.
+The sheet length follows `orientation`; the sheet width is transverse to `orientation`. This supports non-Manhattan
+GDSFactory ports without coupling sheet rotation to the solver `Direction` vector.
 
 ### Via Ports: Line Expected
 
 Via ports expect essentially a line in the GDS:
 
-- The GDSFactory port orientation determines whether the vertical sheet spans
-  XZ or YZ
+- The GDSFactory port orientation determines whether the vertical sheet spans XZ or YZ
 - The port surface is created vertically between the two layers
 
 ## Transmission Line Configurations
@@ -245,8 +233,7 @@ The port rectangle represents exactly this: the cross-section where your virtual
 
 ## Multi-Element CPW Ports
 
-For proper CPW mode excitation, use `add_cpw_port()` with one GDSFactory port
-at the signal center:
+For proper CPW mode excitation, use `add_cpw_port()` with one GDSFactory port at the signal center:
 
 ```python
 from gsim.palace import DrivenSim
@@ -273,9 +260,7 @@ This generates a multi-element lumped port in Palace:
 
 1. **One port = one rectangle** defining the port surface
 1. **Port must touch both signal and ground** - it's the bridge between them
-1. **Direction** tells Palace the solver field/polarization direction and is
-   emitted as a normalized Cartesian vector
+1. **Direction** tells Palace the solver field/polarization direction and is emitted as a normalized Cartesian vector
 1. **In-plane ports** need actual area (rectangle), not just a line
 1. **Via ports** are for vertical connections between layers
-1. **CPW ports** need two elements with opposite transverse directions derived
-   from the GDSFactory port orientation
+1. **CPW ports** need two elements with opposite transverse directions derived from the GDSFactory port orientation

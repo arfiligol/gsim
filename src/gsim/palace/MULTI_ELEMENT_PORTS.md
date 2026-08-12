@@ -32,9 +32,8 @@ Palace supports this via multi-element ports:
 }
 ```
 
-`gsim` emits normalized Cartesian vectors for `Direction`. The two CPW element
-directions are opposite transverse vectors derived from the GDSFactory port
-orientation.
+`gsim` emits normalized Cartesian vectors for `Direction`. The two CPW element directions are opposite transverse
+vectors derived from the GDSFactory port orientation.
 
 ## Reference
 
@@ -61,8 +60,8 @@ sim.add_cpw_port(
 )
 ```
 
-If the two gap sheets are already drawn on a PDK-declared simulation layer,
-register that catalog and disable generated sheets:
+If the two gap sheets are already drawn on a PDK-declared simulation layer, register that catalog and disable generated
+sheets:
 
 ```python
 sim.set_simulation_layers(
@@ -78,20 +77,17 @@ sim.add_cpw_port(
 )
 ```
 
-The GDSFactory port named `"o1"` remains the signal-center anchor. Its layer
-must be the registered simulation layer, and mesh generation selects exactly one
-authored polygon at each computed gap center.
+The GDSFactory port named `"o1"` remains the signal-center anchor. Its layer must be the registered simulation layer,
+and mesh generation selects exactly one authored polygon at each computed gap center.
 
 ### How It Works
 
 1. `add_cpw_port()` selects one GDSFactory port at the signal center
 
    - Stores `palace_type='cpw'` in port info during mesh preparation
-   - Computes the two gap centers from signal width, gap width, and port
-     orientation
+   - Computes the two gap centers from signal width, gap width, and port orientation
 
-1. `extract_ports()` lowers the configured port into an internal
-   `models.PalacePort`
+1. `extract_ports()` lowers the configured port into an internal `models.PalacePort`
 
    - Each `models.PalacePort` has two gap centers
    - Element `Direction` values are opposite normalized transverse vectors
@@ -99,8 +95,8 @@ authored polygon at each computed gap center.
 1. Mesh generator creates separate surfaces for each element
 
    - Physical groups: `P1_E0`, `P1_E1` for port 1 elements
-   - Generated rectangles are rotated from the GDSFactory port orientation, or
-     layout-authored polygons are selected from registered simulation layers
+   - Generated rectangles are rotated from the GDSFactory port orientation, or layout-authored polygons are selected
+     from registered simulation layers
 
 1. Config generator outputs multi-element format:
 
@@ -121,5 +117,4 @@ authored polygon at each computed gap center.
 - `models/ports.py` - `PalacePort`, `PortType`, and `PortGeometry` contracts
 - `ports/lowering.py` - `configure_cpw_port()` and `extract_ports()`
 - `mesh/geometry.py` - `add_ports()` handles rotated CPW element surfaces
-- `mesh/config_generator.py` - emits the Palace `Elements` array with vector
-  directions
+- `mesh/config_generator.py` - emits the Palace `Elements` array with vector directions

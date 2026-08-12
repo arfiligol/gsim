@@ -183,10 +183,7 @@ def summarize_surface_loss(
         )
         if interface_row is not None:
             row.update(
-                {
-                    key: interface_row.get(key)
-                    for key in _SURFACE_INTERFACE_CONTEXT_KEYS
-                }
+                {key: interface_row.get(key) for key in _SURFACE_INTERFACE_CONTEXT_KEYS}
             )
             row["surface_attributes"] = interface_row.get("surface_attributes", ())
         rows.append(row)
@@ -284,11 +281,7 @@ def summarize_loss_channel_budget(loss_rows: pd.DataFrame) -> pd.DataFrame:
         if column in frame.columns and frame[column].notna().any()
     )
     sum_columns = [*groups, "loss_channel"]
-    budget = (
-        frame.groupby(sum_columns, dropna=False)["inverse_q"]
-        .sum()
-        .reset_index()
-    )
+    budget = frame.groupby(sum_columns, dropna=False)["inverse_q"].sum().reset_index()
     if groups:
         totals = budget.groupby(list(groups), dropna=False)["inverse_q"].transform(
             "sum"

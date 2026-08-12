@@ -403,10 +403,7 @@ def build_surface_epr_dielectric_specs(
         surface
         for surface in surfaces
         if getattr(surface, "interface_type", None) == base_spec.interface_type
-        and (
-            face_kind is None
-            or getattr(surface, "face_kind", None) == face_kind
-        )
+        and (face_kind is None or getattr(surface, "face_kind", None) == face_kind)
     )
     if not selected_surfaces:
         suffix = "" if face_kind is None else f" {face_kind}"

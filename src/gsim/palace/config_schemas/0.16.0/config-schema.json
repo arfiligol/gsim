@@ -5,8 +5,7 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["Problem", "Model", "Domains", "Boundaries", "Solver"],
-  "properties":
-  {
+  "properties": {
     "Problem": { "$ref": "./config/problem.json" },
     "Model": { "$ref": "./config/model.json" },
     "Domains": { "$ref": "./config/domains.json" },

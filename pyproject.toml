@@ -20,10 +20,10 @@ dependencies = [
   "meshio>=5.0.0",
   "nbformat>=4.2.0",
   "nest_asyncio2",
-  "referencing>=0.37",
-  "semantic-geometry-builder>=0.1.0",
   "plotly",
   "pyvista>=0.43.0",
+  "referencing>=0.37",
+  "semantic-geometry-builder>=0.1.0",
   "trame",
   "trame-vtk",
   "trame-vuetify",
@@ -76,12 +76,6 @@ test = [
 [build-system]
 requires = ["build", "setuptools>=61", "uv", "wheel"]
 build-backend = "setuptools.build_meta"
-
-[tool.uv.sources]
-semantic-geometry-builder = { git = "https://github.com/OrPenStrike/semantic-geometry-builder", rev = "616cfbd4b44e6fcc54295a9addb5f355163397a5" }
-
-[tool.setuptools.package-data]
-"gsim.palace.config_schemas" = ["**/*.json"]
 
 [[tool.bver.file]]
 src = "README.md"
@@ -313,6 +307,9 @@ select = ["ALL"]
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
+[tool.setuptools.package-data]
+"gsim.palace.config_schemas" = ["**/*.json"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
@@ -333,3 +330,6 @@ unresolved-import = "ignore"
 
 [tool.ty.src]
 include = ["src"]
+
+[tool.uv.sources]
+semantic-geometry-builder = { git = "https://github.com/OrPenStrike/semantic-geometry-builder", rev = "616cfbd4b44e6fcc54295a9addb5f355163397a5" }

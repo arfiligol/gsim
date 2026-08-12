@@ -4,21 +4,18 @@
   "type": "object",
   "additionalProperties": false,
   "required": [],
-  "properties":
-  {
+  "properties": {
     "Order": { "type": "integer", "minimum": 1 },
     "PartialAssemblyOrder": { "type": "integer", "minimum": 1 },
     "QuadratureOrderJacobian": { "type": "boolean" },
     "QuadratureOrderExtra": { "type": "integer" },
     "Device": { "type": "string", "enum": ["CPU", "GPU", "Debug"] },
     "Backend": { "type": "string" },
-    "Eigenmode":
-    {
+    "Eigenmode": {
       "type": "object",
       "additionalProperties": false,
       "required": ["Target"],
-      "properties":
-      {
+      "properties": {
         "Target": { "type": "number" },
         "Tol": { "type": "number", "minimum": 0.0 },
         "MaxIts": { "type": "integer", "exclusiveMinimum": 0 },
@@ -35,17 +32,15 @@
         "RefineNonlinear": { "type": "boolean" },
         "LinearTol": { "type": "number", "minimum": 0.0 },
         "TargetUpper": { "type": "number" },
-        "PreconditionerLag": { "type" : "integer", "minimum": 0 },
+        "PreconditionerLag": { "type": "integer", "minimum": 0 },
         "PreconditionerLagTol": { "type": "number", "minimum": 0.0 },
-        "MaxRestart": { "type" : "integer", "minimum": 0 }
+        "MaxRestart": { "type": "integer", "minimum": 0 }
       }
     },
-    "Driven":
-    {
+    "Driven": {
       "type": "object",
       "additionalProperties": false,
-      "properties":
-      {
+      "properties": {
         "MinFreq": { "type": "number" },
         "MaxFreq": { "type": "number" },
         "FreqStep": { "type": "number" },
@@ -95,20 +90,25 @@
             ]
           }
         },
-        "Save": { "type": "array", "additionalItems": false, "items": { "type": "number" }},
+        "Save": {
+          "type": "array",
+          "additionalItems": false,
+          "items": { "type": "number" }
+        },
         "Restart": { "type": "integer", "exclusiveMinimum": 0 },
         "AdaptiveTol": { "type": "number", "minimum": 0.0 },
         "AdaptiveMaxSamples": { "type": "number", "exclusiveMinimum": 0 },
-        "AdaptiveConvergenceMemory": { "type": "integer", "exclusiveMinimum": 0 }
+        "AdaptiveConvergenceMemory": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        }
       }
     },
-    "Transient":
-    {
+    "Transient": {
       "type": "object",
       "additionalProperties": false,
       "required": ["Excitation", "MaxTime", "TimeStep"],
-      "properties":
-      {
+      "properties": {
         "Type": { "type": "string" },
         "Excitation": { "type": "string" },
         "ExcitationFreq": { "type": "number" },
@@ -116,28 +116,24 @@
         "MaxTime": { "type": "number" },
         "TimeStep": { "type": "number" },
         "SaveStep": { "type": "integer" },
-        "Order": {"type": "integer", "minimum": 2, "maximum": 5},
-        "RelTol": {"type": "number", "exclusiveMinimum": 0.0},
-        "AbsTol": {"type": "number", "exclusiveMinimum": 0.0}
+        "Order": { "type": "integer", "minimum": 2, "maximum": 5 },
+        "RelTol": { "type": "number", "exclusiveMinimum": 0.0 },
+        "AbsTol": { "type": "number", "exclusiveMinimum": 0.0 }
       }
     },
-    "Electrostatic":
-    {
+    "Electrostatic": {
       "type": "object",
       "additionalProperties": false,
       "required": [],
-      "properties":
-      {
+      "properties": {
         "Save": { "type": "integer", "minimum": 0 }
       }
     },
-    "BoundaryMode":
-    {
+    "BoundaryMode": {
       "type": "object",
       "additionalProperties": false,
       "required": ["Freq", "N"],
-      "properties":
-      {
+      "properties": {
         "Freq": { "type": "number", "exclusiveMinimum": 0.0 },
         "N": { "type": "integer", "exclusiveMinimum": 0 },
         "Save": { "type": "integer", "minimum": 0 },
@@ -147,23 +143,19 @@
         "Type": { "type": "string" }
       }
     },
-    "Magnetostatic":
-    {
+    "Magnetostatic": {
       "type": "object",
       "additionalProperties": false,
       "required": [],
-      "properties":
-      {
+      "properties": {
         "Save": { "type": "integer", "minimum": 0 }
       }
     },
-    "Linear":
-    {
+    "Linear": {
       "type": "object",
       "additionalProperties": false,
       "required": [],
-      "properties":
-      {
+      "properties": {
         "Type": { "type": "string" },
         "KSPType": { "type": "string" },
         "Tol": { "type": "number", "minimum": 0.0 },
@@ -182,9 +174,9 @@
         "MGSmoothChebyshev4th": { "type": "boolean" },
         "PCMatReal": { "type": "boolean" },
         "PCMatShifted": { "type": "boolean" },
-        "ComplexCoarseSolve": {"type": "boolean"},
-        "DropSmallEntries": {"type": "boolean"},
-        "ReorderingReuse": {"type": "boolean"},
+        "ComplexCoarseSolve": { "type": "boolean" },
+        "DropSmallEntries": { "type": "boolean" },
+        "ReorderingReuse": { "type": "boolean" },
         "PCSide": { "type": "string" },
         "ColumnOrdering": { "type": "string" },
         "STRUMPACKCompressionType": { "type": "string" },

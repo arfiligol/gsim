@@ -5,7 +5,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.3
+#       jupytext_version: 1.19.2
 #   kernelspec:
 #     display_name: .venv (3.12.13)
 #     language: python
@@ -143,7 +143,7 @@ from pathlib import Path
 
 run_dir = sim.output_dir
 assert run_dir is not None
-HANDOFF_PACKAGE_DIR = Path(".")
+HANDOFF_PACKAGE_DIR = Path()
 handoff_archive = HANDOFF_PACKAGE_DIR / f"{run_dir.name}-palace.tar.gz"
 
 handoff_bundle = sim.generate_handoff_package(archive_path=handoff_archive)

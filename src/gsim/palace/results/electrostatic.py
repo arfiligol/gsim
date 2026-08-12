@@ -164,9 +164,7 @@ class TerminalMatrixConvergence:
             )
             finite = cast(
                 "pd.Series",
-                series.notna()
-                & (series != float("inf"))
-                & (series != float("-inf")),
+                series.notna() & (series != float("inf")) & (series != float("-inf")),
             )
             if not finite.any():
                 continue

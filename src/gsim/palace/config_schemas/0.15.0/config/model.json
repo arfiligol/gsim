@@ -4,8 +4,7 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["Mesh"],
-  "properties":
-  {
+  "properties": {
     "Mesh": { "type": "string" },
     "L0": { "type": "number", "exclusiveMinimum": 0.0 },
     "Lc": { "type": "number", "exclusiveMinimum": 0.0 },
@@ -21,46 +20,43 @@
     "ExportPrerefinedMesh": { "type": "boolean" },
     "ReorientTetMesh": { "type": "boolean" },
     "Partitioning": { "type": "string" },
-    "Refinement":
-    {
+    "Refinement": {
       "type": "object",
       "additionalProperties": false,
       "required": [],
-      "properties":
-      {
-        "Tol": {"type": "number", "exclusiveMinimum": 0.0},
-        "MaxIts": {"type": "integer", "inclusiveMinimum": 0},
-        "MaxSize": {"type": "number", "inclusiveMinimum": 0},
-        "UpdateFraction": {"type": "number", "exclusiveMinimum": 0.0, "exclusiveMaximum": 1.0},
-        "Nonconformal": {"type": "boolean"},
-        "MaxNCLevels": {"type": "integer", "inclusiveMinimum": 0},
-        "MaximumImbalance": {"type": "number", "inclusiveMinimum": 1.0},
-        "SaveAdaptIterations": {"type": "boolean"},
-        "SaveAdaptMesh": {"type": "boolean"},
+      "properties": {
+        "Tol": { "type": "number", "exclusiveMinimum": 0.0 },
+        "MaxIts": { "type": "integer", "inclusiveMinimum": 0 },
+        "MaxSize": { "type": "number", "inclusiveMinimum": 0 },
+        "UpdateFraction": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "exclusiveMaximum": 1.0
+        },
+        "Nonconformal": { "type": "boolean" },
+        "MaxNCLevels": { "type": "integer", "inclusiveMinimum": 0 },
+        "MaximumImbalance": { "type": "number", "inclusiveMinimum": 1.0 },
+        "SaveAdaptIterations": { "type": "boolean" },
+        "SaveAdaptMesh": { "type": "boolean" },
         "UniformLevels": { "type": "integer", "minimum": 0 },
         "SerialUniformLevels": { "type": "integer", "minimum": 0 },
-        "Boxes":
-        {
+        "Boxes": {
           "type": "array",
           "additionalItems": false,
-          "items":
-          {
+          "items": {
             "type": "object",
             "additionalProperties": false,
             "required": ["Levels", "BoundingBoxMin", "BoundingBoxMax"],
-            "properties":
-            {
+            "properties": {
               "Levels": { "type": "integer", "minimum": 0 },
-              "BoundingBoxMin":
-              {
+              "BoundingBoxMin": {
                 "type": "array",
                 "additionalItems": false,
                 "items": { "type": "number" },
                 "minItems": 3,
                 "maxItems": 3
               },
-              "BoundingBoxMax":
-              {
+              "BoundingBoxMax": {
                 "type": "array",
                 "additionalItems": false,
                 "items": { "type": "number" },
@@ -70,21 +66,17 @@
             }
           }
         },
-        "Spheres":
-        {
+        "Spheres": {
           "type": "array",
           "additionalItems": false,
-          "items":
-          {
+          "items": {
             "type": "object",
             "additionalProperties": false,
             "required": ["Levels", "Radius", "Center"],
-            "properties":
-            {
+            "properties": {
               "Levels": { "type": "integer", "minimum": 0 },
               "Radius": { "type": "number", "exclusiveMinimum": 0.0 },
-              "Center":
-              {
+              "Center": {
                 "type": "array",
                 "additionalItems": false,
                 "items": { "type": "number" },
