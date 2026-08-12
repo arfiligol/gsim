@@ -409,7 +409,7 @@ def _sgb_stack_mapping_from_gsim_inputs(
             component_bounds=bounds,
         )
     )
-    air_semantic_id = "AIR"
+    air_semantic_id = "AIR_ABOVE"
     terminals_by_layer: dict[str, list[Any]] = {}
     for terminal in terminals:
         if terminal.center is not None:
@@ -476,6 +476,7 @@ def _solution_regions_from_activated(
     stack_layers: dict[str, str] = {}
     host_void_regions: list[tuple[str, float, float]] = []
     substrate_bounds: tuple[float, float, float, float] | None = None
+    substrate_zmin: float | None = None
     substrate_zmax: float | None = None
 
     for region in activated_regions:
@@ -487,8 +488,26 @@ def _solution_regions_from_activated(
             margin_x=region.margin_x,
             margin_y=region.margin_y,
         )
-        substrate_bounds = xy_bounds
-        substrate_zmax = layer.zmax
+        substrate_bounds = (
+            xy_bounds
+            if substrate_bounds is None
+            else (
+                min(substrate_bounds[0], xy_bounds[0]),
+                min(substrate_bounds[1], xy_bounds[1]),
+                max(substrate_bounds[2], xy_bounds[2]),
+                max(substrate_bounds[3], xy_bounds[3]),
+            )
+        )
+        substrate_zmin = (
+            float(layer.zmin)
+            if substrate_zmin is None
+            else min(substrate_zmin, float(layer.zmin))
+        )
+        substrate_zmax = (
+            float(layer.zmax)
+            if substrate_zmax is None
+            else max(substrate_zmax, float(layer.zmax))
+        )
         regions[region.layer] = _solution_region_record(
             semantic_id=region.layer,
             material_id=region.material or layer.material,
@@ -525,8 +544,10 @@ def _solution_regions_from_activated(
         if region.role != "outer_vacuum":
             continue
         layer = stack.layers[region.layer]
-        if substrate_bounds is None or substrate_zmax is None:
-            raise ValueError("SGB AIR region requires an activated substrate region.")
+        if substrate_bounds is None or substrate_zmin is None or substrate_zmax is None:
+            raise ValueError(
+                "SGB AIR_ABOVE region requires an activated substrate region."
+            )
         xy_bounds = _expanded_bounds(
             substrate_bounds,
             margin_x=region.margin_x,
@@ -536,20 +557,33 @@ def _solution_regions_from_activated(
         zmax = substrate_zmax + region.z_above
         if zmax <= zmin:
             zmax = layer.zmax
-        regions["AIR"] = _solution_region_record(
-            semantic_id="AIR",
+        regions["AIR_ABOVE"] = _solution_region_record(
+            semantic_id="AIR_ABOVE",
             material_id=region.material or layer.material,
             bounds=xy_bounds,
             zmin=zmin,
             zmax=zmax,
             stack_layer=region.layer,
         )
-        stack_layers["AIR"] = region.layer
-        host_void_regions.append(("AIR", zmin, zmax))
+        stack_layers["AIR_ABOVE"] = region.layer
+        host_void_regions.append(("AIR_ABOVE", zmin, zmax))
+        if region.z_below > 0.0:
+            lower_zmin = substrate_zmin - region.z_below
+            lower_zmax = substrate_zmin
+            regions["AIR_BELOW"] = _solution_region_record(
+                semantic_id="AIR_BELOW",
+                material_id=region.material or layer.material,
+                bounds=xy_bounds,
+                zmin=lower_zmin,
+                zmax=lower_zmax,
+                stack_layer=region.layer,
+            )
+            stack_layers["AIR_BELOW"] = region.layer
+            host_void_regions.append(("AIR_BELOW", lower_zmin, lower_zmax))
 
-    if "AIR" not in regions:
+    if "AIR_ABOVE" not in regions:
         raise ValueError(
-            "SGB Surface EPR route meshing requires an AIR solution region."
+            "SGB Surface EPR route meshing requires an AIR_ABOVE solution region."
         )
     return regions, stack_layers, tuple(host_void_regions)
 
@@ -727,6 +761,7 @@ def _groups_from_sgb_records(
         "refinement_lines": {},
     }
     live = _live_physical_groups()
+    volume_z_centers = _semantic_volume_z_centers(records=records, live=live)
     missing: list[str] = []
     for record in records:
         if not isinstance(record, Mapping):
@@ -758,6 +793,7 @@ def _groups_from_sgb_records(
                 entity_tags=entity_tags,
                 record=record,
                 semantic_layer_map=semantic_layer_map,
+                volume_z_centers=volume_z_centers,
             )
     if missing:
         raise ValueError(
@@ -887,8 +923,19 @@ def _add_surface_group_records(
     entity_tags: tuple[int, ...],
     record: Mapping[str, Any],
     semantic_layer_map: Mapping[str, str],
+    volume_z_centers: Mapping[str, float],
 ) -> None:
     """Classify one SGB surface record into gsim boundary and PEC groups."""
+    metadata = record.get("metadata")
+    source_record_ids = (
+        tuple(
+            value
+            for value in metadata.get("source_record_ids", ())
+            if isinstance(value, str) and value
+        )
+        if isinstance(metadata, Mapping)
+        else ()
+    )
     if str(record.get("role")) == "domain_boundary":
         bbox = _entities_bbox(2, entity_tags)
         groups["boundary_surfaces"][name] = {
@@ -903,15 +950,25 @@ def _add_surface_group_records(
             "sgb_physical_name": name,
             "sgb_role": record.get("role"),
             "sgb_metadata": dict(record.get("metadata", {})),
+            "source_record_ids": source_record_ids,
             "bbox": bbox,
             "centroid": _bbox_centroid(bbox),
         }
         return
 
-    parsed = _parse_surface_physical_name(name)
+    parsed = _parse_surface_physical_name(
+        name,
+        source_record_ids=source_record_ids,
+        volume_z_centers=volume_z_centers,
+    )
     if parsed is None:
         return
     interface_type, source_id, face_kind, alias_name = parsed
+    owner_semantic_ids = (
+        tuple(_semantic_source_parts(name.split("__")[1:]))
+        if interface_type == "SA"
+        else ()
+    )
     layer = semantic_layer_map.get(source_id, source_id)
     bbox = _entities_bbox(2, entity_tags)
     info = {
@@ -933,6 +990,9 @@ def _add_surface_group_records(
         "sgb_physical_name": name,
         "sgb_role": record.get("role"),
         "sgb_metadata": dict(record.get("metadata", {})),
+        "source_record_ids": source_record_ids,
+        "surface_id": source_record_ids[0] if len(source_record_ids) == 1 else None,
+        "owner_semantic_ids": owner_semantic_ids,
         "bbox": bbox,
         "centroid": _bbox_centroid(bbox),
     }
@@ -957,6 +1017,9 @@ def _add_surface_group_records(
 
 def _parse_surface_physical_name(
     name: str,
+    *,
+    source_record_ids: tuple[str, ...] = (),
+    volume_z_centers: Mapping[str, float] | None = None,
 ) -> tuple[str, str, str | None, str] | None:
     """Parse the current SGB interface physical-name grammar.
 
@@ -979,13 +1042,70 @@ def _parse_surface_physical_name(
         None,
     )
     if interface_type == "SA" and face_kind is None:
-        face_kind = "top"
+        if volume_z_centers is None:
+            raise ValueError(
+                "Tokenless SA physical groups require live neighbor volume z centers."
+            )
+        source_id, face_kind = _tokenless_sa_source_and_face_kind(
+            name=name,
+            source_record_ids=source_record_ids,
+            volume_z_centers=volume_z_centers,
+        )
+        return (interface_type, source_id, face_kind, name)
     if interface_type in {"MA", "MS"}:
         source_id = parts[1]
     else:
         source_parts = _semantic_source_parts(parts[1:])
         source_id = "__".join(source_parts)
     return (interface_type, source_id, face_kind, name)
+
+
+def _semantic_volume_z_centers(
+    *,
+    records: Sequence[Any],
+    live: Mapping[tuple[int, str], tuple[int, tuple[int, ...]]],
+) -> dict[str, float]:
+    """Map explicitly owned SGB volume semantics to live Gmsh z centers."""
+    centers: dict[str, float] = {}
+    for record in records:
+        if not isinstance(record, Mapping) or int(record.get("dimension", 0) or 0) != 3:
+            continue
+        name = record.get("physical_name")
+        if not isinstance(name, str):
+            continue
+        live_group = live.get((3, name))
+        if live_group is None:
+            continue
+        _, entity_tags = live_group
+        bbox = _entities_bbox(3, entity_tags)
+        if len(bbox) != 6:
+            continue
+        centers[name] = 0.5 * (bbox[2] + bbox[5])
+    return centers
+
+
+def _tokenless_sa_source_and_face_kind(
+    *,
+    name: str,
+    source_record_ids: tuple[str, ...],
+    volume_z_centers: Mapping[str, float],
+) -> tuple[str, str]:
+    """Resolve tokenless SA source and face only from SGB topology provenance."""
+    parts = name.split("__")
+    owner_ids = tuple(_semantic_source_parts(parts[1:]))
+    if len(owner_ids) != 2 or source_record_ids != (f"SURF__{name}",):
+        raise ValueError(
+            "Tokenless SA physical group requires stable owner tokens and one "
+            "matching SGB source_record_id."
+        )
+    first_center = volume_z_centers.get(owner_ids[0])
+    second_center = volume_z_centers.get(owner_ids[1])
+    if first_center is None or second_center is None or first_center == second_center:
+        raise ValueError(
+            "Tokenless SA physical group has ambiguous owner neighbor z centers."
+        )
+    face_kind = "top" if second_center > first_center else "bottom"
+    return "__".join(owner_ids), face_kind
 
 
 def _semantic_source_parts(parts: Sequence[str]) -> Sequence[str]:
