@@ -91,7 +91,6 @@ def generate_palace_config(
     simulation_type: str = "driven",
     driven_config: DrivenConfig | None = None,
     eigenmode_config: EigenmodeConfig | None = None,
-    boundary_mode_config: BoundaryModeConfig | None = None,
     numerical_config: NumericalConfig | None = None,
     refinement_config: Mapping[str, Any] | None = None,
     palace_version: PalaceConfigVersion = DEFAULT_PALACE_CONFIG_VERSION,
@@ -108,6 +107,7 @@ def generate_palace_config(
     boundary_postprocessing_config: dict[str, Any] | None = None,
     material_overlay: Any | None = None,
     prepare_run_folder: bool = True,
+    boundary_mode_config: BoundaryModeConfig | None = None,
 ) -> Path:
     """Generate Palace config.json file.
 
@@ -1515,7 +1515,6 @@ def write_config(
     simulation_type: str = "driven",
     driven_config: DrivenConfig | None = None,
     eigenmode_config: EigenmodeConfig | None = None,
-    boundary_mode_config: BoundaryModeConfig | None = None,
     numerical_config: NumericalConfig | None = None,
     refinement_config: Mapping[str, Any] | None = None,
     palace_version: PalaceConfigVersion = DEFAULT_PALACE_CONFIG_VERSION,
@@ -1531,6 +1530,7 @@ def write_config(
     boundary_postprocessing_config: dict[str, Any] | None = None,
     material_overlay: Any | None = None,
     prepare_run_folder: bool = True,
+    boundary_mode_config: BoundaryModeConfig | None = None,
 ) -> Path:
     """Write Palace config.json from a MeshResult.
 

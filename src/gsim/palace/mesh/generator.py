@@ -819,8 +819,6 @@ def generate_mesh(
     simulation_type: str = "driven",
     driven_config: DrivenConfig | None = None,
     eigenmode_config: EigenmodeConfig | None = None,
-    boundary_mode_config: BoundaryModeConfig | None = None,
-    cross_section: CrossSectionPlaneConfig | None = None,
     electrostatic_config: ElectrostaticConfig | None = None,
     magnetostatic_config: MagnetostaticConfig | None = None,
     numerical_config: NumericalConfig | None = None,
@@ -850,6 +848,8 @@ def generate_mesh(
     simulation_layers: SimulationLayerCatalog | None = None,
     activated_regions: tuple[ActivatedRegion, ...] = (),
     surface_epr_representation: Literal["A", "B", "C"] | None = None,
+    boundary_mode_config: BoundaryModeConfig | None = None,
+    cross_section: CrossSectionPlaneConfig | None = None,
 ) -> MeshResult:
     """Generate mesh for Palace EM simulation.
 
@@ -1404,7 +1404,6 @@ def generate_mesh(
                 simulation_type,
                 driven_config,
                 eigenmode_config,
-                boundary_mode_config,
                 numerical_config,
                 refinement_config,
                 palace_version,
@@ -1417,6 +1416,7 @@ def generate_mesh(
                 magnetostatic_config=magnetostatic_config,
                 current_sources=current_sources,
                 material_overlay=material_overlay,
+                boundary_mode_config=boundary_mode_config,
             )
 
         manifest = build_mesh_manifest(groups)
