@@ -16,6 +16,8 @@ Submodules:
 
 from __future__ import annotations
 
+from gsim.palace.models.cross_section import CrossSectionPlaneConfig
+from gsim.palace.models.geometry import GeometryConfig
 from gsim.palace.models.mesh import MeshConfig
 from gsim.palace.models.numerical import NumericalConfig
 from gsim.palace.models.pec import PECBlockConfig
@@ -29,6 +31,7 @@ from gsim.palace.models.ports import (
     WavePortConfig,
 )
 from gsim.palace.models.problems import (
+    BoundaryModeConfig,
     DrivenConfig,
     EigenmodeConfig,
     ElectrostaticConfig,
@@ -54,12 +57,15 @@ __all__ = [
     "SUPPORTED_PALACE_CONFIG_VERSIONS",
     "ActivatedRegion",
     "ActivatedRegionRole",
+    "BoundaryModeConfig",
     "CPWPortConfig",
+    "CrossSectionPlaneConfig",
     "CurrentSourceConfig",
     "CurrentSourceElementConfig",
     "DrivenConfig",
     "EigenmodeConfig",
     "ElectrostaticConfig",
+    "GeometryConfig",
     "MagnetostaticConfig",
     "MaterialConfig",
     "MeshConfig",

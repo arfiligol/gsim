@@ -34,6 +34,7 @@ from gsim.palace.run_folder import palace_run_folder, prepare_palace_run_folder
 if TYPE_CHECKING:
     from gsim.common.stack import LayerStack
     from gsim.palace.models import (
+        BoundaryModeConfig,
         CurrentSourceConfig,
         DrivenConfig,
         EigenmodeConfig,
@@ -90,6 +91,7 @@ def generate_palace_config(
     simulation_type: str = "driven",
     driven_config: DrivenConfig | None = None,
     eigenmode_config: EigenmodeConfig | None = None,
+    boundary_mode_config: BoundaryModeConfig | None = None,
     numerical_config: NumericalConfig | None = None,
     refinement_config: Mapping[str, Any] | None = None,
     palace_version: PalaceConfigVersion = DEFAULT_PALACE_CONFIG_VERSION,
@@ -153,6 +155,7 @@ def generate_palace_config(
     if simulation_type not in (
         "driven",
         "eigenmode",
+        "boundarymode",
         "electrostatic",
         "electrostatics",
         "magnetostatic",
@@ -190,6 +193,19 @@ def generate_palace_config(
             "Target": fmax / 1e9,
         }
 
+    solver_boundarymode = (
+        boundary_mode_config.to_palace_config()
+        if boundary_mode_config is not None
+        else {
+            "Freq": fmax / 1e9,
+            "N": 1,
+            "Save": 0,
+            "Target": 0.0,
+            "Tol": 1e-6,
+            "Type": "Default",
+        }
+    )
+
     solver_conf: dict[str, object]
     if numerical_config is not None:
         solver_conf = dict(
@@ -208,6 +224,8 @@ def generate_palace_config(
         solver_conf["Driven"] = solver_driven
     elif simulation_type == "eigenmode":
         solver_conf["Eigenmode"] = solver_eigenmode
+    elif simulation_type == "boundarymode":
+        solver_conf["BoundaryMode"] = solver_boundarymode
     elif simulation_type in ("electrostatic", "electrostatics"):
         if electrostatic_config is not None:
             solver_conf["Electrostatic"] = electrostatic_config.to_palace_config()
@@ -222,6 +240,7 @@ def generate_palace_config(
     palace_problem_type = {
         "driven": "Driven",
         "eigenmode": "Eigenmode",
+        "boundarymode": "BoundaryMode",
         "electrostatic": "Electrostatic",
         "electrostatics": "Electrostatic",
         "magnetostatic": "Magnetostatic",
@@ -269,6 +288,17 @@ def generate_palace_config(
             if isinstance(row, dict) and row.get("stack_material_name") is not None
         }
 
+    materials_by_lower = {
+        str(name).lower().strip(): props for name, props in stack_materials.items()
+    }
+
+    def lookup_material(name: str) -> dict[str, Any]:
+        direct = stack_materials.get(name)
+        if isinstance(direct, dict):
+            return direct
+        resolved = materials_by_lower.get(name.lower().strip())
+        return resolved if isinstance(resolved, dict) else {}
+
     materials: list[dict[str, object]] = []
     for volume_name, info in groups["volumes"].items():
         material_name = volume_name
@@ -278,9 +308,11 @@ def generate_palace_config(
         if is_via or is_shaped_dielectric:
             layer = stack.layers.get(material_name)
             if layer is None:
-                continue
-            stack_material_name = layer.material
-            mat_props = stack_materials.get(stack_material_name, {})
+                stack_material_name = material_name
+                mat_props = lookup_material(stack_material_name)
+            else:
+                stack_material_name = layer.material
+                mat_props = lookup_material(stack_material_name)
         elif info.get("stack_layer") is not None:
             stack_layer_name = str(info["stack_layer"])
             layer = stack.layers.get(stack_layer_name)
@@ -290,7 +322,7 @@ def generate_palace_config(
                     f"'{stack_layer_name}'."
                 )
             stack_material_name = str(info.get("material") or layer.material)
-            mat_props = stack_materials.get(stack_material_name, {})
+            mat_props = lookup_material(stack_material_name)
             if not mat_props:
                 raise ValueError(
                     f"Activated region '{volume_name}' uses material "
@@ -299,7 +331,7 @@ def generate_palace_config(
                 )
         else:
             stack_material_name = material_name
-            mat_props = stack_materials.get(stack_material_name, {})
+            mat_props = lookup_material(stack_material_name)
 
         mat_entry: dict[str, object] = {"Attributes": [info["phys_group"]]}
 
@@ -390,7 +422,7 @@ def generate_palace_config(
         layer_name = str(info.get("layer", name.rsplit("_", 1)[0]))
         layer = stack.layers.get(layer_name)
         if layer:
-            mat_props = stack_materials.get(layer.material, {})
+            mat_props = lookup_material(layer.material)
             conductors.append(
                 {
                     "Attributes": boundary_attrs,
@@ -431,6 +463,7 @@ def generate_palace_config(
 
     is_electrostatic = simulation_type in ("electrostatic", "electrostatics")
     is_magnetostatic = simulation_type == "magnetostatic"
+    boundaries: dict[str, object]
 
     if is_electrostatic and terminals:
         terminal_layer_names: set[str] = {t.layer for t in terminals}
@@ -503,11 +536,18 @@ def generate_palace_config(
                     ground_attrs.extend(via_pgs)
                     break
 
-        boundaries: dict[str, object] = {
+        boundaries = {
             "Terminal": terminal_entries,
         }
         if ground_attrs:
             boundaries["Ground"] = {"Attributes": sorted(set(ground_attrs))}
+
+    elif simulation_type == "boundarymode":
+        boundaries = {}
+        if conductors:
+            boundaries["Conductivity"] = conductors
+        if pec_attrs:
+            boundaries["PEC"] = {"Attributes": sorted(set(pec_attrs))}
 
     elif is_magnetostatic and current_sources:
         surface_currents: list[dict[str, object]] = []
@@ -659,7 +699,7 @@ def generate_palace_config(
             synthetic_idx += 1
         lumped_ports.extend(passive_reactive_ports)
 
-        boundaries: dict[str, object] = {
+        boundaries = {
             "Conductivity": conductors,
             "LumpedPort": lumped_ports,
             "WavePort": wave_ports,
@@ -1475,6 +1515,7 @@ def write_config(
     simulation_type: str = "driven",
     driven_config: DrivenConfig | None = None,
     eigenmode_config: EigenmodeConfig | None = None,
+    boundary_mode_config: BoundaryModeConfig | None = None,
     numerical_config: NumericalConfig | None = None,
     refinement_config: Mapping[str, Any] | None = None,
     palace_version: PalaceConfigVersion = DEFAULT_PALACE_CONFIG_VERSION,
@@ -1543,6 +1584,7 @@ def write_config(
         simulation_type=simulation_type,
         driven_config=driven_config,
         eigenmode_config=eigenmode_config,
+        boundary_mode_config=boundary_mode_config,
         numerical_config=numerical_config,
         refinement_config=refinement_config,
         palace_version=palace_version,

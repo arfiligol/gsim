@@ -211,7 +211,7 @@ class PalaceSimBase(BaseModel):
         wave_ports: list[WavePortConfig]
         terminals: list[TerminalConfig]
         simulation_type: Literal[
-            "driven", "eigenmode", "electrostatic", "magnetostatic"
+            "driven", "eigenmode", "boundarymode", "electrostatic", "magnetostatic"
         ]
         absorbing_boundary: bool
 
@@ -1492,6 +1492,8 @@ class PalaceSimBase(BaseModel):
             simulation_type=self.simulation_type,
             driven_config=driven_config,
             eigenmode_config=self.eigenmode,
+            boundary_mode_config=getattr(self, "boundary_mode", None),
+            cross_section=getattr(self, "cross_section", None),
             magnetostatic_config=getattr(self, "magnetostatic", None),
             numerical_config=self.numerical,
             refinement_config=self.refinement,
@@ -1677,6 +1679,8 @@ class PalaceSimBase(BaseModel):
                 simulation_type=self.simulation_type,
                 driven_config=self.driven,
                 eigenmode_config=self.eigenmode,
+                boundary_mode_config=getattr(self, "boundary_mode", None),
+                cross_section=getattr(self, "cross_section", None),
                 electrostatic_config=getattr(self, "electrostatic", None),
                 magnetostatic_config=getattr(self, "magnetostatic", None),
                 numerical_config=self.numerical,
@@ -2000,6 +2004,7 @@ class PalaceSimBase(BaseModel):
                 simulation_type=self.simulation_type,
                 eigenmode_config=self.eigenmode,
                 driven_config=self.driven,
+                boundary_mode_config=getattr(self, "boundary_mode", None),
                 numerical_config=self.numerical,
                 refinement_config=self.refinement,
                 problem_output_formats=self.output_formats or None,

@@ -131,6 +131,22 @@
         "Save": { "type": "integer", "minimum": 0 }
       }
     },
+    "BoundaryMode":
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["Freq", "N"],
+      "properties":
+      {
+        "Freq": { "type": "number", "exclusiveMinimum": 0.0 },
+        "N": { "type": "integer", "exclusiveMinimum": 0 },
+        "Save": { "type": "integer", "minimum": 0 },
+        "Target": { "type": "number" },
+        "Tol": { "type": "number", "exclusiveMinimum": 0.0 },
+        "MaxSize": { "type": "integer", "exclusiveMinimum": 0 },
+        "Type": { "type": "string" }
+      }
+    },
     "Magnetostatic":
     {
       "type": "object",

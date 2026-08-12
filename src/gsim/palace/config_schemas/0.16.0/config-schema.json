@@ -18,6 +18,21 @@
       "if": {
         "properties": {
           "Problem": {
+            "properties": { "Type": { "const": "BoundaryMode" } },
+            "required": ["Type"]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "Solver": { "required": ["BoundaryMode"] }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "Problem": {
             "properties": { "Type": { "const": "Driven" } },
             "required": ["Type"]
           }

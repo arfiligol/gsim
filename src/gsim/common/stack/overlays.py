@@ -135,19 +135,30 @@ def _expand_material_aliases(
     for alias, target in material_aliases.items():
         alias_name = _material_alias_name(alias)
         target_name = _material_alias_name(target)
-        if alias_name in overlay_materials:
+        target_key = next(
+            (
+                name
+                for name in overlay_materials
+                if name.lower().strip() == target_name.lower().strip()
+            ),
+            None,
+        )
+        if any(
+            name.lower().strip() == alias_name.lower().strip()
+            for name in overlay_materials
+        ):
             msg = (
                 f"material_aliases entry {alias_name!r} collides with an "
                 "explicit overlay material."
             )
             raise ValueError(msg)
-        if target_name not in overlay_materials:
+        if target_key is None:
             msg = (
                 f"material_aliases entry {alias_name!r} targets unknown "
                 f"overlay material {target_name!r}."
             )
             raise KeyError(msg)
-        expanded[alias_name] = overlay_materials[target_name]
+        expanded[alias_name] = overlay_materials[target_key]
     return expanded
 
 

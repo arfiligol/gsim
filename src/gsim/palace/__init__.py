@@ -62,14 +62,17 @@ Usage:
 from __future__ import annotations
 
 from gsim.gcloud import RunResult, register_result_parser
+from gsim.palace.boundarymode import BoundaryModeSim
 from gsim.palace.driven import DrivenSim
 from gsim.palace.eigenmode import EigenmodeSim
 from gsim.palace.electrostatic import ElectrostaticSim
+from gsim.palace.field_viz import extract_streamplot_inputs_2d, plot_fields_2d
 from gsim.palace.magnetostatic import MagnetostaticSim
 from gsim.palace.mesh import (
     MeshConfig,
     generate_mesh,
 )
+from gsim.palace.models import BoundaryModeConfig, CrossSectionPlaneConfig
 from gsim.palace.resolve import (
     PalaceResolvedResult,
     PalaceResultBundle,
@@ -84,6 +87,9 @@ from gsim.palace.results.reports.electrostatic import ElectrostaticReport
 from gsim.palace.run_stage import PalaceRunHandle
 
 __all__ = [
+    "BoundaryModeConfig",
+    "BoundaryModeSim",
+    "CrossSectionPlaneConfig",
     "DrivenReport",
     "DrivenSim",
     "EigenmodeReport",
@@ -98,7 +104,9 @@ __all__ = [
     "PalaceRunHandle",
     "PalaceRunSummary",
     "SParams",
+    "extract_streamplot_inputs_2d",
     "generate_mesh",
+    "plot_fields_2d",
     "resolve_palace_result",
 ]
 
