@@ -83,6 +83,23 @@ sim.mesh(preset="default")
 # Static PNG
 sim.plot_mesh(show_groups=["metal", "P"])
 
+# %% [markdown]
+# ### Generate handoff package
+#
+# This writes the canonical Palace run folder and packages it as a `.tar.gz`
+# archive that can be transferred to an HPC system before solver execution.
+
+# %%
+from pathlib import Path
+
+run_dir = sim.output_dir
+assert run_dir is not None
+HANDOFF_PACKAGE_DIR = Path()
+handoff_archive = HANDOFF_PACKAGE_DIR / f"{run_dir.name}-palace.tar.gz"
+
+handoff_bundle = sim.generate_handoff_package(archive_path=handoff_archive)
+handoff_archive
+
 # %% [markdown] papermill={"duration": 0.001594, "end_time": "2026-04-18T15:42:30.556259", "exception": false, "start_time": "2026-04-18T15:42:30.554665", "status": "completed"}
 # ### Run simulation on GDSFactory+ Cloud
 

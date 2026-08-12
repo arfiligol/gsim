@@ -10,10 +10,12 @@ import json
 from pathlib import Path
 
 import gdsfactory as gf
+import gmsh
 import pytest
 
 from gsim.common import Layer, LayerStack
 from gsim.palace import DrivenSim
+from gsim.palace.mesh.gmsh_utils import is_exterior_physical_name
 
 
 def _make_cpw_component():
@@ -68,6 +70,25 @@ def _make_sim(component, tmp_path, planar_conductors=False, layer="topmetal2"):
     return sim
 
 
+def _mesh_physical_names(mesh_path: Path) -> set[str]:
+    """Read physical group names from a generated mesh artifact."""
+    was_initialized = gmsh.isInitialized()
+    if not was_initialized:
+        gmsh.initialize()
+    try:
+        gmsh.open(str(mesh_path))
+        names = {
+            gmsh.model.getPhysicalName(dim, tag)
+            for dim, tag in gmsh.model.getPhysicalGroups()
+            if gmsh.model.getPhysicalName(dim, tag)
+        }
+        gmsh.clear()
+    finally:
+        if not was_initialized:
+            gmsh.finalize()
+    return names
+
+
 @pytest.fixture(scope="module")
 def volumetric_sim(tmp_path_factory):
     """Mesh once with volumetric conductors, share across tests."""
@@ -117,6 +138,45 @@ class TestCPWMeshVolumetricConductors:
         """Absorbing boundary surfaces must be present."""
         groups = volumetric_sim._last_mesh_result.groups
         assert "absorbing" in groups["boundary_surfaces"], "No absorbing boundary"
+
+    def test_generated_interface_names_use_meshwell_delimiter(self, volumetric_sim):
+        """Generated interface physical names use meshwell-style delimiters."""
+        mesh_path = Path(volumetric_sim._output_dir) / "palace.msh"
+        physical_names = _mesh_physical_names(mesh_path)
+
+        assert any("___" in name for name in physical_names)
+        assert any(name.endswith("___None") for name in physical_names)
+        assert not any(
+            name.endswith("__None") and not name.endswith("___None")
+            for name in physical_names
+        )
+
+    def test_manifest_preserves_generated_interface_identities(self, volumetric_sim):
+        """Generated internal interface groups remain visible in the manifest."""
+        groups = volumetric_sim._last_mesh_result.groups
+        interface_names = {
+            name
+            for name in groups["boundary_surfaces"]
+            if "___" in name and not is_exterior_physical_name(name)
+        }
+
+        assert interface_names
+
+        manifest_entries = {
+            entry.name: entry
+            for entry in volumetric_sim._last_mesh_result.manifest.entries
+            if entry.interface_of is not None
+        }
+
+        assert interface_names <= set(manifest_entries)
+        for name in interface_names:
+            entry = manifest_entries[name]
+            assert entry.role == "boundary_surface"
+            assert entry.attributes
+            assert entry.entity_tags
+            assert entry.physical_names == (name,)
+            assert entry.interface_of is not None
+            assert "None" not in entry.interface_of
 
     def test_config_json_valid(self, volumetric_sim):
         """Generated config.json must have required Palace sections."""

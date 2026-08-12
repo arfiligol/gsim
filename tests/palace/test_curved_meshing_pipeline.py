@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from gsim.common import Layer, LayerStack
 from gsim.palace.mesh import generator as mesh_generator
 from gsim.palace.mesh.config_generator import generate_palace_config
+from gsim.palace.mesh.geometry import MetalGeometryResult
 
 
 class _FakeOption:
@@ -91,7 +92,15 @@ def test_generate_mesh_forwards_curve_fit_and_decimation(monkeypatch, tmp_path) 
         return SimpleNamespace(polygons=[object()], bbox=(0.0, 0.0, 10.0, 10.0))
 
     monkeypatch.setattr(mesh_generator, "extract_geometry", _fake_extract_geometry)
-    monkeypatch.setattr(mesh_generator, "add_metals", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        mesh_generator,
+        "add_metals",
+        lambda *_args, **_kwargs: MetalGeometryResult(
+            metal_tags={},
+            shaped_dielectric_names=set(),
+            pec_surface_bboxes={},
+        ),
+    )
     monkeypatch.setattr(
         mesh_generator,
         "add_ports",
@@ -135,8 +144,11 @@ def test_generate_mesh_forwards_curve_fit_and_decimation(monkeypatch, tmp_path) 
         patterned_dielectric_tags,
         port_tags,
         port_info,
+        *,
         pec_block_tags,
         stack,
+        activated_regions,
+        shaped_dielectric_names,
     ):
         captured["build_entities_args"] = {
             "dielectric_tags": dielectric_tags,
@@ -146,6 +158,8 @@ def test_generate_mesh_forwards_curve_fit_and_decimation(monkeypatch, tmp_path) 
             "pec_block_tags": pec_block_tags,
             "stack": stack,
             "metal_tags": metal_tags,
+            "activated_regions": activated_regions,
+            "shaped_dielectric_names": shaped_dielectric_names,
         }
         return []
 
@@ -165,10 +179,17 @@ def test_generate_mesh_forwards_curve_fit_and_decimation(monkeypatch, tmp_path) 
         _entities,
         _pg_map,
         _stack,
+        *,
+        activated_regions,
         pec_block_tags=None,
+        shaped_dielectric_names,
+        pec_surface_bboxes,
     ):
         captured["all_dielectric_tags"] = all_dielectric_tags
+        captured["assign_activated_regions"] = activated_regions
         captured["assign_pec_block_tags"] = pec_block_tags
+        captured["assign_shaped_dielectric_names"] = shaped_dielectric_names
+        captured["assign_pec_surface_bboxes"] = pec_surface_bboxes
         return {
             "volumes": {},
             "conductor_surfaces": {},

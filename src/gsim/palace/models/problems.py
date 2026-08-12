@@ -141,8 +141,6 @@ class DrivenConfig(BaseModel):
 
     def to_palace_config(self) -> dict:
         """Convert to Palace JSON config format."""
-        freq_step = (self.fmax - self.fmin) / max(1, self.num_points - 1) / 1e9
-
         if self.fmax == self.fmin:
             freq_step = 1.0
         else:
@@ -275,6 +273,34 @@ class EigenmodeConfig(BaseModel):
         return config
 
 
+class BoundaryModeConfig(BaseModel):
+    """Configuration for 2D boundary-mode waveguide extraction."""
+
+    model_config = ConfigDict(validate_assignment=True)
+
+    freq: float = Field(default=5e9, gt=0, description="Operating frequency in Hz")
+    num_modes: int = Field(default=1, ge=1, description="Number of modes to compute")
+    save: int = Field(default=0, ge=0, description="Number of modes to save")
+    target: float = Field(default=0.0, description="Target effective index")
+    tolerance: float = Field(default=1e-6, gt=0, description="Relative tolerance")
+    max_size: int = Field(default=0, ge=0, description="Maximum eigensolver size")
+    solver_type: str = Field(default="Default", description="Palace solver type")
+
+    def to_palace_config(self) -> dict[str, object]:
+        """Convert to the Palace BoundaryMode mapping."""
+        config: dict[str, object] = {
+            "Freq": self.freq / 1e9,
+            "N": self.num_modes,
+            "Save": self.save,
+            "Target": self.target,
+            "Tol": self.tolerance,
+            "Type": self.solver_type,
+        }
+        if self.max_size > 0:
+            config["MaxSize"] = self.max_size
+        return config
+
+
 class ElectrostaticConfig(BaseModel):
     """Configuration for electrostatic (capacitance matrix) simulation.
 
@@ -352,6 +378,7 @@ class TransientConfig(BaseModel):
 
 
 __all__ = [
+    "BoundaryModeConfig",
     "DrivenConfig",
     "EigenmodeConfig",
     "ElectrostaticConfig",

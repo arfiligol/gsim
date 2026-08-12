@@ -7,17 +7,13 @@ capacitance matrices between terminals.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import Field, PrivateAttr
 
-from gsim.common import Geometry, LayerStack
-from gsim.palace.base import PalaceSimMixin
+from gsim.palace.base import PalaceSimBase
 from gsim.palace.models import (
     ElectrostaticConfig,
-    MaterialConfig,
-    NumericalConfig,
     TerminalConfig,
     WavePortConfig,
 )
@@ -25,7 +21,7 @@ from gsim.palace.models import (
 logger = logging.getLogger(__name__)
 
 
-class ElectrostaticSim(PalaceSimMixin, BaseModel):
+class ElectrostaticSim(PalaceSimBase):
     """Electrostatic simulation for capacitance matrix extraction.
 
     This class configures and runs electrostatic simulations to extract
@@ -56,19 +52,12 @@ class ElectrostaticSim(PalaceSimMixin, BaseModel):
         numerical: Numerical solver configuration
     """
 
-    model_config = ConfigDict(
-        validate_assignment=True,
-        arbitrary_types_allowed=True,
-    )
     simulation_type: Literal["electrostatic"] = "electrostatic"
 
     driven: None = None
     ports: None = None
     cpw_ports: None = None
     wave_ports: list[WavePortConfig] = Field(default_factory=list)
-    # Composed objects (from common)
-    geometry: Geometry | None = None
-    stack: LayerStack | None = None
 
     # Terminal configurations (no ports in electrostatic)
     terminals: list[TerminalConfig] = Field(default_factory=list)
@@ -78,18 +67,6 @@ class ElectrostaticSim(PalaceSimMixin, BaseModel):
     eigenmode: None = None
     absorbing_boundary: bool = False
 
-    # Material overrides and numerical config
-    materials: dict[str, MaterialConfig] = Field(default_factory=dict)
-    numerical: NumericalConfig = Field(default_factory=NumericalConfig)
-
-    # Stack configuration (stored as kwargs until resolved)
-    _stack_kwargs: dict[str, Any] = PrivateAttr(default_factory=dict)
-    _airbox_config: dict[str, float] = PrivateAttr(default_factory=dict)
-    _pec_blocks: list = PrivateAttr(default_factory=list)
-    _hints: dict[str, Any] = PrivateAttr(default_factory=dict)
-
-    # Internal state
-    _output_dir: Path | None = PrivateAttr(default=None)
     _configured_terminals: bool = PrivateAttr(default=False)
 
     # -------------------------------------------------------------------------
@@ -101,6 +78,9 @@ class ElectrostaticSim(PalaceSimMixin, BaseModel):
         name: str,
         *,
         layer: str,
+        center: tuple[float, float] | None = None,
+        port_name: str | None = None,
+        physical_label: str | None = None,
     ) -> None:
         """Add a terminal for capacitance extraction.
 
@@ -109,17 +89,29 @@ class ElectrostaticSim(PalaceSimMixin, BaseModel):
         Args:
             name: Terminal name
             layer: Target conductor layer
+            center: Optional XY point used to select one conductor island on
+                ``layer``. When omitted, all conductor surfaces on the layer
+                are assigned to the terminal.
+            port_name: Optional component port name used to derive ``center``.
+            physical_label: Optional short label for generated physical names.
 
         Example:
             >>> sim.add_terminal("T1", layer="topmetal2")
             >>> sim.add_terminal("T2", layer="topmetal2")
         """
+        if center is None and port_name is not None:
+            port = self._find_gf_port(port_name)
+            center = (float(port.center[0]), float(port.center[1]))
+
         # Remove existing terminal with same name
         self.terminals = [t for t in self.terminals if t.name != name]
         self.terminals.append(
             TerminalConfig(
                 name=name,
                 layer=layer,
+                center=center,
+                port_name=port_name,
+                physical_label=physical_label,
             )
         )
 

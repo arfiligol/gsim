@@ -7,12 +7,25 @@ configure -> validate -> mesh -> write_config, stopping before cloud submission.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
+from textwrap import dedent
+from typing import Literal, Self, cast
 
 import gdsfactory as gf
 import pytest
 
-from gsim.palace import DrivenSim, EigenmodeSim, ElectrostaticSim
+from gsim.palace import DrivenSim, EigenmodeSim, ElectrostaticSim, MagnetostaticSim
+from gsim.palace.mesh import (
+    SurfaceFluxSpec,
+    build_postprocessing_config_from_manifest,
+)
+from gsim.palace.resolve import load_palace_run_summary
+from gsim.palace.results import SimulationBenchmark
+from gsim.palace.run.local import (
+    detect_palace_runtime_version,
+    parse_palace_runtime_version,
+)
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -161,6 +174,51 @@ class TestDrivenSimWorkflow:
         config_path = driven_sim.write_config(photonic=True)
         assert Path(config_path).exists()
 
+    def test_write_config_accepts_manifest_postprocessing(self, driven_sim):
+        """High-level write_config wires postprocessing config and artifacts."""
+        postprocessing = build_postprocessing_config_from_manifest(
+            driven_sim._last_mesh_result.manifest,
+            surface_flux=(
+                SurfaceFluxSpec(
+                    role="boundary_surface",
+                    entry_names=("absorbing",),
+                    flux_type="Power",
+                    two_sided=None,
+                ),
+            ),
+        )
+
+        config_path = driven_sim.write_config(postprocessing=postprocessing)
+        output_dir = Path(config_path).parent
+        config = json.loads(config_path.read_text())
+
+        assert config["Domains"]["Postprocessing"]["Energy"]
+        assert config["Boundaries"]["Postprocessing"]["SurfaceFlux"][0]["Type"] == (
+            "Power"
+        )
+
+        manifest_path = output_dir / "metadata" / "mesh_manifest.json"
+        index_map_path = output_dir / "metadata" / "palace_index_map.json"
+        assert manifest_path.exists()
+        assert index_map_path.exists()
+
+        manifest_json = json.loads(manifest_path.read_text())
+        index_map_json = json.loads(index_map_path.read_text())
+        assert manifest_json["entries"]
+        assert index_map_json["entries"][0]["section"].startswith(
+            "Domains.Postprocessing"
+        )
+
+        # Upload/run helpers regenerate config.json without passing arguments.
+        # The last explicit postprocessing config must therefore survive a
+        # later write_config() call.
+        driven_sim.write_config()
+        regenerated_config = json.loads(config_path.read_text())
+        assert (
+            regenerated_config["Boundaries"]["Postprocessing"]["SurfaceFlux"][0]["Type"]
+            == "Power"
+        )
+
 
 # ---------------------------------------------------------------------------
 # DrivenSim with inplane lumped ports
@@ -276,6 +334,511 @@ def test_reactive_port_parameters_go_to_lumped_element(tmp_path, cpw_component):
     assert rp["Attributes"] == p1["Attributes"]
 
 
+def test_run_local_direct_palace_supports_serial_wrapper_flag(tmp_path, monkeypatch):
+    """Direct local Palace runs can request the wrapper's serial path."""
+
+    sim = ElectrostaticSim()
+    sim.set_output_dir(tmp_path)
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "palace.msh").write_text("$MeshFormat\n", encoding="utf-8")
+    palace_executable = tmp_path / "palace"
+    palace_executable.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    commands: list[list[str]] = []
+
+    def fake_run(
+        cmd: list[str],
+        *,
+        cwd: Path,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        env: dict[str, str],
+    ) -> subprocess.CompletedProcess[str]:
+        assert check
+        assert capture_output
+        assert text
+        assert env
+        commands.append(cmd)
+        postpro_dir = Path(cwd) / "results" / "palace"
+        postpro_dir.mkdir(parents=True, exist_ok=True)
+        (postpro_dir / "terminal-C.csv").write_text("i\n", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    results = sim.run_local(
+        use_apptainer=False,
+        palace_executable=palace_executable,
+        num_processes=1,
+        num_threads=1,
+        serial=True,
+        verbose=False,
+    )
+
+    assert commands == [
+        [
+            str(palace_executable),
+            "-serial",
+            "-np",
+            "1",
+            "-nt",
+            "1",
+            "config.json",
+        ]
+    ]
+    assert (
+        results["terminal-C.csv"] == tmp_path / "results" / "palace" / "terminal-C.csv"
+    )
+    metadata = json.loads(
+        (tmp_path / "metadata" / "palace_run_metadata.json").read_text()
+    )
+    assert metadata["schema_version"] == 1
+    assert metadata["status"] == "completed"
+    assert metadata["return_code"] == 0
+    assert metadata["elapsed_seconds"] >= 0
+    assert metadata["launcher"] == {
+        "kind": "executable",
+        "executable_mode": "wrapper",
+        "serial": True,
+        "palace_executable_configured": True,
+        "palace_executable_name": "palace",
+    }
+    assert metadata["resources"] == {
+        "num_processes": 1,
+        "num_threads": 1,
+        "omp_num_threads": None,
+    }
+    assert metadata["command"]["argv"] == [
+        "palace",
+        "-serial",
+        "-np",
+        "1",
+        "-nt",
+        "1",
+        "config.json",
+    ]
+    assert metadata["paths"]["palace_log"] == "logs/palace-local.log"
+    assert metadata["outputs"]["terminal-C.csv"]["bytes"] > 0
+    assert (tmp_path / "logs" / "palace-local.log").read_text() == ""
+    assert not (tmp_path / "metadata" / "palace_resource_record.json").exists()
+
+
+def test_run_local_writes_palace_log_and_resource_record(tmp_path, monkeypatch):
+    """Completed local runs convert Palace logs into benchmark sidecars."""
+    import gsim.palace.run.local as local_run
+
+    sim = ElectrostaticSim()
+    sim.set_output_dir(tmp_path)
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "palace.msh").write_text("$MeshFormat\n", encoding="utf-8")
+    palace_executable = tmp_path / "palace"
+    palace_executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    palace_log = dedent(
+        """
+        Git changeset ID: v0.16.1
+        Running with 1 MPI processes, 2 OpenMP threads
+
+        Elapsed Time Report (s)           Min.        Max.        Avg.
+        ==============================================================
+        Initialization                   1.000       1.100       1.050
+        --------------------------------------------------------------
+        Total                            2.000       2.500       2.250
+
+        Peak Memory                   Per-Node       Total   Total HWM
+        ==============================================================
+        Initialization                   1.0G        1.0G        1.5G
+        --------------------------------------------------------------
+        Total                             2.0G        2.0G        2.5G
+
+        Adaptive mesh refinement (AMR) iteration 1:
+         Indicator norm = 1.000e-01, global unknowns = 100
+         Max. iterations = 15, tol. = 1.000e-02, max. size = 5000000
+         Marked 1/10 elements for refinement (70.00% of the error, theta = 0.70)
+         Conforming mesh refinement added 5 elements (initial = 10, final = 15)
+
+        Completed 1 iterations of adaptive mesh refinement (AMR):
+         Indicator norm = 5.000e-02, global unknowns = 200
+         Max. iterations = 15, tol. = 1.000e-02, max. size = 5000000
+        """
+    ).strip()
+
+    class FakeProcess:
+        def __init__(self, *, cwd: Path) -> None:
+            postpro_dir = cwd / "results" / "palace"
+            postpro_dir.mkdir(parents=True, exist_ok=True)
+            (postpro_dir / "terminal-C.csv").write_text("i\n", encoding="utf-8")
+            self.stdout = iter(f"{line}\n" for line in palace_log.splitlines())
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(
+        local_run,
+        "detect_palace_runtime_version",
+        lambda *_args, **_kwargs: ("0.16.0", "Palace v0.16.0"),
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "Popen",
+        lambda *_args, **kwargs: FakeProcess(cwd=kwargs["cwd"]),
+    )
+
+    sim.run_local(
+        use_apptainer=False,
+        palace_executable=palace_executable,
+        num_processes=1,
+        num_threads=2,
+        verbose=True,
+    )
+
+    log_path = tmp_path / "logs" / "palace-local.log"
+    resource_path = tmp_path / "metadata" / "palace_resource_record.json"
+    assert log_path.read_text(encoding="utf-8").startswith("Git changeset ID")
+    assert resource_path.is_file()
+    assert (tmp_path / "metadata" / "palace_stage_timing.csv").is_file()
+    assert (tmp_path / "metadata" / "palace_stage_memory.csv").is_file()
+    assert (tmp_path / "metadata" / "palace_amr_passes.csv").is_file()
+
+    metadata = json.loads(
+        (tmp_path / "metadata" / "palace_run_metadata.json").read_text()
+    )
+    assert metadata["paths"]["palace_log"] == "logs/palace-local.log"
+    assert metadata["paths"]["resource_record"] == (
+        "metadata/palace_resource_record.json"
+    )
+
+    benchmark = SimulationBenchmark.from_run_summary(load_palace_run_summary(tmp_path))
+    items = benchmark.visualize()
+    assert "simulation_benchmark_adaptive_pass_table" in items
+    assert "simulation_benchmark_adaptive_pass_trace_plot" in items
+
+
+def test_run_local_direct_palace_binary_mode_omits_wrapper_flags(tmp_path, monkeypatch):
+    """Direct solver binaries receive only config.json and OMP threads via env."""
+
+    sim = ElectrostaticSim()
+    sim.set_output_dir(tmp_path)
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "palace.msh").write_text("$MeshFormat\n", encoding="utf-8")
+    palace_binary = tmp_path / "palace-arm64.bin"
+    palace_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    commands: list[list[str]] = []
+    envs: list[dict[str, str]] = []
+
+    def fake_run(
+        cmd: list[str],
+        *,
+        cwd: Path,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        env: dict[str, str],
+    ) -> subprocess.CompletedProcess[str]:
+        assert check
+        assert capture_output
+        assert text
+        commands.append(cmd)
+        envs.append(env)
+        postpro_dir = Path(cwd) / "results" / "palace"
+        postpro_dir.mkdir(parents=True, exist_ok=True)
+        (postpro_dir / "terminal-C.csv").write_text("i\n", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    results = sim.run_local(
+        use_apptainer=False,
+        executable_mode="binary",
+        palace_executable=palace_binary,
+        num_processes=1,
+        num_threads=2,
+        verbose=False,
+    )
+
+    assert commands == [[str(palace_binary), "config.json"]]
+    assert envs[0]["OMP_NUM_THREADS"] == "2"
+    assert (
+        results["terminal-C.csv"] == tmp_path / "results" / "palace" / "terminal-C.csv"
+    )
+    metadata = json.loads(
+        (tmp_path / "metadata" / "palace_run_metadata.json").read_text()
+    )
+    assert metadata["launcher"] == {
+        "kind": "executable",
+        "executable_mode": "binary",
+        "serial": False,
+        "palace_executable_configured": True,
+        "palace_executable_name": "palace-arm64.bin",
+    }
+    assert metadata["resources"] == {
+        "num_processes": 1,
+        "num_threads": 2,
+        "omp_num_threads": "2",
+    }
+    assert metadata["command"]["argv"] == ["palace-arm64.bin", "config.json"]
+
+
+def test_run_local_direct_palace_supports_setup_commands(tmp_path, monkeypatch):
+    """Caller-provided setup commands can activate Palace for notebook local runs."""
+
+    sim = ElectrostaticSim()
+    sim.set_output_dir(tmp_path)
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "palace.msh").write_text("$MeshFormat\n", encoding="utf-8")
+
+    commands: list[list[str]] = []
+
+    def fake_run(
+        cmd: list[str],
+        *,
+        cwd: Path,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        env: dict[str, str],
+    ) -> subprocess.CompletedProcess[str]:
+        assert check
+        assert capture_output
+        assert text
+        assert env["OMP_NUM_THREADS"] == "4"
+        commands.append(cmd)
+        postpro_dir = Path(cwd) / "results" / "palace"
+        postpro_dir.mkdir(parents=True, exist_ok=True)
+        (postpro_dir / "terminal-C.csv").write_text("i\n", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    results = sim.run_local(
+        use_apptainer=False,
+        executable_mode="binary",
+        palace_executable="palace-x86_64.bin",
+        setup_commands=(
+            "source /opt/spack/share/spack/setup-env.sh",
+            "spack load palace@0.16.0",
+        ),
+        num_threads=4,
+        verbose=False,
+    )
+
+    assert commands[0][:2] == ["/bin/bash", "-lc"]
+    script = commands[0][2]
+    assert "source /opt/spack/share/spack/setup-env.sh" in script
+    assert "spack load palace@0.16.0" in script
+    assert "command -v palace-x86_64.bin >/dev/null" in script
+    assert "exec palace-x86_64.bin config.json" in script
+    assert (
+        results["terminal-C.csv"] == tmp_path / "results" / "palace" / "terminal-C.csv"
+    )
+    metadata = json.loads(
+        (tmp_path / "metadata" / "palace_run_metadata.json").read_text()
+    )
+    assert metadata["launcher"] == {
+        "kind": "executable",
+        "executable_mode": "binary",
+        "serial": False,
+        "palace_executable_configured": True,
+        "palace_executable_name": "palace-x86_64.bin",
+    }
+    assert metadata["command"]["argv"] == ["palace-x86_64.bin", "config.json"]
+
+
+def test_parse_palace_runtime_version() -> None:
+    assert parse_palace_runtime_version("Palace v0.16.0") == "0.16.0"
+    assert parse_palace_runtime_version("palace 0.15.0\n") == "0.15.0"
+    assert parse_palace_runtime_version("Palace version: 869ee5c") is None
+    assert parse_palace_runtime_version("Open MPI 5.0.8") is None
+    assert parse_palace_runtime_version("spack load palace@0.16.0") is None
+    assert (
+        parse_palace_runtime_version(
+            "/opt/spack/darwin-m3/palace-0.16.0-p5ona/bin/palace-arm64.bin"
+        )
+        == "0.16.0"
+    )
+    assert (
+        parse_palace_runtime_version(
+            "/opt/spack/darwin-m3/openmpi-5.0.8-qtk/bin/mpirun "
+            "-n 1 /opt/spack/darwin-m3/palace-0.16.0-p5ona/bin/"
+            "palace-arm64.bin --version\n"
+            "Palace version: 869ee5c"
+        )
+        == "0.16.0"
+    )
+    assert parse_palace_runtime_version("no semantic version") is None
+
+
+def test_detect_palace_runtime_version_falls_back_to_spack_package_path(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    def fake_run(
+        cmd: list[str],
+        *,
+        cwd: Path,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        env: dict[str, str],
+        timeout: int,
+    ) -> subprocess.CompletedProcess[str]:
+        assert cmd[0].endswith("palace-arm64.bin")
+        assert cwd == tmp_path
+        assert not check
+        assert capture_output
+        assert text
+        assert env
+        assert timeout == 30
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout="Palace version: 869ee5c\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    runtime_version, output = detect_palace_runtime_version(
+        [
+            "/opt/spack/darwin-m3/palace-0.16.0-p5ona/bin/palace-arm64.bin",
+            "--version",
+        ],
+        cwd=tmp_path,
+        env={"PATH": "/usr/bin"},
+        setup_commands=(),
+    )
+
+    assert runtime_version == "0.16.0"
+    assert output == "Palace version: 869ee5c"
+
+
+def test_run_local_raises_on_runtime_version_mismatch(tmp_path, monkeypatch):
+    import gsim.palace.run.local as local_run
+
+    sim = ElectrostaticSim()
+    sim.set_output_dir(tmp_path)
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "palace.msh").write_text("$MeshFormat\n", encoding="utf-8")
+    palace_binary = tmp_path / "palace-arm64.bin"
+    palace_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        local_run,
+        "detect_palace_runtime_version",
+        lambda *_args, **_kwargs: ("0.15.0", "Palace v0.15.0"),
+    )
+
+    with pytest.raises(RuntimeError, match="does not match target config version"):
+        sim.run_local(
+            use_apptainer=False,
+            executable_mode="binary",
+            palace_executable=palace_binary,
+            num_processes=1,
+            verbose=False,
+        )
+
+
+def test_run_local_records_runtime_version_mismatch_when_check_disabled(
+    tmp_path,
+    monkeypatch,
+):
+    import gsim.palace.run.local as local_run
+
+    sim = ElectrostaticSim()
+    sim.set_output_dir(tmp_path)
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "palace.msh").write_text("$MeshFormat\n", encoding="utf-8")
+    palace_binary = tmp_path / "palace-arm64.bin"
+    palace_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        local_run,
+        "detect_palace_runtime_version",
+        lambda *_args, **_kwargs: ("0.15.0", "Palace v0.15.0"),
+    )
+
+    def fake_run(
+        cmd: list[str],
+        *,
+        cwd: Path,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        env: dict[str, str],
+    ) -> subprocess.CompletedProcess[str]:
+        assert check
+        assert capture_output
+        assert text
+        assert env
+        postpro_dir = Path(cwd) / "results" / "palace"
+        postpro_dir.mkdir(parents=True, exist_ok=True)
+        (postpro_dir / "terminal-C.csv").write_text("i\n", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    sim.run_local(
+        use_apptainer=False,
+        executable_mode="binary",
+        palace_executable=palace_binary,
+        num_processes=1,
+        verbose=False,
+        check_runtime_version=False,
+    )
+
+    metadata = json.loads(
+        (tmp_path / "metadata" / "palace_run_metadata.json").read_text()
+    )
+    assert metadata["palace_version"] == {
+        "target": "0.16.0",
+        "runtime": "0.15.0",
+        "check": "mismatch",
+        "output": "Palace v0.15.0",
+    }
+
+
+def test_run_local_direct_palace_binary_mode_rejects_multi_process(tmp_path):
+    """Direct solver binaries do not accept the wrapper's -np launcher flag."""
+
+    sim = ElectrostaticSim()
+    sim.set_output_dir(tmp_path)
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "palace.msh").write_text("$MeshFormat\n", encoding="utf-8")
+    palace_binary = tmp_path / "palace-arm64.bin"
+    palace_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="single-process"):
+        sim.run_local(
+            use_apptainer=False,
+            executable_mode="binary",
+            palace_executable=palace_binary,
+            num_processes=2,
+            verbose=False,
+        )
+
+
+def test_run_local_direct_palace_rejects_unknown_executable_mode(tmp_path):
+    sim = ElectrostaticSim()
+    sim.set_output_dir(tmp_path)
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "palace.msh").write_text("$MeshFormat\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="executable_mode"):
+        sim.run_local(
+            use_apptainer=False,
+            executable_mode=cast(Literal["wrapper", "binary"], "unknown"),
+            palace_executable="/usr/bin/true",
+            verbose=False,
+        )
+
+
 # ---------------------------------------------------------------------------
 # EigenmodeSim workflow
 # ---------------------------------------------------------------------------
@@ -375,39 +938,17 @@ class TestElectrostaticSimWorkflow:
         mesh_path = Path(electrostatic_sim._output_dir) / "palace.msh"
         assert mesh_path.exists()
 
-    def test_write_config_generates_valid_json(self, electrostatic_sim):
-        """Electrostatic config generation produces valid Palace JSON."""
-        electrostatic_sim.write_config()
-        config_path = Path(electrostatic_sim._output_dir) / "config.json"
-        assert config_path.exists()
-        config = json.loads(config_path.read_text())
-        assert config["Problem"]["Type"] == "Electrostatic"
-        assert "Electrostatic" in config["Solver"]
-        boundaries = config["Boundaries"]
-        assert "Terminal" in boundaries
-        assert len(boundaries["Terminal"]) == 2
-        # Each terminal must have at least one attribute (regression: planar
-        # conductor terminals were silently grounded when the loop only
-        # scanned conductor_surfaces).
-        for term in boundaries["Terminal"]:
-            assert term["Attributes"], (
-                f"Terminal {term['Index']} has no attributes — "
-                "likely a layer/surface lookup miss"
-            )
-        assert "LumpedPort" not in boundaries
-        assert "WavePort" not in boundaries
+    def test_write_config_rejects_duplicate_same_layer_terminals(
+        self, electrostatic_sim
+    ):
+        """Duplicate same-layer terminal selectors fail closed."""
+        with pytest.raises(ValueError, match="already selected"):
+            electrostatic_sim.write_config()
 
-    def test_planar_conductor_terminal_not_grounded(
+    def test_planar_conductor_rejects_duplicate_same_layer_terminals(
         self, tmp_path_factory, cpw_component
     ):
-        """Terminals on planar (thin) conductor layers must be picked up.
-
-        Regression: the terminal loop previously only scanned
-        ``conductor_surfaces`` (thick metals with shell surfaces) and
-        seeded ``ground_attrs`` with ``pec_attrs``. A terminal defined on
-        a planar layer therefore ended up with empty attributes and the
-        layer's PG was sent to Ground instead.
-        """
+        """Duplicate planar-conductor terminal selectors fail closed."""
         tmp_path = tmp_path_factory.mktemp("electrostatic_planar")
         sim = ElectrostaticSim()
         sim.set_output_dir(str(tmp_path / "palace-sim"))
@@ -417,21 +958,282 @@ class TestElectrostaticSimWorkflow:
         sim.add_terminal("T2", layer="metal1")
         sim.set_electrostatic()
         sim.mesh(preset="coarse", planar_conductors=True)
+        with pytest.raises(ValueError, match="already selected"):
+            sim.write_config()
+
+    def test_same_layer_planar_terminals_can_select_islands_by_center(
+        self,
+        tmp_path_factory,
+    ):
+        """Center selectors split same-layer PEC islands into distinct terminals."""
+        gf.gpdk.PDK.activate()
+        component = gf.Component()
+        left = component << gf.c.rectangle(
+            (30, 20),
+            centered=True,
+            layer=gf.gpdk.LAYER.M1,
+        )
+        left.movex(-35)
+        right = component << gf.c.rectangle(
+            (30, 20),
+            centered=True,
+            layer=gf.gpdk.LAYER.M1,
+        )
+        right.movex(35)
+
+        tmp_path = tmp_path_factory.mktemp("electrostatic_same_layer")
+        sim = ElectrostaticSim()
+        sim.set_output_dir(str(tmp_path / "palace-sim"))
+        sim.set_geometry(component)
+        sim.set_stack(substrate_thickness=2.0, air_above=300.0)
+        sim.add_terminal("left", layer="metal1", center=(-35, 0))
+        sim.add_terminal("right", layer="metal1", center=(35, 0))
+        sim.set_electrostatic()
+        sim.mesh(preset="coarse", planar_conductors=True)
         sim.write_config()
 
         output_dir = sim._output_dir
         assert output_dir is not None
         config = json.loads((Path(output_dir) / "config.json").read_text())
-        boundaries = config["Boundaries"]
-        terminal_attrs: set[int] = set()
-        for term in boundaries["Terminal"]:
-            assert term["Attributes"], "Planar-conductor terminal has no attributes"
-            terminal_attrs.update(term["Attributes"])
-        # And the terminal's PG must not also appear in Ground.
-        ground_attrs = set(boundaries.get("Ground", {}).get("Attributes", []))
-        assert terminal_attrs.isdisjoint(ground_attrs), (
-            f"Terminal attrs {terminal_attrs} overlap Ground {ground_attrs}"
+        terminals = config["Boundaries"]["Terminal"]
+        assert len(terminals) == 2
+        assert terminals[0]["Attributes"]
+        assert terminals[1]["Attributes"]
+        assert set(terminals[0]["Attributes"]).isdisjoint(terminals[1]["Attributes"])
+
+        index_map = json.loads(
+            (Path(output_dir) / "metadata" / "palace_index_map.json").read_text()
         )
+        terminal_rows = [
+            row
+            for row in index_map["entries"]
+            if row["section"] == "Boundaries.Terminal"
+        ]
+        assert {row["terminal_name"] for row in terminal_rows} == {"left", "right"}
+        assert {row["role"] for row in terminal_rows} == {"pec_surface"}
+
+
+# ---------------------------------------------------------------------------
+# MagnetostaticSim workflow
+# ---------------------------------------------------------------------------
+
+
+class TestMagnetostaticSimWorkflow:
+    """End-to-end MagnetostaticSim: configure -> mesh -> write_config."""
+
+    @pytest.fixture(scope="class")
+    def magnetostatic_sim(self, tmp_path_factory, cpw_component):
+        """Create and mesh a MagnetostaticSim with current sources."""
+        tmp_path = tmp_path_factory.mktemp("magnetostatic")
+        sim = MagnetostaticSim()
+        sim.set_output_dir(str(tmp_path / "palace-sim"))
+        sim.set_geometry(cpw_component)
+        sim.set_stack(substrate_thickness=2.0)
+        sim.set_airbox(margin_x=50.0, margin_y=50.0, z_above=100.0, z_below=20.0)
+        sim.add_current_source(
+            "signal",
+            layer="metal1",
+            center=(0, 0),
+            direction=[1.0, 0.0, 0.0],
+            coordinate_system="Cartesian",
+        )
+        sim.add_current_source(
+            "return",
+            layer="metal1",
+            center=(0, 31),
+            direction="-X",
+        )
+        sim.set_magnetostatic(save_fields=1)
+        sim.mesh(preset="coarse", planar_conductors=True)
+        return sim
+
+    def test_write_config_generates_magnetostatic_boundaries(self, magnetostatic_sim):
+        """Magnetostatic config emits Palace sources and magnetic flux rows."""
+        magnetostatic_sim.write_config()
+        config_path = Path(magnetostatic_sim._output_dir) / "config.json"
+        assert config_path.exists()
+        config = json.loads(config_path.read_text())
+        assert config["Problem"]["Type"] == "Magnetostatic"
+        assert config["Solver"]["Magnetostatic"]["Save"] == 1
+
+        boundaries = config["Boundaries"]
+        assert "SurfaceCurrent" in boundaries
+        assert len(boundaries["SurfaceCurrent"]) == 2
+        directions = [entry["Direction"] for entry in boundaries["SurfaceCurrent"]]
+        assert [1.0, 0.0, 0.0] in directions
+        assert "-X" in directions
+        assert boundaries["SurfaceCurrent"][0]["CoordinateSystem"] == "Cartesian"
+        for entry in boundaries["SurfaceCurrent"]:
+            assert entry["Attributes"], "SurfaceCurrent source has no attributes"
+        assert set(boundaries["SurfaceCurrent"][0]["Attributes"]).isdisjoint(
+            boundaries["SurfaceCurrent"][1]["Attributes"]
+        )
+        assert "PMC" in boundaries
+        assert boundaries["PMC"]["Attributes"]
+
+        flux_entries = boundaries["Postprocessing"]["SurfaceFlux"]
+        assert len(flux_entries) == 2
+        assert {entry["Type"] for entry in flux_entries} == {"Magnetic"}
+        assert {entry["TwoSided"] for entry in flux_entries} == {False}
+
+        assert "LumpedPort" not in boundaries
+        assert "WavePort" not in boundaries
+        assert "Terminal" not in boundaries
+
+    def test_write_config_generates_source_index_map(self, magnetostatic_sim):
+        """Magnetostatic source indices map back to manifest physical names."""
+        magnetostatic_sim.write_config()
+        index_map_path = (
+            Path(magnetostatic_sim._output_dir) / "metadata" / "palace_index_map.json"
+        )
+        assert index_map_path.exists()
+        index_map = json.loads(index_map_path.read_text())
+        source_rows = [
+            row
+            for row in index_map["entries"]
+            if row["section"] == "Boundaries.SurfaceCurrent"
+        ]
+        flux_rows = [
+            row
+            for row in index_map["entries"]
+            if row["section"] == "Boundaries.Postprocessing.SurfaceFlux"
+        ]
+        assert {row["index"] for row in source_rows} == {1, 2}
+        assert {row["current_source_name"] for row in source_rows} == {
+            "signal",
+            "return",
+        }
+        assert {row["role"] for row in source_rows} == {"pec_surface"}
+        assert {row["index"] for row in flux_rows} == {1, 2}
+        assert {row["Type"] for row in flux_rows} == {"Magnetic"}
+
+    def test_manifest_postprocessing_preserves_magnetic_flux_rows(
+        self, magnetostatic_sim
+    ):
+        """Manifest postprocessing must not erase solver-owned flux output."""
+        postprocessing = build_postprocessing_config_from_manifest(
+            magnetostatic_sim._last_mesh_result.manifest,
+            include_empty_sections=False,
+        )
+
+        config_path = magnetostatic_sim.write_config(postprocessing=postprocessing)
+        config = json.loads(config_path.read_text())
+
+        energy_rows = config["Domains"]["Postprocessing"]["Energy"]
+        assert energy_rows
+
+        flux_rows = config["Boundaries"]["Postprocessing"]["SurfaceFlux"]
+        assert len(flux_rows) == 2
+        assert {row["Type"] for row in flux_rows} == {"Magnetic"}
+
+        index_map = json.loads(
+            (
+                Path(magnetostatic_sim._output_dir)
+                / "metadata"
+                / "palace_index_map.json"
+            ).read_text()
+        )
+        sections = {row["section"] for row in index_map["entries"]}
+        assert "Domains.Postprocessing.Energy" in sections
+        assert "Boundaries.Postprocessing.SurfaceFlux" in sections
+
+    def test_write_config_supports_multielement_current_source(
+        self, tmp_path, cpw_component
+    ):
+        """Multielement current sources emit Palace Elements and flux rows."""
+        sim = MagnetostaticSim()
+        sim.set_output_dir(str(tmp_path / "multielement"))
+        sim.set_geometry(cpw_component)
+        sim.set_stack(substrate_thickness=2.0)
+        sim.set_airbox(margin_x=50.0, margin_y=50.0, z_above=100.0, z_below=20.0)
+        sim.add_current_source(
+            "loop",
+            elements=(
+                {
+                    "layer": "metal1",
+                    "center": (0, 0),
+                    "direction": "+X",
+                },
+                {
+                    "layer": "metal1",
+                    "center": (0, 31),
+                    "direction": [0.0, -1.0, 0.0],
+                    "coordinate_system": "Cartesian",
+                },
+            ),
+        )
+        sim.mesh(preset="coarse", planar_conductors=True)
+        config_path = sim.write_config()
+        config = json.loads(config_path.read_text())
+
+        surface_current = config["Boundaries"]["SurfaceCurrent"][0]
+        assert surface_current["Index"] == 1
+        assert "Attributes" not in surface_current
+        assert len(surface_current["Elements"]) == 2
+        assert surface_current["Elements"][0]["Direction"] == "+X"
+        assert surface_current["Elements"][1]["Direction"] == [0.0, -1.0, 0.0]
+        assert surface_current["Elements"][1]["CoordinateSystem"] == "Cartesian"
+        assert set(surface_current["Elements"][0]["Attributes"]).isdisjoint(
+            surface_current["Elements"][1]["Attributes"]
+        )
+
+        flux = config["Boundaries"]["Postprocessing"]["SurfaceFlux"][0]
+        assert flux["Index"] == 1
+        assert flux["Type"] == "Magnetic"
+        assert set(flux["Attributes"]) == set(
+            surface_current["Elements"][0]["Attributes"]
+            + surface_current["Elements"][1]["Attributes"]
+        )
+
+        index_map = json.loads(
+            (
+                Path(cast(Path, sim._output_dir)) / "metadata" / "palace_index_map.json"
+            ).read_text()
+        )
+        source_rows = [
+            row
+            for row in index_map["entries"]
+            if row["section"] == "Boundaries.SurfaceCurrent"
+        ]
+        assert {row["current_source_name"] for row in source_rows} == {"loop"}
+        assert {row["current_source_element_count"] for row in source_rows} == {2}
+        assert {row["current_source_element_index"] for row in source_rows} == {1, 2}
+        assert any(row["Direction"] == "+X" for row in source_rows)
+        assert any(row["Direction"] == [0.0, -1.0, 0.0] for row in source_rows)
+        assert {
+            row["CoordinateSystem"]
+            for row in source_rows
+            if row.get("CoordinateSystem") is not None
+        } == {"Cartesian"}
+
+    def test_write_config_rejects_overlapping_multielement_current_source(
+        self, tmp_path, cpw_component
+    ):
+        """Multielement source selectors must not claim the same attribute."""
+        sim = MagnetostaticSim()
+        sim.set_output_dir(str(tmp_path / "overlap"))
+        sim.set_geometry(cpw_component)
+        sim.set_stack(substrate_thickness=2.0)
+        sim.set_airbox(margin_x=50.0, margin_y=50.0, z_above=100.0, z_below=20.0)
+        sim.add_current_source(
+            "loop",
+            elements=(
+                {
+                    "layer": "metal1",
+                    "center": (0, 0),
+                    "direction": "+X",
+                },
+                {
+                    "layer": "metal1",
+                    "center": (0, 0),
+                    "direction": "-X",
+                },
+            ),
+        )
+        sim.mesh(preset="coarse", planar_conductors=True)
+
+        with pytest.raises(ValueError, match="already selected"):
+            sim.write_config()
 
 
 # ---------------------------------------------------------------------------
@@ -565,13 +1367,30 @@ class TestNumericalConfig:
         config = json.loads(config_path.read_text())
 
         linear = config["Solver"]["Linear"]
-        assert linear["Type"] == "Default"
+        assert linear["Type"] == "AMS"
         assert linear["KSPType"] == "GMRES"
         assert linear["Tol"] == 2e-7
         assert linear["MaxIts"] == 777
-        assert linear["Preconditioner"] == "AMS"
         assert config["Solver"]["Order"] == 3
         assert config["Solver"]["Device"] == "CPU"
+
+    def test_write_config_merges_solver_hints(self, cpw_component, tmp_path):
+        sim = DrivenSim()
+        sim.set_output_dir(str(tmp_path / "solver-hints"))
+        sim.set_geometry(cpw_component)
+        sim.set_stack(substrate_thickness=2.0, air_above=300.0)
+        sim.add_cpw_port("o1", layer="metal1", s_width=10, gap_width=6, length=5.0)
+        sim.add_cpw_port("o2", layer="metal1", s_width=10, gap_width=6, length=5.0)
+        sim.set_driven(fmin=1e9, fmax=100e9)
+        sim.mesh(preset="coarse")
+        sim.write_config(hints={"Solver": {"Device": "GPU", "Backend": "/gpu/cuda"}})
+        assert sim._output_dir is not None
+        config = json.loads((sim._output_dir / "config.json").read_text())
+
+        assert config["Solver"]["Device"] == "GPU"
+        assert config["Solver"]["Backend"] == "/gpu/cuda"
+        assert config["Solver"]["Linear"]["Type"] == "Default"
+        assert config["Solver"]["Driven"]["Samples"]
 
     def test_mumps_solver_config_defaults(self, cpw_component, tmp_path):
         sim = DrivenSim()

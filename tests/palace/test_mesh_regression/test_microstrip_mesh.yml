@@ -1,6 +1,9 @@
 groups:
   boundary_surfaces:
   - absorbing
+  - air___sin
+  - air___sio2
+  - sin___sio2
   conductor_surfaces:
   - metal1_xy
   - metal1_z
@@ -12,10 +15,10 @@ groups:
   - P2
   volumes:
   - air
-  - si
   - sin
+  - sio2
 mesh:
-  elements: 6095
+  elements: 6094
   invalid_elements: 0
-  nodes: 863
-  tetrahedra: 3709
+  nodes: 864
+  tetrahedra: 3708

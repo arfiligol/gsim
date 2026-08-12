@@ -130,6 +130,23 @@ sim.plot_mesh(
     interactive=True,
 )
 
+# %% [markdown]
+# ### Generate handoff package
+#
+# This writes the canonical Palace run folder and packages it as a `.tar.gz`
+# archive that can be transferred to an HPC system before solver execution.
+
+# %%
+from pathlib import Path
+
+run_dir = sim.output_dir
+assert run_dir is not None
+HANDOFF_PACKAGE_DIR = Path()
+handoff_archive = HANDOFF_PACKAGE_DIR / f"{run_dir.name}-palace.tar.gz"
+
+handoff_bundle = sim.generate_handoff_package(archive_path=handoff_archive)
+handoff_archive
+
 # %% [markdown] papermill={"duration": 0.001812, "end_time": "2026-05-18T13:21:18.513433", "exception": false, "start_time": "2026-05-18T13:21:18.511621", "status": "completed"}
 # ### Run simulation
 

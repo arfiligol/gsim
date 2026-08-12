@@ -11,7 +11,9 @@ priority than user overrides).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -21,10 +23,23 @@ from gsim.common.stack.materials import (
     ValidityRange,
 )
 
+_FIELD_ALIASES = {
+    "permittivity": ("permittivity", "relative_permittivity", "epsilon_r", "eps_r"),
+    "conductivity": ("conductivity",),
+    "loss_tangent": ("loss_tangent",),
+    "permeability": ("permeability", "relative_permeability", "mu_r"),
+}
 
-def _parse_tensor_or_scalar(entry: dict, key: str) -> float | list[float] | None:
+
+def _parse_tensor_or_scalar(
+    entry: Mapping[str, Any], key: str
+) -> float | list[float] | None:
     """Parse a key that can be scalar or list-of-3 from an overlay dict."""
-    val = entry.get(key)
+    val = None
+    for alias in _FIELD_ALIASES.get(key, (key,)):
+        if alias in entry:
+            val = entry[alias]
+            break
     if val is None:
         return None
     if isinstance(val, list):
@@ -32,33 +47,30 @@ def _parse_tensor_or_scalar(entry: dict, key: str) -> float | list[float] | None
     return float(val)
 
 
-def load_overlay(path: str | Path) -> dict[str, MaterialProperties]:
-    """Load a PDK overlay from a YAML file.
+def load_overlay_data(data: Mapping[str, Any] | None) -> dict[str, MaterialProperties]:
+    """Load a PDK overlay from an in-memory mapping.
 
-    The YAML file should have the format:
+    The mapping should have the format:
 
-    ```yaml
+    ```python
     materials:
       SiO2:
         permittivity: 4.1
         loss_tangent: 0.0
         validity_frequency: [0, 10e9]
         source: "IHP SG13G2 PDK"
+    material_aliases:
+      silicon: Si
     ```
 
     Args:
-        path: Path to the overlay YAML file.
+        data: Mapping containing a ``materials`` section and optional
+            ``material_aliases`` section mapping external names to overlay
+            material records.
 
     Returns:
-        Dict of material name -> MaterialProperties from the overlay.
+        Dict of material name -> MaterialProperties from the overlay mapping.
     """
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"Overlay file not found: {path}")
-
-    with open(path) as f:
-        data = yaml.safe_load(f)
-
     if not data or "materials" not in data:
         return {}
 
@@ -104,7 +116,79 @@ def load_overlay(path: str | Path) -> dict[str, MaterialProperties]:
 
         overlay_materials[name] = MaterialProperties(**props_kwargs)
 
-    return overlay_materials
+    return _expand_material_aliases(overlay_materials, data.get("material_aliases"))
+
+
+def _expand_material_aliases(
+    overlay_materials: dict[str, MaterialProperties],
+    material_aliases: Any,
+) -> dict[str, MaterialProperties]:
+    """Return overlay materials with explicit overlay-local aliases expanded."""
+    if material_aliases is None:
+        return overlay_materials
+
+    if not isinstance(material_aliases, Mapping):
+        msg = "material_aliases must be a mapping of alias name to material name."
+        raise TypeError(msg)
+
+    expanded = dict(overlay_materials)
+    for alias, target in material_aliases.items():
+        alias_name = _material_alias_name(alias)
+        target_name = _material_alias_name(target)
+        target_key = next(
+            (
+                name
+                for name in overlay_materials
+                if name.lower().strip() == target_name.lower().strip()
+            ),
+            None,
+        )
+        if any(
+            name.lower().strip() == alias_name.lower().strip()
+            for name in overlay_materials
+        ):
+            msg = (
+                f"material_aliases entry {alias_name!r} collides with an "
+                "explicit overlay material."
+            )
+            raise ValueError(msg)
+        if target_key is None:
+            msg = (
+                f"material_aliases entry {alias_name!r} targets unknown "
+                f"overlay material {target_name!r}."
+            )
+            raise KeyError(msg)
+        expanded[alias_name] = overlay_materials[target_key]
+    return expanded
+
+
+def _material_alias_name(name: Any) -> str:
+    """Validate one overlay material alias name."""
+    if isinstance(name, bool) or not isinstance(name, str) or not name:
+        msg = "material_aliases entries must be non-empty strings."
+        raise ValueError(msg)
+    return name
+
+
+def load_overlay(path: str | Path) -> dict[str, MaterialProperties]:
+    """Load a PDK overlay from a YAML/JSON file.
+
+    The file should have the format accepted by :func:`load_overlay_data`.
+
+    Args:
+        path: Path to the overlay YAML/JSON file.
+
+    Returns:
+        Dict of material name -> MaterialProperties from the overlay.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Overlay file not found: {path}")
+
+    with open(path) as f:
+        data = yaml.safe_load(f)
+
+    return load_overlay_data(data)
 
 
 def merge_overlay(
@@ -130,13 +214,38 @@ def merge_overlay(
 
     merged = dict(base)
     for name, props in overlay.items():
-        if name in merged:
-            existing = merged[name]
-            merged[name] = _merge_material(existing, props)
+        canonical_name = _canonical_material_name(name, merged)
+        if canonical_name in merged:
+            existing = merged[canonical_name]
+            merged[canonical_name] = _merge_material(existing, props)
+            if canonical_name != name:
+                merged[name] = merged[canonical_name]
         else:
             merged[name] = props
 
     return merged
+
+
+def _canonical_material_name(
+    name: str,
+    materials: dict[str, MaterialProperties],
+) -> str:
+    """Resolve a material name against aliases and case-insensitive entries."""
+    from gsim.common.stack.materials import MATERIAL_ALIASES
+
+    if name in materials:
+        return name
+
+    normalized = name.lower().strip()
+    alias = MATERIAL_ALIASES.get(normalized)
+    if alias and alias in materials:
+        return alias
+
+    for material_name in materials:
+        if material_name.lower() == normalized:
+            return material_name
+
+    return name
 
 
 def _merge_material(

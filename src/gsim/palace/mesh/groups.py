@@ -1,13 +1,26 @@
-"""Physical group assignment for Palace mesh generation.
+"""Physical group assignment for Palace mesh manifests.
 
-This module builds the ``groups`` dict consumed by the config generator
-from the ``pg_map`` produced by ``run_boolean_pipeline``.
+Owns: turning final, live Gmsh entities and ``pg_map`` entries into the mesh
+``groups`` artifact consumed by manifests, mesh fields, and Palace config
+generation.
+
+Pipeline contract:
+- Native gsim route: classify volumes, PEC sheets, port sheets, boundary
+  surfaces, and finite-conductor shell surfaces from the boolean-pipeline
+  output. This route preserves planar_conductors semantics from
+  ``geometry.add_metals()`` and does not invent Surface EPR interfaces.
+
+Does not own: raw geometry construction, route-specific final topology build,
+post-mesh topology invention, Palace postprocessing row assembly, or result
+reports. XAO-backed Surface EPR route geometry should enter through a separate
+mesh-source adapter, not this native layout-to-mesh assignment path.
 """
 
 from __future__ import annotations
 
 import contextlib
 import logging
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
 import gmsh
@@ -16,8 +29,24 @@ from . import gmsh_utils
 
 if TYPE_CHECKING:
     from gsim.common.stack import LayerStack
+    from gsim.palace.models import ActivatedRegion
 
 logger = logging.getLogger(__name__)
+
+
+def _volume_material_name(
+    owner_name: str,
+    volume_info: Mapping[str, object],
+    stack: LayerStack | None,
+) -> str:
+    """Resolve a volume material from group metadata or the stack layer."""
+    material = volume_info.get("material")
+    if isinstance(material, str) and material:
+        return material
+    layer = stack.layers.get(owner_name) if stack is not None else None
+    if layer is not None:
+        return str(layer.material)
+    return owner_name
 
 
 def assign_physical_groups(
@@ -29,7 +58,10 @@ def assign_physical_groups(
     entities: list[gmsh_utils.Entity],
     pg_map: dict[str, int],
     _stack: LayerStack,
+    activated_regions: Sequence[ActivatedRegion] | None = None,
     pec_block_tags: dict | None = None,
+    shaped_dielectric_names: set[str] | None = None,
+    pec_surface_bboxes: dict | None = None,
 ) -> dict:
     """Build the ``groups`` dict from the boolean-pipeline result.
 
@@ -42,6 +74,9 @@ def assign_physical_groups(
         entities: Entity list used in run_boolean_pipeline
         pg_map: name -> physical-group tag returned by run_boolean_pipeline
         _stack: Layer stack used to identify via layers
+        activated_regions: Explicit region declarations from the public
+            simulation API. Group metadata preserves their role, margins, die
+            names, and material override provenance.
 
     Returns:
         Dict with the same schema as before::
@@ -61,22 +96,73 @@ def assign_physical_groups(
         "port_surfaces": {},
         "boundary_surfaces": {},
     }
-
     # Helper: entity name -> (phys_group, surface_tags)
     entity_by_name: dict[str, gmsh_utils.Entity] = {e.name: e for e in entities}
 
+    def _surface_bbox(
+        tags: list[int],
+    ) -> tuple[float, float, float, float, float, float] | None:
+        bboxes: list[tuple[float, float, float, float, float, float]] = []
+        for tag in tags:
+            with contextlib.suppress(Exception):
+                bboxes.append(kernel.getBoundingBox(2, tag))
+        if not bboxes:
+            return None
+        return (
+            min(bbox[0] for bbox in bboxes),
+            min(bbox[1] for bbox in bboxes),
+            min(bbox[2] for bbox in bboxes),
+            max(bbox[3] for bbox in bboxes),
+            max(bbox[4] for bbox in bboxes),
+            max(bbox[5] for bbox in bboxes),
+        )
+
+    def _surface_tags_for_physical_group(pg_tag: int) -> list[int]:
+        with contextlib.suppress(Exception):
+            return list(gmsh.model.getEntitiesForPhysicalGroup(2, pg_tag))
+        return []
+
+    def _append_pec_surface(
+        *,
+        key: str,
+        entity_name: str,
+        entity: gmsh_utils.Entity,
+        layer_name: str,
+        island_index: int | None = None,
+        metadata: Mapping[str, object] | None = None,
+    ) -> dict[str, object] | None:
+        pg = pg_map.get(entity_name)
+        if pg is None:
+            return None
+        surf_tags = [tag for dim, tag in entity.dimtags if dim == 2]
+        if not surf_tags:
+            return None
+        surface_info = {
+            "phys_group": pg,
+            "tags": surf_tags,
+            "layer": layer_name,
+            "physical_name": key,
+        }
+        bbox = _surface_bbox(surf_tags)
+        if bbox is not None:
+            surface_info["bbox"] = bbox
+        if island_index is not None:
+            surface_info["island_index"] = island_index
+        if metadata:
+            surface_info.update(dict(metadata))
+        groups["pec_surfaces"][key] = surface_info
+        return surface_info
+
     # Build set of via and shaped-dielectric layer names
     via_layers: set[str] = set()
-    shaped_dielectric_layers: set[str] = set()
+    shaped_dielectric_layers = set(shaped_dielectric_names or ())
+    activated_region_by_layer = {
+        region.layer: region for region in activated_regions or ()
+    }
     if _stack:
         via_layers = {
             n for n, layer in _stack.layers.items() if layer.layer_type == "via"
         }
-
-    # Auto-detected shaped dielectrics from add_metals() metadata
-    _shaped_meta = metal_tags.get("__shaped_dielectrics__")
-    if isinstance(_shaped_meta, set):
-        shaped_dielectric_layers |= _shaped_meta
 
     # --- Volumes (dielectrics + airbox) ---
     for material in dielectric_tags:
@@ -87,10 +173,44 @@ def assign_physical_groups(
         if entity and pg is not None:
             vol_tags = [t for d, t in entity.dimtags if d == 3]
             if vol_tags:
-                groups["volumes"][group_name] = {
+                volume_info = {
                     "phys_group": pg,
                     "tags": vol_tags,
                 }
+                layer = _stack.layers.get(group_name) if _stack else None
+                if layer is not None and layer.layer_type in {
+                    "dielectric",
+                    "substrate",
+                }:
+                    activated_region = activated_region_by_layer.get(group_name)
+                    material_name = (
+                        activated_region.material or layer.material
+                        if activated_region is not None
+                        else layer.material
+                    )
+                    volume_info["stack_layer"] = group_name
+                    volume_info["material"] = material_name
+                    if activated_region is not None:
+                        volume_info["activated_region"] = True
+                        volume_info["activated_region_role"] = activated_region.role
+                        volume_info["margin_x"] = activated_region.margin_x
+                        volume_info["margin_y"] = activated_region.margin_y
+                        volume_info["z_above"] = activated_region.z_above
+                        volume_info["z_below"] = activated_region.z_below
+                        volume_info["material_source"] = (
+                            "activated_region_override"
+                            if activated_region.material is not None
+                            else "stack_layer"
+                        )
+                        if activated_region.material is not None:
+                            volume_info["material_override"] = activated_region.material
+                        if activated_region.die is not None:
+                            volume_info["die"] = activated_region.die
+                        if activated_region.lower_die is not None:
+                            volume_info["lower_die"] = activated_region.lower_die
+                        if activated_region.upper_die is not None:
+                            volume_info["upper_die"] = activated_region.upper_die
+                groups["volumes"][group_name] = volume_info
 
     # --- Via volumes (3D material regions with conductivity) ---
     for layer_name in via_layers:
@@ -118,6 +238,27 @@ def assign_physical_groups(
                     "is_shaped_dielectric": True,
                 }
 
+    volume_material_by_name = {
+        name: _volume_material_name(name, info, _stack)
+        for name, info in groups["volumes"].items()
+    }
+
+    def _live_tags(dim: int, tags: Sequence[int]) -> list[int]:
+        live: list[int] = []
+        for tag in tags:
+            entity_tag = int(tag)
+            with contextlib.suppress(Exception):
+                kernel.getBoundingBox(dim, entity_tag)
+                if dim == 2:
+                    gmsh.model.getBoundary(
+                        [(2, entity_tag)],
+                        combined=False,
+                        oriented=False,
+                        recursive=False,
+                    )
+                live.append(entity_tag)
+        return live
+
     # --- PEC surfaces (planar conductors) ---
     for layer_name, tag_info in metal_tags.items():
         if layer_name.startswith("__") and layer_name.endswith("__"):
@@ -125,14 +266,30 @@ def assign_physical_groups(
         if tag_info.get("surfaces_xy"):
             pec_name = f"{layer_name}_pec"
             entity = entity_by_name.get(pec_name)
-            pg = pg_map.get(pec_name)
-            if entity and pg is not None:
-                surf_tags = [t for d, t in entity.dimtags if d == 2]
-                if surf_tags:
-                    groups["pec_surfaces"][layer_name] = {
-                        "phys_group": pg,
-                        "tags": surf_tags,
-                    }
+            if entity:
+                _append_pec_surface(
+                    key=layer_name,
+                    entity_name=pec_name,
+                    entity=entity,
+                    layer_name=layer_name,
+                )
+            else:
+                split_entities = sorted(
+                    (
+                        name,
+                        split_entity,
+                    )
+                    for name, split_entity in entity_by_name.items()
+                    if name.startswith(f"{layer_name}_pec_")
+                )
+                for index, (split_name, split_entity) in enumerate(split_entities):
+                    _append_pec_surface(
+                        key=split_name,
+                        entity_name=split_name,
+                        entity=split_entity,
+                        layer_name=layer_name,
+                        island_index=index,
+                    )
 
             # Always collect refinement lines for planar conductors — either
             # from explicit refinement_lines (if they survived boolean) or
@@ -224,11 +381,7 @@ def assign_physical_groups(
             # for dim=2 surfaces whose bboxes match the pre-boolean PEC
             # surfaces and harvest their boundary curves.
             if not groups.get("refinement_lines", {}).get(layer_name, {}).get("tags"):
-                _pec_bboxes = (
-                    metal_tags.get("__pec_surface_bboxes__", {}).get(layer_name, [])
-                    if isinstance(metal_tags.get("__pec_surface_bboxes__"), dict)
-                    else []
-                )
+                _pec_bboxes = (pec_surface_bboxes or {}).get(layer_name, [])
                 if _pec_bboxes:
                     all_surfaces = gmsh.model.getEntities(2)
                     found_lines: set[int] = set()
@@ -329,10 +482,17 @@ def assign_physical_groups(
                                 "phys_group": pg,
                                 "tags": surf_tags,
                                 "direction": info["elements"][i].get("direction"),
+                                "sheet_source": info["elements"][i].get("sheet_source"),
+                                "sheet_layer": info["elements"][i].get("sheet_layer"),
+                                "sheet_gds_layer": info["elements"][i].get(
+                                    "sheet_gds_layer"
+                                ),
                             }
                         )
             groups["port_surfaces"][port_name] = {
                 "type": "cpw",
+                "port_name": info.get("name") if info else None,
+                "sheet_source": info.get("sheet_source") if info else None,
                 "elements": element_phys_groups,
             }
         else:
@@ -344,6 +504,12 @@ def assign_physical_groups(
                     groups["port_surfaces"][port_name] = {
                         "phys_group": pg,
                         "tags": surf_tags,
+                        "port_name": info.get("name") if info else None,
+                        "sheet_source": info.get("sheet_source") if info else None,
+                        "sheet_layer": info.get("sheet_layer") if info else None,
+                        "sheet_gds_layer": info.get("sheet_gds_layer")
+                        if info
+                        else None,
                     }
 
     # --- Via boundary surfaces (via volume faces exposed to dielectric) ---
@@ -366,12 +532,12 @@ def assign_physical_groups(
         }
         via_boundary: dict[str, list[int]] = {}
         for pg_name, pg_tag in pg_map.items():
-            parts = pg_name.split("__")
+            parts = gmsh_utils.split_interface_physical_name(pg_name)
             via_parts = [p for p in parts if p in via_layers]
             if len(via_parts) != 1:
                 continue
             others = [p for p in parts if p != via_parts[0]]
-            # Skip outer-boundary side ("__None") and via<->conductor interfaces
+            # Skip outer-boundary side ("___None") and via<->conductor interfaces
             if not others or "None" in others:
                 continue
             if any(o in cond_via_names for o in others):
@@ -380,9 +546,45 @@ def assign_physical_groups(
         if via_boundary:
             groups["via_boundary_surfaces"] = via_boundary
 
-    # --- Boundary surfaces (outer faces labelled *__None by the pipeline) ---
+    # --- Internal material-interface surfaces ---
+    #
+    # The boolean pipeline labels unassigned surfaces by the two volume names
+    # they separate, e.g. "metal___substrate" or "substrate___vacuum". Preserve
+    # those names in the public groups dict so manifests, postprocessing
+    # builders, and report loaders can keep Palace indices tied to CAD/mesh
+    # identity instead of requiring private mesh readers.
+    assigned_surface_names = {
+        *groups["conductor_surfaces"],
+        *groups["pec_surfaces"],
+        *groups["port_surfaces"],
+    }
+    for pg_name, pg_tag in pg_map.items():
+        if pg_name in assigned_surface_names:
+            continue
+        if pg_name in groups["boundary_surfaces"]:
+            continue
+        if gmsh_utils.is_exterior_physical_name(pg_name):
+            continue
+        interface_parts = gmsh_utils.split_interface_physical_name(pg_name)
+        if len(interface_parts) != 2:
+            continue
+        surface_info = {
+            "phys_group": pg_tag,
+            "tags": _live_tags(2, _surface_tags_for_physical_group(pg_tag)),
+            "physical_name": pg_name,
+        }
+        interface_materials = {
+            part: volume_material_by_name[part]
+            for part in interface_parts
+            if part in volume_material_by_name
+        }
+        if interface_materials:
+            surface_info["interface_materials"] = interface_materials
+        groups["boundary_surfaces"][pg_name] = surface_info
+
+    # --- Boundary surfaces (outer faces labelled *___None by the pipeline) ---
     boundary_pgs: list[int] = [
-        pg for name, pg in pg_map.items() if name.endswith("__None")
+        pg for name, pg in pg_map.items() if gmsh_utils.is_exterior_physical_name(name)
     ]
     if boundary_pgs:
         groups["boundary_surfaces"]["absorbing"] = {

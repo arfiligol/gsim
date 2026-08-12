@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from gsim.common.stack.materials import MaterialProperties
-from gsim.common.stack.overlays import load_overlay, merge_overlay
+from gsim.common.stack.overlays import load_overlay, load_overlay_data, merge_overlay
 
 
 class TestLoadOverlay:
@@ -28,6 +28,92 @@ materials:
         assert "SiO2" in result
         assert result["SiO2"].permittivity == 4.0
         assert result["SiO2"].loss_tangent == 0.001
+
+    def test_load_overlay_data_accepts_mapping(self):
+        result = load_overlay_data(
+            {
+                "materials": {
+                    "Si": {
+                        "relative_permittivity": 11.45,
+                        "dispersion_models": [
+                            {
+                                "type": "constant",
+                                "permittivity": 11.45,
+                                "source": "test PDK",
+                            }
+                        ],
+                    }
+                }
+            }
+        )
+
+        assert result["Si"].permittivity == 11.45
+        assert result["Si"].dispersion_models[0].source == "test PDK"
+
+    def test_load_overlay_data_expands_material_aliases(self):
+        result = load_overlay_data(
+            {
+                "materials": {
+                    "vacuum": {
+                        "relative_permittivity": 1.0,
+                        "permeability": 1.0,
+                        "dispersion_models": [
+                            {
+                                "type": "constant",
+                                "permittivity": 1.0,
+                                "source": "test PDK",
+                            }
+                        ],
+                    }
+                },
+                "material_aliases": {"air": "vacuum"},
+            }
+        )
+
+        assert result["air"] is result["vacuum"]
+        assert result["air"].permeability == 1.0
+        assert result["air"].dispersion_models[0].source == "test PDK"
+
+    def test_load_overlay_data_rejects_unknown_material_alias_target(self):
+        with pytest.raises(KeyError, match="unknown overlay material"):
+            load_overlay_data(
+                {
+                    "materials": {"vacuum": {"relative_permittivity": 1.0}},
+                    "material_aliases": {"air": "missing"},
+                }
+            )
+
+    def test_load_overlay_data_rejects_material_alias_collisions(self):
+        with pytest.raises(ValueError, match="collides"):
+            load_overlay_data(
+                {
+                    "materials": {
+                        "air": {"relative_permittivity": 1.0},
+                        "vacuum": {"relative_permittivity": 1.0},
+                    },
+                    "material_aliases": {"air": "vacuum"},
+                }
+            )
+
+    @pytest.mark.parametrize(
+        "material_aliases",
+        [
+            [],
+            {"": "vacuum"},
+            {None: "vacuum"},
+            {"air": ""},
+            {"air": None},
+        ],
+    )
+    def test_load_overlay_data_validates_material_aliases(self, material_aliases):
+        error_type = TypeError if material_aliases == [] else ValueError
+        with pytest.raises(error_type, match="material_aliases"):
+            load_overlay_data(
+                {
+                    "materials": {"vacuum": {"relative_permittivity": 1.0}},
+                    "material_aliases": material_aliases,
+                }
+            )
 
     def test_load_with_frequency_validity(self, tmp_path):
         yaml_content = """
@@ -77,6 +163,21 @@ materials:
         assert "sapphire" in result
         assert result["sapphire"].permittivity == [9.3, 9.3, 11.5]
 
+    def test_load_accepts_pdk_relative_permittivity_alias(self, tmp_path):
+        yaml_content = """
+materials:
+  Si:
+    relative_permittivity: 11.45
+    loss_tangent: 0.0001
+"""
+        overlay_path = tmp_path / "overlay.yaml"
+        overlay_path.write_text(yaml_content)
+
+        result = load_overlay(overlay_path)
+
+        assert result["Si"].permittivity == 11.45
+        assert result["Si"].loss_tangent == 0.0001
+
     def test_load_with_wavelength_validity(self, tmp_path):
         yaml_content = """
 materials:
@@ -111,6 +212,41 @@ class TestMergeOverlay:
         merged = merge_overlay(overlay)
         assert merged["SiO2"].permittivity == 3.9
         assert merged["SiO2"].loss_tangent == 0.001
+
+    def test_merge_overrides_existing_material_alias(self):
+        overlay = {
+            "Si": MaterialProperties(permittivity=11.45),
+        }
+        merged = merge_overlay(overlay)
+        assert merged["silicon"].permittivity == 11.45
+        assert merged["Si"].permittivity == 11.45
+
+    def test_merge_applies_overlay_material_aliases(self):
+        overlay = load_overlay_data(
+            {
+                "materials": {
+                    "vacuum": {
+                        "relative_permittivity": 1.0,
+                        "permeability": 1.0,
+                        "dispersion_models": [
+                            {
+                                "type": "constant",
+                                "permittivity": 1.0,
+                                "source": "test PDK",
+                            }
+                        ],
+                    }
+                },
+                "material_aliases": {"air": "vacuum"},
+            }
+        )
+
+        merged = merge_overlay(overlay)
+
+        assert merged["air"].permittivity == 1.0
+        assert merged["air"].permeability == 1.0
+        assert merged["air"].loss_tangent == 0.0
+        assert merged["air"].dispersion_models[0].source == "test PDK"
 
     def test_merge_preserves_non_overlaid(self):
         overlay = {

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "artifact": "physical_name_contract.msh",
+  "source": "meshwell cad_gmsh -> mesh output",
+  "contract": {
+    "interface_delimiter": "___",
+    "boundary_delimiter": "None",
+    "owner": "meshwell",
+    "consumer": "gsim"
+  },
+  "physical_groups_by_dimension": {
+    "2": ["A___B", "B___helper", "A___None", "B___None"],
+    "3": ["A", "B"]
+  },
+  "absent_physical_names": ["helper", "helper___None"]
+}

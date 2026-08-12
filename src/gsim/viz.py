@@ -54,8 +54,9 @@ def plot_mesh(
             *solid* mode.  Ignored in *wireframe* mode.
 
     Example:
-        >>> pa.plot_mesh("./sim/palace.msh", show_groups=["metal", "P"])
-        >>> pa.plot_mesh(
+        >>> from gsim.viz import plot_mesh
+        >>> plot_mesh("./sim/palace.msh", show_groups=["metal", "P"])
+        >>> plot_mesh(
         ...     "sim.msh", style="solid", transparent_groups=["Absorbing_boundary"]
         ... )
     """
@@ -232,7 +233,7 @@ def _plot_solid(
         else:
             cell_blocks_3d.append((block_cells, pv_type, tags))
 
-    active_blocks = cell_blocks_2d if cell_blocks_2d else cell_blocks_3d
+    active_blocks = cell_blocks_2d or cell_blocks_3d
 
     if not active_blocks:
         logger.warning("No supported solid cell blocks — falling back to wireframe.")

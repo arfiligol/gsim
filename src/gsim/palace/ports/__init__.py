@@ -1,23 +1,18 @@
-"""Port definition for Palace EM simulation.
+"""gdsfactory port lowering helpers for Palace simulations.
 
-Usage:
-    from gsim.palace.ports import configure_port, extract_ports
+This package provides the notebook-facing helpers that attach Palace intent to
+live gdsfactory ports and later lower that metadata into
+``gsim.palace.models.PalacePort`` records.
 
-    # Configure ports on a component
-    c = gf.get_component("straight_metal")
-    configure_port(c.ports['o1'], type='lumped', layer='topmetal2')
-    configure_port(c.ports['o2'], type='lumped', layer='topmetal2')
-
-    # Extract ports for simulation
-    ports = extract_ports(c, stack)
+Stable port models live in ``gsim.palace.models``, while mesh sheet creation,
+physical groups, Palace JSON generation, and result resolution stay in their
+own packages. The port pipeline is ``PalaceSimBase.add_port()`` to these
+helpers, then to mesh generation through the model records.
 """
 
 from __future__ import annotations
 
-from gsim.palace.ports.config import (
-    PalacePort,
-    PortGeometry,
-    PortType,
+from gsim.palace.ports.lowering import (
     configure_cpw_port,
     configure_inplane_port,
     configure_via_port,
@@ -26,9 +21,6 @@ from gsim.palace.ports.config import (
 )
 
 __all__ = [
-    "PalacePort",
-    "PortGeometry",
-    "PortType",
     "configure_cpw_port",
     "configure_inplane_port",
     "configure_via_port",

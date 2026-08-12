@@ -739,6 +739,38 @@ MATERIAL_ALIASES: dict[str, str] = {
 }
 
 
+def _normalize_material_keys[T](
+    d: dict[str, T],
+    *,
+    used_names: set[str] | None = None,
+    label: str = "overrides",
+) -> dict[str, T]:
+    """Normalize material keys for case-insensitive resolution."""
+    normalized: dict[str, T] = {}
+    collisions: list[str] = []
+    for key, value in d.items():
+        normalized_key = key.lower().strip()
+        if normalized_key in normalized:
+            collisions.append(repr(key))
+        normalized[normalized_key] = value
+    if collisions:
+        warnings.warn(
+            f"Duplicate material entries in {label} after case normalization: "
+            f"{', '.join(collisions)}. Only the last value for each name kept.",
+            stacklevel=3,
+        )
+    if used_names is not None:
+        known = {name.lower().strip() for name in used_names}
+        unmatched = sorted(name for name in normalized if name not in known)
+        if unmatched:
+            warnings.warn(
+                f"Material {label} key(s) {unmatched} do not match any material "
+                f"in the geometry ({sorted(used_names)}). Check spelling/case.",
+                stacklevel=3,
+            )
+    return normalized
+
+
 def get_material_properties(material_name: str) -> MaterialProperties | None:
     """Look up material properties by name."""
     name_lower = material_name.lower().strip()
@@ -771,15 +803,17 @@ def _resolve_with_overlay(
     Returns:
         MaterialProperties if found, else None
     """
-    if overlay and material_name in overlay:
-        return overlay[material_name]
-
     if overlay:
+        name_lower = material_name.lower().strip()
+        for key, value in overlay.items():
+            if key.lower().strip() == name_lower:
+                return value
         from gsim.common.stack.overlays import merge_overlay
 
         merged = merge_overlay(overlay)
-        if material_name in merged:
-            return merged[material_name]
+        for key, value in merged.items():
+            if key.lower().strip() == name_lower:
+                return value
 
     return get_material_properties(material_name)
 
@@ -809,8 +843,10 @@ def resolve_material_at_wavelength(
     """
     overrides = overrides or {}
 
-    if material_name in overrides:
-        return overrides[material_name].evaluate_at_wavelength(wavelength_um)
+    name_lower = material_name.lower().strip()
+    for key, value in overrides.items():
+        if key.lower().strip() == name_lower:
+            return value.evaluate_at_wavelength(wavelength_um)
 
     props = _resolve_with_overlay(material_name, overlay)
     if props is not None:
@@ -860,11 +896,10 @@ def should_enable_dispersion(
     """
     overrides = overrides or {}
 
-    if material_name in overrides:
-        return (
-            overrides[material_name].index_variation(wavelength_um, bandwidth_um)
-            > threshold
-        )
+    name_lower = material_name.lower().strip()
+    for key, value in overrides.items():
+        if key.lower().strip() == name_lower:
+            return value.index_variation(wavelength_um, bandwidth_um) > threshold
 
     props = _resolve_with_overlay(material_name, overlay)
     if props is not None:

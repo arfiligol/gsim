@@ -48,6 +48,16 @@ class MeshConfig(BaseModel):
     fmax: float = Field(default=100e9, gt=0)
     boundary_conditions: list[str] | None = None
     planar_conductors: bool = False
+    surface_epr_enabled: bool = False
+    surface_epr_representation: Literal["A", "B", "C"] = Field(
+        default="B",
+        description=(
+            "Optional SGB Surface EPR route contract. Native gsim meshing is "
+            "used unless the caller explicitly enables Surface EPR route "
+            "geometry; routes A/B/C are delegated to Semantic Geometry "
+            "Builder XAO plus sidecar artifacts."
+        ),
+    )
     merge_via_distance: float = Field(default=2.0, ge=0)
     curve_fit_mode: Literal["line", "spline", "bspline"] = "line"
     curve_fit_layers: list[str] = Field(default_factory=lambda: ["core", "core2"])
@@ -74,7 +84,16 @@ class MeshConfig(BaseModel):
     def set_default_boundary_conditions(self) -> Self:
         """Set default boundary conditions if not provided."""
         if self.boundary_conditions is None:
-            self.boundary_conditions = ["ABC", "ABC", "ABC", "ABC", "ABC", "ABC"]
+            object.__setattr__(
+                self,
+                "boundary_conditions",
+                ["ABC", "ABC", "ABC", "ABC", "ABC", "ABC"],
+            )
+        object.__setattr__(
+            self,
+            "surface_epr_representation",
+            str(self.surface_epr_representation).upper(),
+        )
         return self
 
     @classmethod

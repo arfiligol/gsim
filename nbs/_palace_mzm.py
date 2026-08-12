@@ -413,7 +413,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pyvista as pv
 
-from gsim.palace import load_fields
+from gsim.palace.resolve.loaders.fields import load_fields
 
 pv.OFF_SCREEN = True
 

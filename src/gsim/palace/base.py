@@ -1,69 +1,228 @@
-"""Base mixin for Palace simulation classes.
+"""Shared runtime API for Palace simulation classes.
 
-Provides common methods shared across all simulation types:
-DrivenSim, EigenmodeSim, ElectrostaticSim.
+This module provides the common simulation lifecycle used by
+``DrivenSim``, ``EigenmodeSim``, ``ElectrostaticSim``, and
+``MagnetostaticSim``: geometry assignment, output management, mesh/config
+generation, cloud submission, local Palace execution, and handoff-package
+generation.
+
+The base model does not own problem-specific physics settings, report
+composition, local process command details, or notebook display. Subclasses
+define the problem configuration, ``gsim.palace.run`` owns concrete execution
+implementations, ``gsim.palace.resolve`` parses generated artifacts into typed
+result data for review/report workflows, and typed report objects expose
+notebook display helpers.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import tempfile
+from collections.abc import Mapping, Sequence
+from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+
+from gsim.common import Geometry, LayerStack
 from gsim.palace.models import (
+    ActivatedRegion,
+    ActivatedRegionRole,
     CPWPortConfig,
     DrivenConfig,
     EigenmodeConfig,
     MaterialConfig,
     MeshConfig,
     NumericalConfig,
+    PalaceConfigVersion,
     PortConfig,
+    SimulationLayerCatalog,
     TerminalConfig,
     WavePortConfig,
 )
-from gsim.palace.models.results import SimulationResult, ValidationResult
+from gsim.palace.models.ports import PalaceDirectionInput
+from gsim.palace.models.results import ValidationResult
+from gsim.palace.models.versions import (
+    DEFAULT_PALACE_CONFIG_VERSION,
+    normalize_palace_config_version,
+)
+from gsim.palace.run.handoff import generate_palace_handoff_package
+from gsim.palace.run.local import run_palace_local
+from gsim.palace.run_folder import palace_run_folder, prepare_palace_run_folder
+from gsim.palace.run_stage import PalaceRunHandle
 
 if TYPE_CHECKING:
     from gdsfactory.component import Component
+    from gdsfactory.technology import LayerStack as GfLayerStack
 
-    from gsim.common import Geometry, LayerStack
-    from gsim.palace.results import SParams
+    from gsim.palace.handoff import (
+        PalaceSlurmHandoffResult,
+        PalaceSlurmProfileResolution,
+    )
+    from gsim.palace.mesh.generator import MeshResult
+    from gsim.palace.mesh.postprocessing import PostprocessingConfig
+    from gsim.palace.results.driven import SParams
+    from gsim.palace.run_folder import PalaceRunFolder
 
 logger = logging.getLogger(__name__)
 
 
-class PalaceSimMixin:
-    """Mixin providing common methods for all Palace simulation classes.
+def _default_refinement_config() -> dict[str, Any]:
+    """Return the default Palace adaptive-refinement configuration."""
+    return {
+        "Tol": 1.0e-2,
+        "MaxIts": 0,
+        "MaxSize": 0,
+        "UpdateFraction": 0.7,
+        "Nonconformal": False,
+        "UniformLevels": 0,
+        "Boxes": [],
+        "Spheres": [],
+    }
 
-    Subclasses must define these attributes (typically via Pydantic fields):
-        - geometry: Geometry | None
-        - stack: LayerStack | None
-        - materials: dict[str, MaterialConfig]
-        - numerical: NumericalConfig
-        - _output_dir: Path | None (private)
-        - _stack_kwargs: dict[str, Any] (private)
+
+def _surface_epr_face_kinds(
+    face_kind: str | Sequence[str] | None,
+) -> tuple[str | None, ...]:
+    """Normalize one Surface EPR face-kind selector into a tuple."""
+    if face_kind is None:
+        return (None,)
+    if isinstance(face_kind, str):
+        return (face_kind,)
+    return tuple(str(value) for value in face_kind)
+
+
+def _normalize_surface_epr_representation(representation: str) -> str:
+    """Validate and normalize a Surface EPR route representation."""
+    value = str(representation).upper()
+    if value not in {"A", "B", "C"}:
+        msg = "Surface EPR representation must be A, B, or C."
+        raise ValueError(msg)
+    return value
+
+
+def _surface_epr_interface_assignments(
+    interfaces: Mapping[str, Mapping[str, Any]] | Sequence[Mapping[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Normalize declarative Surface EPR interface assignments."""
+    if interfaces is None:
+        return []
+
+    if isinstance(interfaces, Mapping):
+        records = [
+            {
+                "interface_type": interface_type,
+                **dict(cast(Mapping[str, Any], config)),
+            }
+            for interface_type, config in interfaces.items()
+        ]
+    else:
+        records = [dict(config) for config in interfaces]
+
+    assignments: list[dict[str, Any]] = []
+    for record in records:
+        interface_type = str(record.pop("interface_type", ""))
+        if interface_type not in {"MA", "MS", "SA"}:
+            msg = "Surface EPR interface_type must be MA, MS, or SA."
+            raise ValueError(msg)
+        try:
+            preset = dict(cast(Mapping[str, Any], record.pop("preset")))
+        except KeyError:
+            msg = f"Surface EPR interface {interface_type!r} requires a preset."
+            raise ValueError(msg) from None
+        preset_name = record.pop("preset_name", None)
+        face_kind = record.pop("face_kind", None)
+        role = record.pop("role", None)
+        required = bool(record.pop("required", True))
+        if record:
+            keys = ", ".join(sorted(str(key) for key in record))
+            msg = f"Unknown Surface EPR interface fields: {keys}."
+            raise ValueError(msg)
+
+        preset_interface_type = preset.get("interface_type")
+        if (
+            preset_interface_type is not None
+            and preset_interface_type != interface_type
+        ):
+            msg = (
+                f"Interface preset {preset_name or interface_type!r} declares "
+                f"interface_type {preset_interface_type!r}, not {interface_type!r}."
+            )
+            raise ValueError(msg)
+        if preset_interface_type is None:
+            preset["interface_type"] = interface_type
+
+        assignments.append(
+            {
+                "interface_type": interface_type,
+                "preset_name": preset_name or interface_type.lower(),
+                "preset": preset,
+                "face_kinds": _surface_epr_face_kinds(
+                    cast(str | Sequence[str] | None, face_kind)
+                ),
+                "role": role,
+                "required": required,
+            }
+        )
+    return assignments
+
+
+class PalaceSimBase(BaseModel):
+    """Pydantic base model for all Palace simulation classes.
+
+    This base owns the common simulation lifecycle and shared Pydantic state.
+    Problem-specific subclasses add solver configuration and selection fields
+    such as ports, terminals, or current sources.
     """
 
-    # Type hints for required attributes (implemented by subclasses)
-    geometry: Geometry | None
-    stack: LayerStack | None
-    materials: dict[str, MaterialConfig]
-    numerical: NumericalConfig
-    driven: DrivenConfig
-    eigenmode: EigenmodeConfig
-    ports: list[PortConfig]
-    cpw_ports: list[CPWPortConfig]
-    wave_ports: list[WavePortConfig]
-    terminals: list[TerminalConfig]
-    simulation_type: Literal["driven", "eigenmode", "electrostatic"]
-    _output_dir: Path | None
-    _stack_kwargs: dict[str, Any]
-    _pec_blocks: list
-    _hints: dict[str, Any]
-    absorbing_boundary: bool
-    _airbox_config: dict[str, float]
+    model_config = ConfigDict(
+        validate_assignment=True,
+        arbitrary_types_allowed=True,
+    )
+
+    geometry: Geometry | None = None
+    stack: LayerStack | None = None
+    materials: dict[str, MaterialConfig] = Field(default_factory=dict)
+    numerical: NumericalConfig = Field(default_factory=NumericalConfig)
+    palace_version: PalaceConfigVersion = DEFAULT_PALACE_CONFIG_VERSION
+    refinement: dict[str, Any] = Field(default_factory=_default_refinement_config)
+    output_formats: dict[str, Any] = Field(default_factory=dict)
+
+    _output_dir: Path | None = PrivateAttr(default=None)
+    _stack_kwargs: dict[str, Any] = PrivateAttr(default_factory=dict)
+    _airbox_config: dict[str, float] = PrivateAttr(default_factory=dict)
+    _pec_blocks: list = PrivateAttr(default_factory=list)
+    _hints: dict[str, Any] = PrivateAttr(default_factory=dict)
+    _simulation_layers: SimulationLayerCatalog | None = PrivateAttr(default=None)
+    _activated_regions: dict[str, ActivatedRegion] = PrivateAttr(default_factory=dict)
+    _last_mesh_result: Any = PrivateAttr(default=None)
+    _last_ports: list = PrivateAttr(default_factory=list)
+    _last_postprocessing_config: Any = PrivateAttr(default=None)
+    _postprocessing_override_config: Any = PrivateAttr(default=None)
+    _surface_epr_config: dict[str, Any] = PrivateAttr(default_factory=dict)
+    _surface_epr_interface_assignments: list[dict[str, Any]] = PrivateAttr(
+        default_factory=list
+    )
+    _job_id: str | None = PrivateAttr(default=None)
+
+    if TYPE_CHECKING:
+        # Subclasses provide these problem-specific fields. Keeping these
+        # annotations inside TYPE_CHECKING gives shared methods useful types
+        # without making Pydantic treat them as base-model fields.
+        driven: DrivenConfig
+        eigenmode: EigenmodeConfig
+        ports: list[PortConfig]
+        cpw_ports: list[CPWPortConfig]
+        wave_ports: list[WavePortConfig]
+        terminals: list[TerminalConfig]
+        simulation_type: Literal[
+            "driven", "eigenmode", "boundarymode", "electrostatic", "magnetostatic"
+        ]
+        absorbing_boundary: bool
 
     # -------------------------------------------------------------------------
     # Output directory
@@ -103,16 +262,24 @@ class PalaceSimMixin:
 
         self.geometry = Geometry(component=component)
 
+    def set_simulation_layers(
+        self, catalog: SimulationLayerCatalog | Mapping[str, Any] | None
+    ) -> None:
+        """Set PDK-declared simulation-only layers for authored solver sheets.
+
+        The catalog identifies GDS layers that carry solver boundary geometry.
+        It does not turn those polygons into material geometry and it does not
+        configure ports by itself; ports still need ``add_port()`` or
+        ``add_cpw_port()`` declarations.
+        """
+        self._simulation_layers = (
+            None if catalog is None else SimulationLayerCatalog.model_validate(catalog)
+        )
+
     @property
     def component(self) -> Component | None:
         """Get the current component (for backward compatibility)."""
         return self.geometry.component if self.geometry else None
-
-    # Backward compatibility alias
-    @property
-    def _component(self) -> Component | None:
-        """Internal component access (backward compatibility)."""
-        return self.component
 
     # -------------------------------------------------------------------------
     # Stack methods
@@ -120,7 +287,7 @@ class PalaceSimMixin:
 
     def set_stack(
         self,
-        stack: LayerStack | None = None,
+        stack: LayerStack | GfLayerStack | None = None,
         *,
         yaml_path: str | Path | None = None,
         air_above: float | None = None,
@@ -148,7 +315,9 @@ class PalaceSimMixin:
                sim.set_stack(my_layer_stack)
 
         Args:
-            stack: Custom gsim LayerStack (bypasses PDK extraction).
+            stack: Custom gsim or gdsfactory LayerStack. Direct inputs are
+                copied into simulation-owned state and bypass lazy PDK
+                extraction.
             yaml_path: Path to custom YAML stack file.
             air_above: Deprecated and ignored. Use set_airbox().
             air_below: Deprecated and ignored. Use set_airbox().
@@ -162,8 +331,7 @@ class PalaceSimMixin:
             >>> sim.set_stack(substrate_thickness=2.0)
         """
         if stack is not None:
-            # Directly use a pre-built LayerStack — skip lazy resolution
-            self.stack = stack
+            self.stack = self._copy_stack_input(stack)
             self._stack_kwargs = {"_prebuilt": True}
             return
 
@@ -184,6 +352,29 @@ class PalaceSimMixin:
         }
         # Stack will be resolved lazily during mesh() or simulate()
         self.stack = None
+
+    def _copy_stack_input(self, stack: LayerStack | GfLayerStack) -> LayerStack:
+        """Return a simulation-owned copy of a direct stack input."""
+        if isinstance(stack, LayerStack):
+            return stack.model_copy(deep=True)
+
+        if hasattr(stack, "layers"):
+            from gsim.common.stack.extractor import extract_layer_stack
+
+            converted = extract_layer_stack(
+                stack,
+                pdk_name=str(getattr(stack, "name", "custom")),
+                include_substrate=True,
+                add_oxide_dielectric=False,
+                add_passivation_dielectric=False,
+            )
+            converted.dielectrics = []
+            return converted
+
+        raise TypeError(
+            "set_stack(stack=...) expects a gsim.common.LayerStack or "
+            "gdsfactory LayerStack input."
+        )
 
     def set_airbox(
         self,
@@ -210,6 +401,13 @@ class PalaceSimMixin:
             z_below: Airbox extension below the stack bottom (um).
                 Defaults to ``0.0`` when omitted.
         """
+        if self._activated_regions:
+            raise ValueError(
+                "Explicit activated regions cannot be mixed with set_airbox(). "
+                "Use activate_substrate(), activate_inter_die_vacuum(), and "
+                "activate_outer_vacuum() without airbox configuration."
+            )
+
         mx = 0.0 if margin_x is None else margin_x
         my = 0.0 if margin_y is None else margin_y
         za = 0.0 if z_above is None else z_above
@@ -245,6 +443,14 @@ class PalaceSimMixin:
         z_below: float | None = None,
     ) -> None:
         """Route mesh-time airbox kwargs through set_airbox()."""
+        if self._activated_regions:
+            if z_above is not None or z_below is not None:
+                raise ValueError(
+                    "Explicit activated regions cannot be mixed with mesh-time "
+                    "airbox z_above/z_below kwargs."
+                )
+            return
+
         if (
             margin_x is None
             and margin_y is None
@@ -260,6 +466,123 @@ class PalaceSimMixin:
             z_above=z_above if z_above is not None else current.get("z_above"),
             z_below=z_below if z_below is not None else current.get("z_below"),
         )
+
+    def activate_substrate(
+        self,
+        layer: str,
+        *,
+        die: str | None = None,
+        margin_x: float = 0.0,
+        margin_y: float = 0.0,
+        material: str | None = None,
+    ) -> None:
+        """Activate a stack substrate layer as an explicit Palace region."""
+        self._activate_region(
+            layer,
+            role="substrate",
+            die=die,
+            margin_x=margin_x,
+            margin_y=margin_y,
+            material=material,
+        )
+
+    def activate_inter_die_vacuum(
+        self,
+        layer: str = "D0_TO_D1_GAP",
+        *,
+        lower_die: str = "D0",
+        upper_die: str = "D1",
+        margin_x: float = 0.0,
+        margin_y: float = 0.0,
+        material: str | None = None,
+    ) -> None:
+        """Activate the inter-die vacuum gap as an explicit Palace region."""
+        self._activate_region(
+            layer,
+            role="inter_die_vacuum",
+            lower_die=lower_die,
+            upper_die=upper_die,
+            margin_x=margin_x,
+            margin_y=margin_y,
+            material=material,
+        )
+
+    def activate_outer_vacuum(
+        self,
+        layer: str = "OUTER_VACUUM",
+        *,
+        margin_x: float = 0.0,
+        margin_y: float = 0.0,
+        z_above: float = 0.0,
+        z_below: float = 0.0,
+        material: str | None = None,
+    ) -> None:
+        """Activate the outer vacuum as an explicit Palace region."""
+        self._activate_region(
+            layer,
+            role="outer_vacuum",
+            margin_x=margin_x,
+            margin_y=margin_y,
+            z_above=z_above,
+            z_below=z_below,
+            material=material,
+        )
+
+    def _activate_region(
+        self,
+        layer: str,
+        *,
+        role: ActivatedRegionRole,
+        die: str | None = None,
+        lower_die: str | None = None,
+        upper_die: str | None = None,
+        margin_x: float = 0.0,
+        margin_y: float = 0.0,
+        z_above: float = 0.0,
+        z_below: float = 0.0,
+        material: str | None = None,
+    ) -> None:
+        """Store sim-owned region activation intent."""
+        if self._airbox_config:
+            raise ValueError(
+                "Explicit activated regions cannot be mixed with set_airbox(). "
+                "Remove airbox configuration before activating stack regions."
+            )
+
+        region = ActivatedRegion(
+            layer=layer,
+            role=role,
+            die=die,
+            lower_die=lower_die,
+            upper_die=upper_die,
+            margin_x=margin_x,
+            margin_y=margin_y,
+            z_above=z_above,
+            z_below=z_below,
+            material=material,
+        )
+        existing = self._activated_regions.get(region.layer)
+        if existing is not None and existing.role != region.role:
+            raise ValueError(
+                f"Stack layer '{region.layer}' is already activated as "
+                f"{existing.role!r}."
+            )
+        self._activated_regions[region.layer] = region
+
+    def _activated_region_values(self) -> tuple[ActivatedRegion, ...]:
+        """Return activated regions in deterministic layer-name order."""
+        return tuple(
+            self._activated_regions[layer] for layer in sorted(self._activated_regions)
+        )
+
+    def _reject_explicit_region_airbox_config(self, mesh_config: MeshConfig) -> None:
+        """Reject stored mesh airbox expansion in explicit-region mode."""
+        if self._activated_regions and mesh_config.airbox_margin > 0:
+            raise ValueError(
+                "Explicit activated regions cannot be mixed with mesh airbox "
+                "controls. Configure region margins with activate_substrate(), "
+                "activate_inter_die_vacuum(), or activate_outer_vacuum()."
+            )
 
     # -------------------------------------------------------------------------
     # Material methods
@@ -343,15 +666,60 @@ class PalaceSimMixin:
             )
         )
 
+    def set_postprocessing(
+        self,
+        postprocessing: PostprocessingConfig | None = None,
+    ) -> None:
+        """Set a typed Palace postprocessing config as an explicit override.
+
+        This is the low-level escape hatch. Surface EPR interface selection and
+        Route A/B/C representation belong to ``set_surface_epr()``.
+        """
+        self._postprocessing_override_config = postprocessing
+        self._last_postprocessing_config = postprocessing
+
+    def set_surface_epr(
+        self,
+        *,
+        representation: Literal["A", "B", "C"] = "B",
+        interfaces: Mapping[str, Mapping[str, Any]]
+        | Sequence[Mapping[str, Any]]
+        | None = None,
+    ) -> None:
+        """Configure Surface EPR mesh intent and dielectric postprocessing.
+
+        ``gsim`` owns the generated interface catalog and Palace dielectric
+        postprocessing rows. Callers declare which physical representation and
+        interface presets they want; A/B/C route geometry is produced by SGB and
+        gsim consumes the resulting mesh identity.
+        """
+        config: dict[str, Any] = {
+            "representation": _normalize_surface_epr_representation(representation),
+        }
+
+        self._surface_epr_config = config
+        self._surface_epr_interface_assignments = _surface_epr_interface_assignments(
+            interfaces
+        )
+        self._postprocessing_override_config = None
+
     def set_numerical(
         self,
         *,
         order: int = 1,
         tolerance: float = 1e-6,
         max_iterations: int = 400,
-        solver_type: Literal["Default", "SuperLU", "STRUMPACK", "MUMPS"] = "Default",
+        solver_type: Literal[
+            "AMS",
+            "BoomerAMG",
+            "SuperLU",
+            "MUMPS",
+            "STRUMPACK",
+            "Jacobi",
+            "Default",
+        ] = "Default",
         preconditioner: Literal["Default", "AMS", "BoomerAMG"] = "Default",
-        device: Literal["CPU", "GPU"] = "CPU",
+        device: Literal["CPU", "GPU", "Debug"] = "CPU",
     ) -> None:
         """Configure numerical solver parameters.
 
@@ -374,6 +742,135 @@ class PalaceSimMixin:
             preconditioner=preconditioner,
             device=device,
         )
+
+    def set_palace_version(self, version: str) -> None:
+        """Set the target Palace configuration schema version.
+
+        The target version controls config schema validation and is recorded in
+        handoff/local-run metadata. It does not change the mesh-derived
+        ``Domains`` or ``Boundaries`` ownership in the config generator.
+        """
+        self.palace_version = normalize_palace_config_version(version)
+
+    def set_refinement(
+        self,
+        *,
+        tol: float | None = None,
+        max_its: int | None = None,
+        max_size: float | None = None,
+        update_fraction: float | None = None,
+        nonconformal: bool | None = None,
+        max_nc_levels: int | None = None,
+        maximum_imbalance: float | None = None,
+        save_adapt_iterations: bool | None = None,
+        save_adapt_mesh: bool | None = None,
+        uniform_levels: int | None = None,
+        serial_uniform_levels: int | None = None,
+        boxes: Sequence[Mapping[str, Any]] | None = None,
+        spheres: Sequence[Mapping[str, Any]] | None = None,
+        extra: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Configure Palace ``Model.Refinement`` through a JSON fragment."""
+        refinement = _default_refinement_config()
+        updates = {
+            "Tol": tol,
+            "MaxIts": max_its,
+            "MaxSize": max_size,
+            "UpdateFraction": update_fraction,
+            "Nonconformal": nonconformal,
+            "MaxNCLevels": max_nc_levels,
+            "MaximumImbalance": maximum_imbalance,
+            "SaveAdaptIterations": save_adapt_iterations,
+            "SaveAdaptMesh": save_adapt_mesh,
+            "UniformLevels": uniform_levels,
+            "SerialUniformLevels": serial_uniform_levels,
+            "Boxes": None if boxes is None else [dict(item) for item in boxes],
+            "Spheres": None if spheres is None else [dict(item) for item in spheres],
+        }
+        refinement.update(
+            {key: value for key, value in updates.items() if value is not None}
+        )
+        if extra:
+            refinement.update(deepcopy(dict(extra)))
+        self.refinement = refinement
+
+    def set_linear_solver(
+        self,
+        *,
+        type: Literal[  # noqa: A002
+            "AMS",
+            "BoomerAMG",
+            "SuperLU",
+            "MUMPS",
+            "STRUMPACK",
+            "Jacobi",
+            "Default",
+        ]
+        | None = None,
+        ksp_type: str | None = None,
+        tol: float | None = None,
+        max_its: int | None = None,
+        mg_max_levels: int | None = None,
+        mg_cycle_its: int | None = None,
+        mg_smooth_its: int | None = None,
+        div_free_tol: float | None = None,
+        div_free_max_its: int | None = None,
+        estimator_tol: float | None = None,
+        estimator_max_its: int | None = None,
+        estimator_mg: bool | None = None,
+        ams_max_its: int | None = None,
+        extra: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Configure Palace ``Solver.Linear`` through a JSON fragment."""
+        numerical = (
+            self.numerical.model_copy(
+                update={
+                    "solver_type": type,
+                    "preconditioner": "Default",
+                    "linear_solver": None,
+                }
+            )
+            if type is not None
+            else self.numerical
+        )
+        linear = numerical.to_linear_solver_config(palace_version=self.palace_version)
+        updates = {
+            "Type": type,
+            "KSPType": ksp_type,
+            "Tol": tol,
+            "MaxIts": max_its,
+            "MGMaxLevels": mg_max_levels,
+            "MGCycleIts": mg_cycle_its,
+            "MGSmoothIts": mg_smooth_its,
+            "DivFreeTol": div_free_tol,
+            "DivFreeMaxIts": div_free_max_its,
+            "EstimatorTol": estimator_tol,
+            "EstimatorMaxIts": estimator_max_its,
+            "EstimatorMG": estimator_mg,
+            "AMSMaxIts": ams_max_its,
+        }
+        linear.update(
+            {key: value for key, value in updates.items() if value is not None}
+        )
+        if extra:
+            linear.update(deepcopy(dict(extra)))
+        self.numerical.linear_solver = linear
+
+    def set_output_formats(
+        self,
+        *,
+        paraview: bool = True,
+        grid_function: bool = False,
+        extra: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Configure Palace ``Problem.OutputFormats``."""
+        output_formats: dict[str, Any] = {
+            "Paraview": paraview,
+            "GridFunction": grid_function,
+        }
+        if extra:
+            output_formats.update(deepcopy(dict(extra)))
+        self.output_formats = output_formats
 
     # -------------------------------------------------------------------------
     # Internal helpers
@@ -524,6 +1021,15 @@ class PalaceSimMixin:
             mesh_config.high_order_elements = existing_config.high_order_elements
             mesh_config.high_order_order = existing_config.high_order_order
             mesh_config.high_order_optimize = existing_config.high_order_optimize
+            mesh_config.surface_epr_enabled = existing_config.surface_epr_enabled
+            mesh_config.surface_epr_representation = (
+                existing_config.surface_epr_representation
+            )
+
+        surface_epr_representation = self._surface_epr_config.get("representation")
+        if surface_epr_representation is not None:
+            mesh_config.surface_epr_enabled = True
+            mesh_config.surface_epr_representation = surface_epr_representation
 
         # Preserve planar_conductors from sim.mesh_config if not
         # explicitly provided via sim.mesh(planar_conductors=...)
@@ -576,7 +1082,11 @@ class PalaceSimMixin:
     # Post-mesh validation
     # -------------------------------------------------------------------------
 
-    def validate_mesh(self) -> ValidationResult:
+    def validate_mesh(
+        self,
+        *,
+        material_overlay: Any | None = None,
+    ) -> ValidationResult:
         """Validate the generated mesh and config before cloud submission.
 
         Checks that physical groups are correctly assigned after meshing:
@@ -598,7 +1108,7 @@ class PalaceSimMixin:
         """
         from gsim.palace.mesh.validation import validate_mesh as _validate_mesh
 
-        result = _validate_mesh(self)
+        result = _validate_mesh(self, material_overlay=material_overlay)
         if not result.valid:
             raise RuntimeError(f"Mesh validation failed:\n{result}")
         return result
@@ -779,6 +1289,28 @@ class PalaceSimMixin:
                 if not terminal.layer
             )
 
+        if self.simulation_type == "magnetostatic":
+            current_sources = getattr(self, "current_sources", []) or []
+            if not current_sources:
+                errors.append(
+                    "Magnetostatic simulation requires at least 1 current source. "
+                    "Call add_current_source() to add a source."
+                )
+            for source in current_sources:
+                if source.elements:
+                    errors.extend(
+                        f"Current source '{source.name}' element {element_index}: "
+                        "'layer' is required"
+                        for element_index, element in enumerate(
+                            source.elements, start=1
+                        )
+                        if not element.layer
+                    )
+                elif not source.layer:
+                    errors.append(
+                        f"Current source '{source.name}': 'layer' is required"
+                    )
+
         valid = len(errors) == 0
         return ValidationResult(valid=valid, errors=errors, warnings=warnings_list)
 
@@ -835,9 +1367,11 @@ class PalaceSimMixin:
                     gf_port,
                     layer=port_config.layer,
                     length=port_config.length or gf_port.width,
+                    direction=port_config.direction,
                     impedance=port_config.impedance,
                     excited=port_config.excited,
                     offset=port_config.offset,
+                    generate_sheet=port_config.generate_sheet,
                 )
             elif port_config.geometry == "via" and (
                 port_config.from_layer is not None and port_config.to_layer is not None
@@ -846,6 +1380,7 @@ class PalaceSimMixin:
                     gf_port,
                     from_layer=port_config.from_layer,
                     to_layer=port_config.to_layer,
+                    direction=port_config.direction,
                     impedance=port_config.impedance,
                     excited=port_config.excited,
                     offset=port_config.offset,
@@ -885,6 +1420,7 @@ class PalaceSimMixin:
                 impedance=cpw_config.impedance,
                 excited=cpw_config.excited,
                 offset=cpw_config.offset,
+                generate_sheet=cpw_config.generate_sheet,
             )
         # Configure wave ports
         for port_config in self.wave_ports:
@@ -920,7 +1456,7 @@ class PalaceSimMixin:
         periodic_axis: str | None = None,
         decimate_tolerance: float | None = None,
         gmsh_verbosity: int = 0,
-    ) -> SimulationResult:
+    ) -> MeshResult:
         """Internal mesh generation."""
         from gsim.palace.mesh.generator import generate_mesh
 
@@ -933,6 +1469,7 @@ class PalaceSimMixin:
 
         # Resolve stack
         stack = self._resolve_stack()
+        self._reject_explicit_region_airbox_config(mesh_config)
         airbox_cfg = self._airbox_config or {}
         domain_margin_x = airbox_cfg.get("margin_x", mesh_config.effective_margin_x)
         domain_margin_y = airbox_cfg.get("margin_y", mesh_config.effective_margin_y)
@@ -964,11 +1501,18 @@ class PalaceSimMixin:
             simulation_type=self.simulation_type,
             driven_config=driven_config,
             eigenmode_config=self.eigenmode,
+            boundary_mode_config=getattr(self, "boundary_mode", None),
+            cross_section=getattr(self, "cross_section", None),
+            magnetostatic_config=getattr(self, "magnetostatic", None),
             numerical_config=self.numerical,
+            refinement_config=self.refinement,
+            problem_output_formats=self.output_formats or None,
             write_config=write_config,
+            terminals=getattr(self, "terminals", None) or [],
             planar_conductors=mesh_config.planar_conductors,
             pec_blocks=self._pec_blocks or None,
             absorbing_boundary=self.absorbing_boundary,
+            current_sources=getattr(self, "current_sources", None) or [],
             periodic_axis=periodic_axis,
             merge_via_distance=mesh_config.merge_via_distance,
             curve_fit_mode=mesh_config.curve_fit_mode,
@@ -981,19 +1525,18 @@ class PalaceSimMixin:
             high_order_optimize=mesh_config.high_order_optimize,
             verbosity=gmsh_verbosity,
             decimate_tolerance=decimate_tolerance,
+            surface_epr_representation=mesh_config.surface_epr_representation
+            if mesh_config.surface_epr_enabled
+            else None,
+            simulation_layers=self._simulation_layers,
+            activated_regions=self._activated_region_values(),
         )
 
         # Store mesh_result for deferred config generation
         self._last_mesh_result = mesh_result
         self._last_ports = ports
 
-        return SimulationResult(
-            mesh_path=mesh_result.mesh_path,
-            output_dir=output_dir,
-            config_path=mesh_result.config_path,
-            port_info=mesh_result.port_info,
-            mesh_stats=mesh_result.mesh_stats,
-        )
+        return mesh_result
 
     def _get_ports_for_preview(self, stack: LayerStack) -> list:
         """Get ports for preview."""
@@ -1112,6 +1655,7 @@ class PalaceSimMixin:
 
         # Resolve stack
         stack = self._resolve_stack()
+        self._reject_explicit_region_airbox_config(mesh_config)
 
         # Get ports
         ports = self._get_ports_for_preview(stack)
@@ -1144,7 +1688,15 @@ class PalaceSimMixin:
                 simulation_type=self.simulation_type,
                 driven_config=self.driven,
                 eigenmode_config=self.eigenmode,
+                boundary_mode_config=getattr(self, "boundary_mode", None),
+                cross_section=getattr(self, "cross_section", None),
+                electrostatic_config=getattr(self, "electrostatic", None),
+                magnetostatic_config=getattr(self, "magnetostatic", None),
                 numerical_config=self.numerical,
+                refinement_config=self.refinement,
+                problem_output_formats=self.output_formats or None,
+                terminals=getattr(self, "terminals", None) or [],
+                current_sources=getattr(self, "current_sources", None) or [],
                 planar_conductors=mesh_config.planar_conductors,
                 pec_blocks=self._pec_blocks or None,
                 absorbing_boundary=self.absorbing_boundary,
@@ -1158,6 +1710,11 @@ class PalaceSimMixin:
                 high_order_order=mesh_config.high_order_order,
                 high_order_optimize=mesh_config.high_order_optimize,
                 decimate_tolerance=decimate_tolerance,
+                surface_epr_representation=mesh_config.surface_epr_representation
+                if mesh_config.surface_epr_enabled
+                else None,
+                simulation_layers=self._simulation_layers,
+                activated_regions=self._activated_region_values(),
             )
 
     # -------------------------------------------------------------------------
@@ -1195,7 +1752,7 @@ class PalaceSimMixin:
         high_order_elements: bool | None = None,
         high_order_order: int | None = None,
         high_order_optimize: bool | None = None,
-    ) -> SimulationResult:
+    ) -> MeshResult:
         """Generate the mesh for Palace simulation.
 
         Only generates the mesh file (palace.msh). Config is generated
@@ -1244,7 +1801,7 @@ class PalaceSimMixin:
             high_order_optimize: Run gmsh high-order optimization after meshing.
 
         Returns:
-            SimulationResult with mesh path
+            MeshResult with mesh path and generated manifest
 
         Raises:
             ValueError: If output_dir not set or configuration is invalid
@@ -1350,6 +1907,13 @@ class PalaceSimMixin:
         validate_mesh: bool = True,
         photonic: bool = False,
         photononic: bool | None = None,
+        postprocessing: PostprocessingConfig | None = None,
+        reuse_postprocessing: bool = True,
+        write_artifacts: bool = True,
+        material_overlay: Any | None = None,
+        hints: dict[str, Any] | None = None,
+        prepare_run_folder: bool = True,
+        validate_schema: bool = True,
     ) -> Path:
         """Write Palace config.json after mesh generation.
 
@@ -1358,8 +1922,26 @@ class PalaceSimMixin:
         simulations, pass ``photonic=True`` to skip this validation.
 
         Args:
+            validate_mesh: Validate the generated mesh/config after writing.
             photonic: Skip conductor-oriented mesh validation when ``True``.
             photononic: Deprecated alias for ``photonic``.
+            postprocessing: Optional typed Palace postprocessing config built
+                from the mesh manifest. When provided, its domain and boundary
+                fragments are merged into ``config.json`` and its index map is
+                written beside the config.
+            reuse_postprocessing: Reuse the last provided postprocessing config
+                when ``postprocessing`` is omitted. This keeps upload/run paths
+                from silently dropping a previously configured index map.
+            write_artifacts: Write ``metadata/mesh_manifest.json`` and, when
+                postprocessing is active, ``metadata/palace_index_map.json``.
+            material_overlay: Optional PDK material overlay path, raw overlay
+                mapping, or loaded overlay mapping used to resolve Palace
+                material values without mutating the source layer stack.
+            hints: Optional Palace config fragments merged into ``config.json``.
+            prepare_run_folder: Create the canonical Palace run-folder skeleton
+                before writing config and sidecars.
+            validate_schema: Validate the final assembled Palace config against
+                the target ``palace_version`` schema before returning.
 
         Returns:
             Path to the generated config.json
@@ -1374,6 +1956,11 @@ class PalaceSimMixin:
             >>> config_path = sim.write_config(photonic=True)
         """
         from gsim.palace.mesh.generator import write_config as gen_write_config
+        from gsim.palace.mesh.postprocessing import (
+            PostprocessingIndexMap,
+            build_surface_current_index_map_from_manifest,
+            build_terminal_index_map_from_manifest,
+        )
 
         if photononic is not None:
             logger.warning(
@@ -1390,36 +1977,212 @@ class PalaceSimMixin:
                 "Was mesh() called with write_config=True already?"
             )
 
+        if postprocessing is not None:
+            self._last_postprocessing_config = postprocessing
+        elif self._postprocessing_override_config is not None:
+            postprocessing = self._postprocessing_override_config
+            self._last_postprocessing_config = postprocessing
+        elif self._surface_epr_interface_assignments:
+            postprocessing = self._build_surface_epr_postprocessing_config()
+            self._last_postprocessing_config = postprocessing
+        elif reuse_postprocessing:
+            postprocessing = getattr(self, "_last_postprocessing_config", None)
+
+        domain_postprocessing_config = None
+        boundary_postprocessing_config = None
+        if postprocessing is not None:
+            postprocessing_fragments = postprocessing.to_config()
+            domain_postprocessing_config = postprocessing_fragments["domains"]
+            boundary_postprocessing_config = postprocessing_fragments["boundaries"]
+
         stack = self._resolve_stack()
         electrostatic_config = getattr(self, "electrostatic", None)
+        magnetostatic_config = getattr(self, "magnetostatic", None)
         terminals = getattr(self, "terminals", None)
-        config_path = gen_write_config(
-            mesh_result=self._last_mesh_result,
-            stack=stack,
-            ports=self._last_ports,
-            simulation_type=self.simulation_type,
-            eigenmode_config=self.eigenmode,
-            driven_config=self.driven,
-            numerical_config=self.numerical,
-            absorbing_boundary=self.absorbing_boundary,
-            hints=self._hints,
-            electrostatic_config=electrostatic_config,
-            terminals=terminals or [],
+        current_sources = getattr(self, "current_sources", None)
+        config_hints = dict(self._hints)
+        if hints:
+            config_hints.update(hints)
+        previous_hints = self._hints
+        self._hints = config_hints
+        try:
+            config_path = gen_write_config(
+                mesh_result=self._last_mesh_result,
+                stack=stack,
+                ports=self._last_ports,
+                simulation_type=self.simulation_type,
+                eigenmode_config=self.eigenmode,
+                driven_config=self.driven,
+                boundary_mode_config=getattr(self, "boundary_mode", None),
+                numerical_config=self.numerical,
+                refinement_config=self.refinement,
+                problem_output_formats=self.output_formats or None,
+                palace_version=self.palace_version,
+                validate_schema=validate_schema,
+                absorbing_boundary=self.absorbing_boundary,
+                hints=self._hints,
+                electrostatic_config=electrostatic_config,
+                magnetostatic_config=magnetostatic_config,
+                terminals=terminals or [],
+                current_sources=current_sources or [],
+                postprocessing_config=domain_postprocessing_config,
+                boundary_postprocessing_config=boundary_postprocessing_config,
+                material_overlay=material_overlay,
+                prepare_run_folder=prepare_run_folder,
+            )
+            run_folder = (
+                prepare_palace_run_folder(config_path.parent)
+                if prepare_run_folder
+                else palace_run_folder(config_path.parent)
+            )
+
+            if write_artifacts:
+                self._last_mesh_result.manifest.write_json(
+                    run_folder.mesh_manifest_path
+                )
+                self._write_geometry_snapshot(run_folder)
+                index_map_entries = []
+                if postprocessing is not None:
+                    index_map_entries.extend(postprocessing.index_map.entries)
+
+                if self.simulation_type == "electrostatic":
+                    config = json.loads(config_path.read_text())
+                    terminal_entries = config.get("Boundaries", {}).get("Terminal", [])
+                    if isinstance(terminal_entries, list):
+                        terminal_names = tuple(
+                            terminal.name for terminal in terminals or []
+                        )
+                        terminal_map = build_terminal_index_map_from_manifest(
+                            self._last_mesh_result.manifest,
+                            terminal_entries,
+                            terminal_names=terminal_names,
+                        )
+                        index_map_entries.extend(terminal_map.entries)
+                elif self.simulation_type == "magnetostatic":
+                    config = json.loads(config_path.read_text())
+                    current_entries = config.get("Boundaries", {}).get(
+                        "SurfaceCurrent", []
+                    )
+                    if isinstance(current_entries, list):
+                        current_source_names = tuple(
+                            source.name for source in current_sources or []
+                        )
+                        current_map = build_surface_current_index_map_from_manifest(
+                            self._last_mesh_result.manifest,
+                            current_entries,
+                            current_source_names=current_source_names,
+                        )
+                        index_map_entries.extend(current_map.entries)
+
+                if index_map_entries:
+                    PostprocessingIndexMap(entries=tuple(index_map_entries)).write_json(
+                        run_folder.index_map_path
+                    )
+
+            # Validate mesh and config unless this is a photonic workflow.
+            if not photonic and validate_mesh:
+                validation = self.validate_mesh(material_overlay=material_overlay)
+                if not validation.valid:
+                    raise ValueError(f"Mesh validation failed:\n{validation}")
+
+            return config_path
+        finally:
+            self._hints = previous_hints
+
+    def _build_surface_epr_postprocessing_config(self) -> PostprocessingConfig:
+        """Build Palace postprocessing from declarative Surface EPR interfaces.
+
+        Representation selection is a catalog filter. Mesh/CAD owns whether A,
+        B, or C interface surfaces exist and how they are physically grouped.
+        """
+        from gsim.palace.mesh.postprocessing import (
+            build_postprocessing_config_from_manifest,
+            build_surface_epr_dielectric_specs,
+        )
+        from gsim.palace.mesh.surface_epr import build_interface_surface_catalog
+
+        if self._last_mesh_result is None:
+            msg = "No mesh result. Call mesh() before using set_surface_epr()."
+            raise ValueError(msg)
+
+        representation = self._surface_epr_config.get("representation", "B")
+        catalog = build_interface_surface_catalog(self._last_mesh_result.groups)
+        surfaces = tuple(
+            surface
+            for surface in catalog.surfaces
+            if str(getattr(surface, "representation", "B")).upper() == representation
+        )
+        specs = []
+        for assignment in self._surface_epr_interface_assignments:
+            for face_kind in assignment["face_kinds"]:
+                selected_surfaces = surfaces
+                selected_face_kind = face_kind
+                if (
+                    str(representation).upper() == "A"
+                    and assignment["interface_type"] == "MA"
+                ):
+                    selected_surfaces = tuple(
+                        replace(surface, interface_type="MA", face_kind=face_kind)
+                        for surface in surfaces
+                        if surface.interface_type == "MS"
+                    )
+                    selected_face_kind = face_kind
+                role = assignment["role"]
+                if role is None:
+                    role = (
+                        "boundary_surface"
+                        if (
+                            str(representation).upper() in {"A", "B", "C"}
+                            or assignment["interface_type"] == "SA"
+                        )
+                        else "conductor_surface"
+                    )
+                try:
+                    specs.extend(
+                        build_surface_epr_dielectric_specs(
+                            selected_surfaces,
+                            preset_name=str(assignment["preset_name"]),
+                            preset=assignment["preset"],
+                            face_kind=selected_face_kind,
+                            role=role,
+                        )
+                    )
+                except ValueError:
+                    if assignment["required"]:
+                        raise
+
+        return build_postprocessing_config_from_manifest(
+            self._last_mesh_result.manifest,
+            dielectric_interfaces=tuple(specs),
         )
 
-        # Validate mesh and config unless this is a photonic workflow.
-        if not photonic and validate_mesh:
-            validation = self.validate_mesh()
-            if not validation.valid:
-                raise ValueError(f"Mesh validation failed:\n{validation}")
-
-        return config_path
+    def _write_geometry_snapshot(self, run_folder: PalaceRunFolder) -> Path | None:
+        """Write an optional run-local GDS snapshot for review provenance."""
+        component = self.geometry.component if self.geometry is not None else None
+        if component is None:
+            return None
+        write_gds = getattr(component, "write_gds", None)
+        if write_gds is None:
+            return None
+        try:
+            run_folder.geometry_dir.mkdir(parents=True, exist_ok=True)
+            write_gds(run_folder.design_gds_path)
+        except TypeError:
+            try:
+                write_gds(str(run_folder.design_gds_path))
+            except Exception as exc:
+                logger.warning("Could not write geometry snapshot: %s", exc)
+                return None
+        except Exception as exc:
+            logger.warning("Could not write geometry snapshot: %s", exc)
+            return None
+        return run_folder.design_gds_path
 
     # -------------------------------------------------------------------------
     # Cloud: fine-grained control
     # -------------------------------------------------------------------------
 
-    def _prepare_upload_dir(self) -> Path:
+    def _prepare_upload_dir(self, *, prepare_run_folder: bool = True) -> Path:
         """Prepare a temp directory with all config/mesh files for upload.
 
         Ensures ``_output_dir`` is set, ``config.json`` exists, and copies
@@ -1434,7 +2197,7 @@ class PalaceSimMixin:
             raise ValueError("Output directory not set. Call set_output_dir() first.")
 
         # Always (re)generate config.json to reflect current driven settings
-        self.write_config()
+        self.write_config(prepare_run_folder=prepare_run_folder)
 
         # Copy input files to a temp dir so we don't destroy the user's directory
         tmp = Path(tempfile.mkdtemp(prefix="palace_"))
@@ -1446,7 +2209,12 @@ class PalaceSimMixin:
                 shutil.copy2(item, dest)
         return tmp
 
-    def upload(self, *, verbose: bool = True) -> str:
+    def upload(
+        self,
+        *,
+        verbose: bool = True,
+        prepare_run_folder: bool = True,
+    ) -> str:
         """Prepare config, upload to the cloud. Does NOT start execution.
 
         Requires :meth:`set_output_dir` and :meth:`mesh` to have been
@@ -1454,6 +2222,8 @@ class PalaceSimMixin:
 
         Args:
             verbose: Print progress messages.
+            prepare_run_folder: Create the canonical Palace run-folder skeleton
+                before staging files for cloud upload.
 
         Returns:
             ``job_id`` string for use with :meth:`start`, :meth:`get_status`,
@@ -1461,7 +2231,7 @@ class PalaceSimMixin:
         """
         from gsim import gcloud
 
-        tmp = self._prepare_upload_dir()
+        tmp = self._prepare_upload_dir(prepare_run_folder=prepare_run_folder)
         try:
             self._job_id = gcloud.upload(tmp, "palace", verbose=verbose)
         except Exception:
@@ -1529,12 +2299,165 @@ class PalaceSimMixin:
     # Simulation
     # -------------------------------------------------------------------------
 
+    def write_slurm_sbatch_handoff(
+        self,
+        profile: PalaceSlurmProfileResolution,
+        *,
+        job_name: str,
+        script_path: str | Path = "run_palace.sbatch",
+        metadata: Mapping[str, Any] | None = None,
+        validate_inputs: bool = True,
+        **sbatch_kwargs: Any,
+    ) -> PalaceSlurmHandoffResult:
+        """Write a Slurm handoff script from a resolved Slurm profile.
+
+        This is the simulation-method wrapper for the lower-level handoff
+        renderer. It keeps notebooks on the explicit ``sim`` pipeline while
+        leaving Slurm schema validation and rendering in
+        ``gsim.palace.handoff``. The method writes a script and metadata for
+        manual scheduler submission; it does not call ``sbatch``.
+
+        Args:
+            profile: Resolved caller-owned Slurm profile.
+            job_name: Slurm-safe job name for the generated script.
+            script_path: Run-folder-relative script path.
+            metadata: Additional JSON-friendly handoff metadata.
+            validate_inputs: Require ``config.json`` and ``palace.msh`` before
+                writing the script.
+            **sbatch_kwargs: Additional keyword arguments forwarded to
+                ``profile.to_sbatch_spec``.
+
+        Returns:
+            Paths to the generated script and handoff metadata sidecar.
+
+        Raises:
+            ValueError: If ``set_output_dir()`` has not been called or
+                lower-level handoff validation rejects the request.
+            FileNotFoundError: If input validation is enabled and Palace inputs
+                are absent.
+        """
+        if self._output_dir is None:
+            raise ValueError("Output directory not set. Call set_output_dir() first.")
+
+        from gsim.palace.handoff import write_palace_slurm_sbatch_handoff
+
+        return write_palace_slurm_sbatch_handoff(
+            self._output_dir,
+            profile.to_sbatch_spec(job_name=job_name, **sbatch_kwargs),
+            script_path=script_path,
+            profile=profile.profile,
+            metadata=metadata,
+            validate_inputs=validate_inputs,
+        )
+
+    def generate_handoff_package(
+        self,
+        *,
+        include_hashes: bool = False,
+        include_results: bool = False,
+        write_config: bool = True,
+        validate_mesh: bool = True,
+        photonic: bool = False,
+        postprocessing: PostprocessingConfig | None = None,
+        reuse_postprocessing: bool = True,
+        write_artifacts: bool = True,
+        material_overlay: Any | None = None,
+        hints: dict[str, Any] | None = None,
+        validate_schema: bool = True,
+        status: str = "packaged",
+        launcher: Mapping[str, Any] | None = None,
+        script_path: str | Path | None = None,
+        profile: Any | None = None,
+        resources: Mapping[str, Any] | None = None,
+        command: Mapping[str, Any] | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        archive_path: str | Path | None = None,
+    ) -> PalaceRunHandle:
+        """Generate a Palace handoff package and return a run-stage handle.
+
+        The package includes a fresh ``config.json`` by default, canonical
+        run-folder directories, ``metadata/palace_handoff_metadata.json``,
+        ``metadata/palace_handoff_archive_manifest.json``, and a tar.gz archive
+        rooted at the run-folder name. It does not run Palace or submit a job.
+        It also does not load typed reports; callers enter the Resolve stage
+        explicitly with ``resolve_palace_result(handle.run_folder, ...)``.
+        Profile, launcher, resource, and command metadata are recorded as
+        handoff intent only.
+
+        Args:
+            include_hashes: Include SHA-256 checksums for present artifacts.
+            include_results: Include solver result files in the archive
+                manifest when they already exist.
+            write_config: Write ``config.json`` before packaging. This is on by
+                default so the handoff package reflects current simulation
+                settings.
+            validate_mesh: Forwarded to :meth:`write_config`.
+            photonic: Forwarded to :meth:`write_config`.
+            postprocessing: Optional Palace postprocessing config forwarded to
+                :meth:`write_config`.
+            reuse_postprocessing: Forwarded to :meth:`write_config`.
+            write_artifacts: Forwarded to :meth:`write_config`.
+            material_overlay: Forwarded to :meth:`write_config`.
+            hints: Forwarded to :meth:`write_config`.
+            validate_schema: Forwarded to :meth:`write_config`.
+            status: Handoff metadata status string.
+            launcher: Optional launcher metadata.
+            script_path: Optional batch-script path included in the handoff
+                package.
+            profile: Optional resolved site/profile metadata.
+            resources: Optional resource request metadata.
+            command: Optional command metadata. When omitted, a minimal Palace
+                config/mesh command shape is recorded, or a redacted ``sbatch``
+                command is recorded when a profile and script are provided.
+            metadata: Additional JSON-friendly handoff metadata.
+            archive_path: Optional target archive path recorded in metadata.
+
+        Returns:
+            :class:`gsim.palace.run_stage.PalaceRunHandle` describing the
+            packaged run folder and generated handoff artifacts.
+
+        Raises:
+            ValueError: If ``set_output_dir()`` has not been called.
+        """
+        if self._output_dir is None:
+            raise ValueError("Output directory not set. Call set_output_dir() first.")
+
+        if write_config:
+            self.write_config(
+                validate_mesh=validate_mesh,
+                photonic=photonic,
+                postprocessing=postprocessing,
+                reuse_postprocessing=reuse_postprocessing,
+                write_artifacts=write_artifacts,
+                material_overlay=material_overlay,
+                hints=hints,
+                prepare_run_folder=True,
+                validate_schema=validate_schema,
+            )
+        package_metadata = dict(metadata or {})
+        package_metadata["palace_config_version"] = self.palace_version
+        return generate_palace_handoff_package(
+            self._output_dir,
+            simulation_type=self.simulation_type,
+            include_hashes=include_hashes,
+            include_results=include_results,
+            status=status,
+            launcher=launcher,
+            script_path=script_path,
+            profile=profile,
+            resources=resources,
+            command=command,
+            metadata=package_metadata,
+            archive_path=archive_path,
+        )
+
     def run(
         self,
         parent_dir: str | Path | None = None,
         *,
         verbose: Literal["quiet", "status", "full"] = "status",
         wait: bool = True,
+        prepare_run_folder: bool = True,
     ) -> SParams | dict[str, Path] | str:
         """Run simulation on GDSFactory+ cloud.
 
@@ -1548,6 +2471,8 @@ class PalaceSimMixin:
                 ``"full"`` stream solver logs.
             wait: If ``True`` (default), block until results are ready.
                 If ``False``, upload + start and return the ``job_id``.
+            prepare_run_folder: Create the canonical Palace run-folder skeleton
+                before staging files for cloud upload.
 
         Returns:
             - :class:`SParams` for :class:`DrivenSim` (driven sweeps with
@@ -1569,7 +2494,7 @@ class PalaceSimMixin:
             >>> results = eigen_sim.run()  # returns dict[str, Path]
             >>> print(results["eig.csv"])
         """
-        self.upload(verbose=False)
+        self.upload(verbose=False, prepare_run_folder=prepare_run_folder)
         self.start(verbose=verbose != "quiet")
         if not wait:
             if self._job_id is None:
@@ -1584,14 +2509,21 @@ class PalaceSimMixin:
         palace_sif_path: str | Path | None = None,
         palace_executable: str | Path | None = None,
         use_apptainer: bool = True,
+        executable_mode: Literal["wrapper", "binary"] = "wrapper",
         num_processes: int | None = None,
         num_threads: int | None = None,
+        serial: bool = False,
+        setup_commands: Sequence[str] | None = None,
         verbose: bool = True,
-    ) -> SParams | dict[str, Path]:
+        prepare_run_folder: bool = True,
+        check_runtime_version: bool = True,
+    ) -> dict[str, Path]:
         """Run simulation locally using Palace.
 
         Requires mesh() and write_config() to be called first.
         Supports both Apptainer and direct Palace installation.
+        Direct execution can also activate a caller-owned environment first,
+        for example a Spack environment supplied by a PDK run profile.
 
         Args:
             palace_sif_path: Path to Palace Apptainer SIF file.
@@ -1602,17 +2534,29 @@ class PalaceSimMixin:
                 If None, uses PALACE_EXECUTABLE environment variable or "palace".
             use_apptainer: If True (default), run via Apptainer using SIF file.
                 If False, run Palace executable directly.
+            executable_mode: Direct Palace command style. ``"wrapper"`` expects
+                the Palace wrapper script that accepts ``-np``/``-nt`` flags.
+                ``"binary"`` calls the solver binary with only ``config.json``.
             num_processes: Number of MPI processes. If None (default),
                 uses all available CPUs.
             num_threads: Number of OpenMP threads to use for OpenMP builds, default is 1
                 or the value of OMP_NUM_THREADS in the environment
+            serial: When running direct Palace, pass the Palace wrapper's
+                ``-serial`` flag so smoke tests can avoid MPI launchers.
+            setup_commands: Optional shell setup commands to run in the same
+                shell session as the local Palace command. This is intended for
+                caller-provided runtime activation such as ``spack load palace``.
+                Supported only with ``use_apptainer=False``.
             verbose: Print progress messages and stream Palace output in real time
+            prepare_run_folder: Create the canonical Palace run-folder skeleton
+                before launching Palace.
+            check_runtime_version: Try to compare the Palace executable version
+                with this simulation's target ``palace_version`` before
+                running. Set to ``False`` to record a mismatch without failing.
 
         Returns:
-            Parsed Palace result object (``SParams``) when ``port-S.csv`` is
-            present, matching :meth:`run` behavior. Falls back to a
-            ``dict[str, Path]`` mapping filenames to local paths when S-params
-            are unavailable.
+            Raw Palace output files as ``dict[str, Path]``. Use
+            ``resolve_palace_result(...).load_report()`` for typed reports.
 
         Raises:
             ValueError: If output_dir not set or Palace not configured
@@ -1635,199 +2579,35 @@ class PalaceSimMixin:
             >>> results = sim.run_local(
             ...     use_apptainer=False, palace_executable="/usr/local/bin/palace"
             ... )
-            >>> # For DrivenSim: `results` is SParams -> results.s21.db
-            >>> # For eigen / electrostatic: `results` is dict[str, Path]
+            >>>
+            >>> # Using caller-provided shell setup, for example Spack
+            >>> results = sim.run_local(
+            ...     use_apptainer=False,
+            ...     setup_commands=(
+            ...         "source /path/to/spack/share/spack/setup-env.sh",
+            ...         "spack load palace",
+            ...     ),
+            ... )
+            >>> resolved = resolve_palace_result(sim.output_dir, problem_type="Driven")
+            >>> report = resolved.load_report(require_report=True).require_report()
         """
-        import os
-        import shutil
-        import subprocess
-
         if self._output_dir is None:
             raise ValueError("Output directory not set. Call set_output_dir() first.")
-
-        output_dir = Path(self._output_dir)
-        config_path = output_dir / "config.json"
-        mesh_path = output_dir / "palace.msh"
-
-        # Default to all available CPUs when caller does not specify -np.
-        if num_processes is None:
-            num_processes = os.cpu_count() or 1
-
-        # Check required files exist
-        if not config_path.exists():
-            raise FileNotFoundError(
-                f"Config file not found: {config_path}. Call write_config() first."
-            )
-
-        if not mesh_path.exists():
-            raise FileNotFoundError(
-                f"Mesh file not found: {mesh_path}. Call mesh() first."
-            )
-
-        # Determine Palace command based on use_apptainer flag
-        if use_apptainer:
-            # Determine Palace SIF path from environment variable or parameter
-            if palace_sif_path is None:
-                palace_sif_path = os.environ.get("PALACE_SIF")
-                if palace_sif_path is None:
-                    raise ValueError(
-                        "Palace SIF path not specified. Either set PALACE_SIF "
-                        "environment variable or pass palace_sif_path parameter."
-                    )
-                if verbose:
-                    logger.info(
-                        "Using PALACE_SIF from environment: %s", palace_sif_path
-                    )
-
-            sif_path = Path(palace_sif_path).expanduser().resolve()
-
-            if not sif_path.exists():
-                raise FileNotFoundError(
-                    f"Palace SIF file not found: {sif_path}. "
-                    "Install Palace via Apptainer or provide correct path."
-                )
-
-            # Check that apptainer is available
-            if shutil.which("apptainer") is None:
-                raise RuntimeError(
-                    "Apptainer not found. Install Apptainer to run local simulations "
-                    "with use_apptainer=True."
-                )
-
-            # Build Apptainer command
-            cmd = [
-                "apptainer",
-                "run",
-                str(sif_path),
-                "-np",
-                str(num_processes),
-            ]
-
-        else:
-            # Direct Palace execution
-            if palace_executable is None:
-                palace_executable = os.environ.get("PALACE_EXECUTABLE", "palace")
-                if verbose:
-                    logger.info(
-                        "Using Palace executable from environment/default: %s",
-                        palace_executable,
-                    )
-
-            exe_path = Path(palace_executable).expanduser()
-
-            # Check if executable exists
-            if not exe_path.exists():
-                # Try resolving to see if it's in PATH
-                resolved = shutil.which(str(exe_path))
-                if resolved is None:
-                    raise FileNotFoundError(
-                        f"Palace executable not found: {exe_path}. "
-                        "Install Palace directly or provide correct path via "
-                        "palace_executable parameter."
-                    )
-                exe_path = Path(resolved)
-
-            cmd = [
-                str(exe_path),
-                "-np",
-                str(num_processes),
-            ]
-
-        if num_threads is not None:
-            cmd.extend(["-nt", str(num_threads)])
-        cmd.extend(["config.json"])
-
-        def _emit_info(msg: str, *args: object) -> None:
-            if logger.isEnabledFor(logging.INFO):
-                logger.info(msg, *args)
-            else:
-                logger.warning(msg, *args)
-
-        def _emit_warning(msg: str, *args: object) -> None:
-            logger.warning(msg, *args)
-
-        if verbose:
-            if use_apptainer:
-                _emit_info("Running Palace simulation in %s via Apptainer", output_dir)
-            else:
-                _emit_info("Running Palace simulation in %s directly", output_dir)
-            _emit_info("Command: %s", " ".join(cmd))
-            _emit_info("Processes: %d", num_processes)
-
-        # Run simulation
-        try:
-            if verbose:
-                streamed_lines: list[str] = []
-                with subprocess.Popen(  # noqa: S603
-                    cmd,
-                    cwd=output_dir,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                ) as process:
-                    if process.stdout is not None:
-                        for line in process.stdout:
-                            line = line.rstrip("\n")
-                            streamed_lines.append(line)
-                            if line:
-                                _emit_info(line)
-                    returncode = process.wait()
-
-                if returncode != 0:
-                    tail = "\n".join(streamed_lines[-200:])
-                    error_msg = (
-                        f"Palace simulation failed with return code {returncode}"
-                    )
-                    if tail:
-                        error_msg += f"\n\nOutput (tail):\n{tail}"
-                    raise RuntimeError(error_msg)
-            else:
-                result = subprocess.run(  # noqa: S603
-                    cmd,
-                    cwd=output_dir,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-                if result.stdout:
-                    logger.debug(result.stdout)
-                if result.stderr:
-                    _emit_warning(result.stderr)
-        except FileNotFoundError as e:
-            if use_apptainer:
-                raise RuntimeError(
-                    "Apptainer not found. Install Apptainer to run local simulations "
-                    "with use_apptainer=True."
-                ) from e
-            raise RuntimeError(
-                "Palace executable not found. Install Palace directly or provide "
-                "correct path via palace_executable parameter, "
-                "or set PALACE_EXECUTABLE environment variable."
-            ) from e
-
-        if verbose:
-            _emit_info("Simulation completed successfully")
-
-        postpro_dir = output_dir / "output/palace/"
-
-        if verbose:
-            _emit_info("Results saved to %s", postpro_dir)
-
-        files = {
-            file.name: file
-            for file in postpro_dir.iterdir()
-            if file.is_file() and not file.name.startswith(".")
-        }
-
-        # Match cloud run() behavior for Palace: return parsed SParams when
-        # possible, else fall back to raw files dict.
-        from gsim.palace.results import load_sparams
-
-        try:
-            return load_sparams(files)
-        except FileNotFoundError:
-            return files
+        return run_palace_local(
+            self._output_dir,
+            palace_sif_path=palace_sif_path,
+            palace_executable=palace_executable,
+            use_apptainer=use_apptainer,
+            executable_mode=executable_mode,
+            num_processes=num_processes,
+            num_threads=num_threads,
+            serial=serial,
+            setup_commands=setup_commands,
+            verbose=verbose,
+            prepare_run_folder=prepare_run_folder,
+            palace_version=self.palace_version,
+            check_runtime_version=check_runtime_version,
+        )
 
     # -------------------------------------------------------------------------
     # Port methods
@@ -1846,7 +2626,9 @@ class PalaceSimMixin:
         resistance: float | None = None,
         inductance: float | None = None,
         capacitance: float | None = None,
+        direction: PalaceDirectionInput | None = None,
         excited: bool = True,
+        generate_sheet: bool = True,
         geometry: Literal["inplane", "via"] = "inplane",
     ) -> None:
         """Add a single-element lumped port.
@@ -1863,7 +2645,15 @@ class PalaceSimMixin:
             resistance: Series resistance (Ohms)
             inductance: Series inductance (H)
             capacitance: Shunt capacitance (F)
+            direction: Optional Palace LumpedPort.Direction solver
+                field/polarization direction. Labels such as "+X" and "-Y"
+                and finite nonzero 3-vectors are normalized to unit vectors.
+                Port-sheet geometry still follows the gdsfactory port
+                center, width, orientation, and layer.
             excited: Whether this port is excited
+            generate_sheet: If True, mesh creates the horizontal sheet from
+                the gdsfactory port. If False, mesh selects a layout-authored
+                horizontal sheet from the simulation layer catalog.
             geometry: Port geometry type ("inplane" or "via")
 
         Example:
@@ -1887,7 +2677,9 @@ class PalaceSimMixin:
                 resistance=resistance,
                 inductance=inductance,
                 capacitance=capacitance,
+                direction=direction,
                 excited=excited,
+                generate_sheet=generate_sheet,
                 geometry=geometry,
             )
         )
@@ -1903,6 +2695,7 @@ class PalaceSimMixin:
         offset: float | None = None,
         impedance: float = 50.0,
         excited: bool = True,
+        generate_sheet: bool = True,
     ) -> None:
         """Add a coplanar waveguide (CPW) port.
 
@@ -1923,6 +2716,9 @@ class PalaceSimMixin:
                 Defaults to length/2 (port flush with conductor edge).
             impedance: Port impedance (Ohms)
             excited: Whether this port is excited
+            generate_sheet: If True, mesh creates the two gap sheets from the
+                gdsfactory port. If False, mesh selects layout-authored
+                horizontal sheets from the simulation layer catalog.
 
         Example:
             >>> sim.add_cpw_port(
@@ -1942,6 +2738,7 @@ class PalaceSimMixin:
                 offset=offset,
                 impedance=impedance,
                 excited=excited,
+                generate_sheet=generate_sheet,
             )
         )
 

@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import itertools
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 
+from gsim.palace.models.ports import normalize_palace_direction
 from gsim.palace.models.results import ValidationResult
 
 __all__ = ["PortGeometryError", "check_lumped_port_geometry", "validate_mesh"]
@@ -21,26 +23,13 @@ class PortGeometryError(ValueError):
     """Raised when a lumped port fails Palace's geometry sanity check."""
 
 
-_DIR_MAP: dict[str, np.ndarray] = {
-    "x": np.array([1.0, 0.0, 0.0]),
-    "+x": np.array([1.0, 0.0, 0.0]),
-    "-x": np.array([-1.0, 0.0, 0.0]),
-    "y": np.array([0.0, 1.0, 0.0]),
-    "+y": np.array([0.0, 1.0, 0.0]),
-    "-y": np.array([0.0, -1.0, 0.0]),
-    "z": np.array([0.0, 0.0, 1.0]),
-    "+z": np.array([0.0, 0.0, 1.0]),
-    "-z": np.array([0.0, 0.0, -1.0]),
-}
-
-
-def _parse_direction(direction: str) -> np.ndarray:
-    """Parse a direction string (e.g. '+X', '-Y', 'Z') into a unit vector."""
-    key = direction.strip().lower()
-    if key not in _DIR_MAP:
-        raise ValueError(f"Unknown port direction '{direction}'")
-    v = _DIR_MAP[key].copy()
-    return v / np.linalg.norm(v)
+def _parse_direction(direction: Any) -> np.ndarray:
+    """Parse a direction label or vector into a unit vector."""
+    try:
+        vector = normalize_palace_direction(direction)
+    except ValueError as exc:
+        raise ValueError(f"Unknown port direction '{direction}'") from exc
+    return np.array(vector, dtype=float)
 
 
 def _perp_dist(v: np.ndarray, normals: list[np.ndarray], origin: np.ndarray) -> float:
@@ -152,7 +141,10 @@ def _get_port_vertices(mesh_path: Path, phys_group_tag: int) -> np.ndarray:
     gmsh.initialize()
     try:
         gmsh.open(str(mesh_path))
-        result = gmsh.model.mesh.getNodesForPhysicalGroup(2, phys_group_tag)
+        result = cast(
+            tuple[Any, ...],
+            gmsh.model.mesh.getNodesForPhysicalGroup(2, phys_group_tag),
+        )
         if len(result) == 3:
             _, coords, _ = result
         elif len(result) == 2:
@@ -170,7 +162,7 @@ def _check_surface_geometry(
     *,
     mesh_path: Path,
     phys_tag: int,
-    direction_str: str,
+    direction_str: Any,
     context: str,
     rel_tol: float,
 ) -> list[str]:
@@ -256,7 +248,7 @@ def check_lumped_port_geometry(
     rel_tol: float = 1.0e-6,
 ) -> list[str]:
     """Check every lumped-port surface for Palace's geometry constraint."""
-    from gsim.palace.ports.config import PortGeometry, PortType
+    from gsim.palace.models.ports import PortType
 
     errors: list[str] = []
 
@@ -274,7 +266,7 @@ def check_lumped_port_geometry(
                 port_group.get("elements", []), start=1
             ):
                 phys_tag = element.get("phys_group")
-                direction_str = str(element.get("direction", "")).upper()
+                direction = element.get("direction", "")
                 context = (
                     f"Port {port_idx} ('{port.name}') element {element_idx} "
                     f"(physical group {phys_tag})"
@@ -288,7 +280,7 @@ def check_lumped_port_geometry(
                     _check_surface_geometry(
                         mesh_path=mesh_path,
                         phys_tag=int(phys_tag),
-                        direction_str=direction_str,
+                        direction_str=direction,
                         context=context,
                         rel_tol=rel_tol,
                     )
@@ -301,15 +293,12 @@ def check_lumped_port_geometry(
                     ": missing physical group id in mesh groups."
                 )
                 continue
-            direction_str = (
-                "+Z" if port.geometry == PortGeometry.VIA else port.direction.upper()
-            )
             context = f"Port {port_idx} ('{port.name}') (physical group {phys_tag})"
             errors.extend(
                 _check_surface_geometry(
                     mesh_path=mesh_path,
                     phys_tag=int(phys_tag),
-                    direction_str=direction_str,
+                    direction_str=port.direction,
                     context=context,
                     rel_tol=rel_tol,
                 )
@@ -318,7 +307,7 @@ def check_lumped_port_geometry(
     return errors
 
 
-def validate_mesh(sim) -> ValidationResult:
+def validate_mesh(sim, *, material_overlay=None) -> ValidationResult:
     """Validate generated mesh and config for a Palace simulation object."""
     errors: list[str] = []
     warnings_list: list[str] = []
@@ -389,7 +378,10 @@ def validate_mesh(sim) -> ValidationResult:
 
         config_path = output_dir / "config.json"
         try:
-            sim.write_config(validate_mesh=False)
+            sim.write_config(
+                validate_mesh=False,
+                material_overlay=material_overlay,
+            )
         except Exception as e:
             errors.append(f"Could not regenerate config.json during validate_mesh: {e}")
 
@@ -402,9 +394,14 @@ def validate_mesh(sim) -> ValidationResult:
                     or boundaries.get("PEC")
                     or boundaries.get("Terminal")
                     or boundaries.get("Ground")
+                    or boundaries.get("SurfaceCurrent")
                 )
                 if not has_conductor_bounds and not has_shaped_dielectrics:
-                    errors.append("config.json has no Conductivity or PEC boundaries.")
+                    errors.append("config.json has no conductor/source boundaries.")
+                if sim.simulation_type == "magnetostatic" and not boundaries.get(
+                    "SurfaceCurrent"
+                ):
+                    errors.append("config.json has no SurfaceCurrent entries.")
                 if (
                     not boundaries.get("LumpedPort")
                     and not boundaries.get("WavePort")

@@ -18,9 +18,8 @@ Usage:
     # Multi-job polling:
     results = gcloud.wait_for_results(id1, id2, id3)
 
-    # Or use solver-specific wrappers:
-    from gsim import palace as pa
-    result = pa.run_simulation("./sim")
+    # Select a solver with job_type:
+    result = gcloud.run_simulation("./sim", job_type="palace")
 """
 
 from __future__ import annotations
@@ -28,11 +27,13 @@ from __future__ import annotations
 import contextlib
 import importlib
 import io
+import json
 import logging
 import re
 import shutil
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -244,11 +245,99 @@ def _download_job(job, parent_dir: str | Path | None, verbose: bool) -> RunResul
     # Download directly into sim_dir
     raw_results = sim.download_results(job, output_dir=sim_dir)
     files = _flatten_results(raw_results)
+    metadata_path = _write_cloud_run_metadata(job, sim_dir=sim_dir, files=files)
+    files[metadata_path.name] = metadata_path
 
     if verbose and files:
         print(f"Downloaded {len(files)} files to {sim_dir}")  # noqa: T201
 
     return RunResult(sim_dir=sim_dir, files=files, job_name=job.job_name)
+
+
+def _write_cloud_run_metadata(
+    job,
+    *,
+    sim_dir: Path,
+    files: dict[str, Path],
+) -> Path:
+    """Write a solver-specific cloud runtime sidecar next to downloaded files."""
+    solver = _extract_solver_from_job(job)
+    sidecar_name = (
+        f"{solver}_run_metadata.json" if solver else "cloud_run_metadata.json"
+    )
+    metadata_path = sim_dir / sidecar_name
+    metadata = {
+        "schema_version": 1,
+        "created_at_utc": datetime.now(UTC).isoformat(timespec="seconds"),
+        "status": _job_status_value(job),
+        "return_code": getattr(job, "exit_code", None),
+        "elapsed_seconds": _job_elapsed_seconds(job),
+        "launcher": {
+            "kind": "gdsfactoryplus_cloud",
+            "solver": solver,
+            "job_name": _optional_str(getattr(job, "job_name", "")),
+            "job_definition": _optional_str(getattr(job, "job_def_name", "")),
+        },
+        "resources": {
+            "requested_cpu": getattr(job, "requested_cpu", None),
+            "requested_memory_mb": getattr(job, "requested_memory_mb", None),
+        },
+        "cloud": {
+            "job_id": _optional_str(getattr(job, "id", None)),
+            "created_at": _datetime_iso(getattr(job, "created_at", None)),
+            "started_at": _datetime_iso(getattr(job, "started_at", None)),
+            "finished_at": _datetime_iso(getattr(job, "finished_at", None)),
+            "output_size_bytes": getattr(job, "output_size_bytes", None),
+        },
+        "outputs": {
+            name: {
+                "path": _relative_to_sim_dir(path, sim_dir),
+                "bytes": int(path.stat().st_size),
+            }
+            for name, path in sorted(files.items())
+            if path.exists() and path.is_file()
+        },
+    }
+    metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
+    return metadata_path
+
+
+def _job_status_value(job) -> str | None:
+    """Return the provider status value when it is available."""
+    status = getattr(job, "status", None)
+    value = getattr(status, "value", None)
+    return str(value) if value is not None else None
+
+
+def _optional_str(value: Any) -> str | None:
+    """Convert an optional value to text."""
+    if value is None:
+        return None
+    return str(value)
+
+
+def _datetime_iso(value: Any) -> str | None:
+    """Return an ISO timestamp for a datetime value."""
+    if isinstance(value, datetime):
+        return value.isoformat(timespec="seconds")
+    return None
+
+
+def _job_elapsed_seconds(job) -> float | None:
+    """Return elapsed job seconds when both timestamps are present."""
+    started = getattr(job, "started_at", None)
+    finished = getattr(job, "finished_at", None)
+    if isinstance(started, datetime) and isinstance(finished, datetime):
+        return float((finished - started).total_seconds())
+    return None
+
+
+def _relative_to_sim_dir(path: Path, sim_dir: Path) -> str:
+    """Return a path relative to the simulation directory when possible."""
+    try:
+        return path.relative_to(sim_dir).as_posix()
+    except ValueError:
+        return path.as_posix()
 
 
 def _parse_result(job, run_result: RunResult) -> Any:
@@ -712,6 +801,12 @@ def run_simulation(
     # Download directly into sim_dir (SDK creates results/ subdirectory)
     raw_results = sim.download_results(finished_job, output_dir=sim_dir)
     files = _flatten_results(raw_results)
+    metadata_path = _write_cloud_run_metadata(
+        finished_job,
+        sim_dir=sim_dir,
+        files=files,
+    )
+    files[metadata_path.name] = metadata_path
 
     if verbose and files:
         print(f"Downloaded {len(files)} files to {sim_dir}")  # noqa: T201
