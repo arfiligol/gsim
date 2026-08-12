@@ -1148,6 +1148,7 @@ def _activated_region_xy_bounds(
     geometry: GeometryData,
     region: ActivatedRegion,
 ) -> tuple[float, float, float, float]:
+    """Return XY bounds expanded by one activated region's margins."""
     xmin0, ymin0, xmax0, ymax0 = geometry.bbox
     return (
         xmin0 - region.margin_x,
@@ -1165,6 +1166,7 @@ def _reject_activated_region_airbox_controls(
     airbox_z_above: float | None,
     airbox_z_below: float | None,
 ) -> None:
+    """Reject legacy airbox controls when explicit regions are active."""
     if air_margin > 0:
         raise ValueError(
             "Explicit activated regions cannot be mixed with airbox controls "
@@ -1820,6 +1822,7 @@ def _horizontal_port_corners(
 def _horizontal_port_bbox(
     corners: list[tuple[float, float]],
 ) -> tuple[float, float, float, float]:
+    """Return the axis-aligned XY bounds of horizontal port corners."""
     xs = [corner[0] for corner in corners]
     ys = [corner[1] for corner in corners]
     return min(xs), min(ys), max(xs), max(ys)

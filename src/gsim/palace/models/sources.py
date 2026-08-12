@@ -15,6 +15,7 @@ CoordinateSystem = Literal["Cartesian", "Cylindrical"]
 
 
 def _normalize_direction(value: CurrentDirection) -> CurrentDirection:
+    """Normalize and validate a current-source direction."""
     if isinstance(value, str):
         direction = value.strip().upper()
         if direction in {"X", "Y", "Z", "R"}:
@@ -57,12 +58,14 @@ class CurrentSourceElementConfig(BaseModel):
     @field_validator("direction", mode="before")
     @classmethod
     def _validate_direction(cls, value: CurrentDirection) -> CurrentDirection:
+        """Normalize one element direction."""
         return _normalize_direction(value)
 
     @model_validator(mode="after")
     def _validate_coordinate_system_requires_vector(
         self,
     ) -> CurrentSourceElementConfig:
+        """Require vector directions when a coordinate system is set."""
         if self.coordinate_system is not None and isinstance(self.direction, str):
             raise ValueError(
                 "Coordinate system can only be specified with a vector current "
@@ -92,10 +95,12 @@ class CurrentSourceConfig(BaseModel):
     @field_validator("direction", mode="before")
     @classmethod
     def _validate_direction(cls, value: CurrentDirection) -> CurrentDirection:
+        """Normalize a source direction."""
         return _normalize_direction(value)
 
     @model_validator(mode="after")
     def _validate_selector_shape(self) -> CurrentSourceConfig:
+        """Reject mixed parent and element selector declarations."""
         if self.elements:
             parent_fields = []
             if self.layer is not None:

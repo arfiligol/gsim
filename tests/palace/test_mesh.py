@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, cast
 
 import numpy as np
 import pytest
@@ -752,7 +752,7 @@ def test_add_ports_lumped_inplane_uses_orientation_for_generated_sheet(
         length=4.0,
         orientation=45.0,
         layer="metal1",
-        direction="+X",
+        direction=cast(tuple[float, float, float], "+X"),
     )
 
     port_tags, port_info = add_ports(_Kernel(), [port], stack)
@@ -820,7 +820,7 @@ def test_add_ports_lumped_inplane_uses_authored_sheet_polygon(monkeypatch) -> No
         length=4.0,
         orientation=45.0,
         layer="metal1",
-        direction="+X",
+        direction=cast(tuple[float, float, float], "+X"),
         generate_sheet=False,
         sheet_gds_layer=(202, 1),
     )

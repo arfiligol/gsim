@@ -696,7 +696,7 @@ def build_surface_current_index_map_from_manifest(
 
 
 def _surface_current_attribute_extras(
-    current_entry: dict[str, Any],
+    current_entry: Mapping[str, Any],
 ) -> tuple[tuple[int, dict[str, Any]], ...]:
     """Return SurfaceCurrent attributes with row-level element metadata."""
     rows: list[tuple[int, dict[str, Any]]] = [
@@ -734,6 +734,7 @@ def _selected_entries(
     role: MeshRole | str,
     entry_names: tuple[str, ...],
 ):
+    """Return role entries narrowed to explicitly named groups when requested."""
     entries = manifest.entries_for_role(role)
     if not entry_names:
         return entries
@@ -748,6 +749,7 @@ def _entry_for_dielectric_interface_assignment(
     role: MeshRole | str,
     require_interface: bool,
 ) -> MeshPhysicalGroup:
+    """Resolve one manifest entry for a dielectric interface selector."""
     matches = tuple(
         entry
         for entry in manifest.entries_for_role(role)
@@ -779,6 +781,7 @@ def _matches_dielectric_interface_selector(
     entry: MeshPhysicalGroup,
     selector: DielectricInterfaceSelector,
 ) -> bool:
+    """Return whether a manifest entry matches a dielectric selector."""
     if isinstance(selector, str):
         return selector == entry.name or selector in entry.physical_names
     if len(selector) != 2 or entry.interface_of is None:
@@ -787,6 +790,7 @@ def _matches_dielectric_interface_selector(
 
 
 def _preset_names(value: str | Iterable[str]) -> tuple[str, ...]:
+    """Normalize one or more dielectric preset names."""
     if isinstance(value, str):
         return (value,)
     names = tuple(str(item) for item in value)
@@ -801,6 +805,7 @@ def _preset_record(
     presets: Mapping[str, Mapping[str, Any]],
     preset_name: str,
 ) -> Mapping[str, Any]:
+    """Return a named dielectric preset or raise a contextual error."""
     try:
         return presets[preset_name]
     except KeyError as error:
@@ -813,6 +818,7 @@ def _normalized_material_kind(
     kind: DielectricMaterialKind | str,
     material_name: str,
 ) -> str:
+    """Normalize and validate a dielectric material kind."""
     normalized = str(kind).lower()
     normalized_kind = _DIELECTRIC_MATERIAL_KIND_ALIASES.get(normalized)
     if normalized_kind is None:
@@ -830,6 +836,7 @@ def _kind_for_interface_part(
     material_name: str,
     material_name_aliases: Mapping[str, str] | None = None,
 ) -> str:
+    """Resolve one interface material's normalized kind, following aliases."""
     if material_name in kind_map:
         return kind_map[material_name]
 
@@ -853,6 +860,7 @@ def _kind_for_interface_part(
 
 
 def _interface_part_material_name(*, entry: MeshPhysicalGroup, part: str) -> str:
+    """Return the material name recorded for an interface part."""
     interface_materials = entry.metadata.get("interface_materials")
     if isinstance(interface_materials, Mapping):
         material_name = interface_materials.get(part)
@@ -864,6 +872,7 @@ def _interface_part_material_name(*, entry: MeshPhysicalGroup, part: str) -> str
 def _interface_type_map(
     interface_types_by_kind_pair: Mapping[tuple[str, str], str | Iterable[str]] | None,
 ) -> dict[frozenset[str], tuple[str, ...]]:
+    """Normalize material-kind pairs to their configured interface types."""
     if interface_types_by_kind_pair is None:
         return dict(_DEFAULT_INTERFACE_TYPES_BY_KIND_PAIR)
     return {
@@ -878,6 +887,7 @@ def _interface_type_map(
 
 
 def _interface_types(value: str | Iterable[str]) -> tuple[str, ...]:
+    """Validate and normalize configured dielectric interface types."""
     interface_types = _preset_names(value)
     unsupported = [
         interface_type
@@ -895,6 +905,7 @@ def _preset_names_for_interface_type(
     preset_by_interface_type: Mapping[str, str | Iterable[str]],
     interface_type: str,
 ) -> tuple[str, ...]:
+    """Return presets assigned to one dielectric interface type."""
     try:
         return _preset_names(preset_by_interface_type[interface_type])
     except KeyError as error:
@@ -909,6 +920,7 @@ def _dielectric_interface_spec_from_preset(
     role: MeshRole | str,
     entry_name: str,
 ) -> DielectricInterfaceSpec:
+    """Build one validated dielectric interface specification from a preset."""
     try:
         interface_type = preset["interface_type"]
         thickness = preset["thickness"]
@@ -963,6 +975,7 @@ def _dielectric_interface_spec_from_preset(
 def _dielectric_interface_index_extra(
     spec: DielectricInterfaceSpec,
 ) -> dict[str, Any]:
+    """Return provenance fields for a dielectric interface index row."""
     extra: dict[str, Any] = {"Type": spec.interface_type}
     if spec.preset_name is not None:
         extra["preset_name"] = spec.preset_name
@@ -977,6 +990,7 @@ def _dielectric_entry(
     spec: DielectricInterfaceSpec,
     attributes: tuple[int, ...],
 ) -> dict[str, Any]:
+    """Lower one dielectric interface specification to Palace configuration."""
     entry: dict[str, Any] = {
         "Index": index,
         "Attributes": list(attributes),
@@ -992,6 +1006,7 @@ def _dielectric_entry(
 
 
 def _combined_attributes(entries: tuple[MeshPhysicalGroup, ...]) -> tuple[int, ...]:
+    """Return ordered unique physical attributes across manifest entries."""
     attributes: list[int] = []
     for entry in entries:
         attributes.extend(entry.attributes)
@@ -999,10 +1014,12 @@ def _combined_attributes(entries: tuple[MeshPhysicalGroup, ...]) -> tuple[int, .
 
 
 def _surface_epr_entry_name(surface: Any) -> str:
+    """Return the physical group name used for a Surface-EPR entry."""
     return str(getattr(surface, "physical_group_name", None) or surface.interface_id)
 
 
 def _surface_epr_source_id(surface: Any) -> str | None:
+    """Return the semantic source identifier recorded for a Surface-EPR surface."""
     source_id = getattr(surface, "source_id", None) or getattr(
         surface,
         "metal_body_id",
@@ -1017,6 +1034,7 @@ def _surface_epr_total_name(
     interface_type: str,
     face_kind: str | None,
 ) -> str:
+    """Construct the aggregate Surface-EPR report name."""
     if face_kind is None:
         return f"{source_id}__{interface_type}__TOTAL"
     return f"{source_id}__{interface_type}__{face_kind.upper()}__TOTAL"
@@ -1030,6 +1048,7 @@ def _combined_index_entry(
     entries: tuple[MeshPhysicalGroup, ...],
     extra: Mapping[str, Any],
 ) -> PostprocessingIndexEntry:
+    """Build one index entry spanning the manifest groups for a specification."""
     metadata: dict[str, Any] = {"entry_names": [entry.name for entry in entries]}
     entry_metadata = {
         entry.name: dict(entry.metadata) for entry in entries if entry.metadata
@@ -1057,12 +1076,14 @@ def _combined_index_entry(
 
 
 def _optional_preset_source(value: Any) -> str | None:
+    """Return a nonempty preset provenance source when supplied."""
     if not isinstance(value, str) or not value:
         return None
     return value
 
 
 def _positive_float(value: Any, preset_name: str, field_name: str) -> float:
+    """Validate a strictly positive finite preset value."""
     if not _is_finite_number(value) or float(value) <= 0.0:
         msg = (
             f"Dielectric interface preset {preset_name!r} field {field_name!r} "
@@ -1073,6 +1094,7 @@ def _positive_float(value: Any, preset_name: str, field_name: str) -> float:
 
 
 def _nonnegative_float(value: Any, preset_name: str, field_name: str) -> float:
+    """Validate a nonnegative finite preset value."""
     if not _is_finite_number(value) or float(value) < 0.0:
         msg = (
             f"Dielectric interface preset {preset_name!r} field {field_name!r} "
@@ -1083,6 +1105,7 @@ def _nonnegative_float(value: Any, preset_name: str, field_name: str) -> float:
 
 
 def _is_finite_number(value: Any) -> bool:
+    """Return whether a value is a finite non-boolean number."""
     return (
         isinstance(value, (int, float))
         and not isinstance(value, bool)
@@ -1097,6 +1120,7 @@ def _index_entry(
     entry: MeshPhysicalGroup,
     extra: Mapping[str, Any] | None = None,
 ) -> PostprocessingIndexEntry:
+    """Convert one mesh manifest group into a postprocessing index entry."""
     return PostprocessingIndexEntry(
         section=section,
         index=index,

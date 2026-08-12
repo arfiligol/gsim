@@ -57,7 +57,7 @@ class SParam:
     @property
     def mag(self) -> RealArray:
         """Linear magnitude."""
-        return cast("RealArray", 10 ** (self._db / 20))
+        return 10 ** (self._db / 20)
 
     @property
     def complex(self) -> ComplexArray:
@@ -312,7 +312,7 @@ class SParams:
             arrays[f"S_{to_p}_{from_p}_db"] = sp.db
             arrays[f"S_{to_p}_{from_p}_deg"] = sp.deg
 
-        np.savez_compressed(str(filepath), **arrays)  # pyright: ignore[reportArgumentType]
+        np.savez_compressed(str(filepath), **cast(Any, arrays))
         logger.info("S-parameters saved to %s", filepath)
         return filepath
 
@@ -344,7 +344,7 @@ def load_sparams(
     if port_info_path is None and isinstance(source, Mapping):
         port_info_value = source.get("port_information.json")
         if port_info_value is not None:
-            port_info_path = Path(port_info_value)
+            port_info_path = Path(cast(str | Path, port_info_value))
 
     port_map = _load_port_map(base_dir, csv_path, port_info_path)
 
@@ -386,7 +386,7 @@ def load_sparams(
         data[(to_name, from_name)] = SParam(db=db, deg=deg)
 
     files = (
-        {str(name): Path(value) for name, value in source.items()}
+        {str(name): Path(cast(str | Path, value)) for name, value in source.items()}
         if isinstance(source, Mapping)
         else None
     )
@@ -402,10 +402,10 @@ def resolve_sparameter_source(
     if isinstance(source, Mapping):
         csv_value = source.get("port-S.csv")
         if csv_value is not None:
-            csv_path = Path(csv_value)
+            csv_path = Path(cast(str | Path, csv_value))
             return csv_path, csv_path.parent
         for value in source.values():
-            path = Path(value)
+            path = Path(cast(str | Path, value))
             if path.exists():
                 return None, path.parent
         if require_csv:
@@ -422,6 +422,7 @@ def resolve_sparameter_source(
 
 
 def _find_sparameter_file(base: Path) -> Path | None:
+    """Find a Palace S-parameter CSV in canonical output locations."""
     candidates = (
         base / "port-S.csv",
         base / "results" / "palace" / "port-S.csv",
@@ -436,6 +437,7 @@ def _find_sparameter_file(base: Path) -> Path | None:
 
 
 def _parse_sparam_column(column: str) -> tuple[int, int, str] | None:
+    """Parse a Palace S-parameter magnitude or phase column label."""
     magnitude_match = re.match(r"\|S\[(\d+)\]\[(\d+)\]\|\s*\((\w+\.?)\)", column)
     if magnitude_match:
         return int(magnitude_match.group(1)), int(magnitude_match.group(2)), "db"
@@ -452,6 +454,7 @@ def _load_port_map(
     csv_path: Path | None,
     port_info_path: str | Path | None = None,
 ) -> dict[int, str]:
+    """Load port-number to port-name mapping from optional metadata."""
     if port_info_path is not None:
         info_path = Path(port_info_path)
     else:
@@ -487,6 +490,7 @@ def _load_port_map(
 
 
 def _find_port_info(output_dir: Path, csv_path: Path | None) -> Path | None:
+    """Find port-information metadata near an output or result CSV."""
     name = "port_information.json"
     candidates = [
         output_dir / name,

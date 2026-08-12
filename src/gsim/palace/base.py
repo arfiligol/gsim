@@ -24,7 +24,7 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
@@ -72,6 +72,7 @@ logger = logging.getLogger(__name__)
 
 
 def _default_refinement_config() -> dict[str, Any]:
+    """Return the default Palace adaptive-refinement configuration."""
     return {
         "Tol": 1.0e-2,
         "MaxIts": 0,
@@ -87,6 +88,7 @@ def _default_refinement_config() -> dict[str, Any]:
 def _surface_epr_face_kinds(
     face_kind: str | Sequence[str] | None,
 ) -> tuple[str | None, ...]:
+    """Normalize one Surface EPR face-kind selector into a tuple."""
     if face_kind is None:
         return (None,)
     if isinstance(face_kind, str):
@@ -95,6 +97,7 @@ def _surface_epr_face_kinds(
 
 
 def _normalize_surface_epr_representation(representation: str) -> str:
+    """Validate and normalize a Surface EPR route representation."""
     value = str(representation).upper()
     if value not in {"A", "B", "C"}:
         msg = "Surface EPR representation must be A, B, or C."
@@ -105,12 +108,16 @@ def _normalize_surface_epr_representation(representation: str) -> str:
 def _surface_epr_interface_assignments(
     interfaces: Mapping[str, Mapping[str, Any]] | Sequence[Mapping[str, Any]] | None,
 ) -> list[dict[str, Any]]:
+    """Normalize declarative Surface EPR interface assignments."""
     if interfaces is None:
         return []
 
     if isinstance(interfaces, Mapping):
         records = [
-            {"interface_type": interface_type, **dict(config)}
+            {
+                "interface_type": interface_type,
+                **dict(cast(Mapping[str, Any], config)),
+            }
             for interface_type, config in interfaces.items()
         ]
     else:
@@ -123,7 +130,7 @@ def _surface_epr_interface_assignments(
             msg = "Surface EPR interface_type must be MA, MS, or SA."
             raise ValueError(msg)
         try:
-            preset = dict(record.pop("preset"))
+            preset = dict(cast(Mapping[str, Any], record.pop("preset")))
         except KeyError:
             msg = f"Surface EPR interface {interface_type!r} requires a preset."
             raise ValueError(msg) from None
@@ -154,7 +161,9 @@ def _surface_epr_interface_assignments(
                 "interface_type": interface_type,
                 "preset_name": preset_name or interface_type.lower(),
                 "preset": preset,
-                "face_kinds": _surface_epr_face_kinds(face_kind),
+                "face_kinds": _surface_epr_face_kinds(
+                    cast(str | Sequence[str] | None, face_kind)
+                ),
                 "role": role,
                 "required": required,
             }

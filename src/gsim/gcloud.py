@@ -303,24 +303,28 @@ def _write_cloud_run_metadata(
 
 
 def _job_status_value(job) -> str | None:
+    """Return the provider status value when it is available."""
     status = getattr(job, "status", None)
     value = getattr(status, "value", None)
     return str(value) if value is not None else None
 
 
 def _optional_str(value: Any) -> str | None:
+    """Convert an optional value to text."""
     if value is None:
         return None
     return str(value)
 
 
 def _datetime_iso(value: Any) -> str | None:
+    """Return an ISO timestamp for a datetime value."""
     if isinstance(value, datetime):
         return value.isoformat(timespec="seconds")
     return None
 
 
 def _job_elapsed_seconds(job) -> float | None:
+    """Return elapsed job seconds when both timestamps are present."""
     started = getattr(job, "started_at", None)
     finished = getattr(job, "finished_at", None)
     if isinstance(started, datetime) and isinstance(finished, datetime):
@@ -329,6 +333,7 @@ def _job_elapsed_seconds(job) -> float | None:
 
 
 def _relative_to_sim_dir(path: Path, sim_dir: Path) -> str:
+    """Return a path relative to the simulation directory when possible."""
     try:
         return path.relative_to(sim_dir).as_posix()
     except ValueError:

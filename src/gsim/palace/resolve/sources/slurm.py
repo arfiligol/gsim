@@ -75,6 +75,7 @@ def parse_slurm_scontrol_job(path: str | Path) -> dict[str, Any]:
 
 
 def _parse_slurm_tres(value: Any) -> dict[str, str]:
+    """Parse a Slurm TRES field into its keyed values."""
     if value is None:
         return {}
     return {
@@ -84,6 +85,7 @@ def _parse_slurm_tres(value: Any) -> dict[str, str]:
 
 
 def _parse_slurm_duration_seconds(value: Any) -> int | None:
+    """Convert a Slurm duration string to seconds when recognized."""
     if value is None:
         return None
     text = str(value).strip()

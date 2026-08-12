@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -382,12 +383,15 @@ def test_generate_palace_config_emits_lumped_port_direction_vectors(
         "boundary_surfaces": {},
     }
     ports = [
-        PalacePort(name="o1", direction=[3.0, 4.0, 0.0]),
+        PalacePort(
+            name="o1",
+            direction=cast(tuple[float, float, float], [3.0, 4.0, 0.0]),
+        ),
         PalacePort(
             name="cpw",
             multi_element=True,
             centers=[(0.0, 0.0), (0.0, 10.0)],
-            directions=["X", "-Y"],
+            directions=cast(list[tuple[float, float, float]], ["X", "-Y"]),
         ),
     ]
 
@@ -1752,9 +1756,9 @@ def test_postprocessing_index_map_supports_bidirectional_lookup() -> None:
             41, section="Boundaries.Postprocessing.SurfaceFlux"
         )
     ] == ["absorbing"]
-    assert index_map.entry_for_index(
-        "Boundaries.Postprocessing.SurfaceFlux", 2
-    ).attributes == (41, 42)
+    entry = index_map.entry_for_index("Boundaries.Postprocessing.SurfaceFlux", 2)
+    assert entry is not None
+    assert entry.attributes == (41, 42)
 
 
 def test_build_terminal_index_map_from_manifest_links_boundary_indices() -> None:

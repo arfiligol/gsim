@@ -24,7 +24,7 @@ import shutil
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import gmsh
 
@@ -106,9 +106,15 @@ def generate_mesh_from_semantic_geometry_builder(
     """
     if component is None:
         raise ValueError("SGB Surface EPR route meshing requires a component.")
-    route = route.upper()  # type: ignore[assignment]
-    if route not in {"A", "B", "C"}:
-        raise ValueError(f"Unsupported SGB Surface EPR route: {route!r}.")
+    normalized_route = route.upper()
+    if normalized_route == "A":
+        route = "A"
+    elif normalized_route == "B":
+        route = "B"
+    elif normalized_route == "C":
+        route = "C"
+    else:
+        raise ValueError(f"Unsupported SGB Surface EPR route: {normalized_route!r}.")
     run_folder = prepare_palace_run_folder(output_dir)
     semantic_root = run_folder.metadata_dir / "semantic_geometry"
     xao_path = run_folder.geometry_dir / f"semantic_geometry_route_{route.lower()}.xao"
@@ -339,6 +345,7 @@ def generate_mesh_from_semantic_xao(
 
 
 def _write_component_gds(component: Any, path: Path) -> None:
+    """Write a component GDS, accepting path and string writer APIs."""
     path.parent.mkdir(parents=True, exist_ok=True)
     write_gds = getattr(component, "write_gds", None)
     if write_gds is None:
@@ -350,6 +357,7 @@ def _write_component_gds(component: Any, path: Path) -> None:
 
 
 def _component_gds_top_cell_name(component: Any, path: Path) -> str | None:
+    """Resolve the exported component's top-cell name from its GDS file."""
     try:
         import gdstk
     except ImportError:
@@ -386,6 +394,7 @@ def _sgb_stack_mapping_from_gsim_inputs(
     activated_regions: Sequence[ActivatedRegion],
     terminals: Sequence[TerminalConfig],
 ) -> tuple[dict[str, Any], dict[str, str], dict[str, str]]:
+    """Lower active gsim regions and layers to the SGB stack contract."""
     if not activated_regions:
         raise ValueError(
             "SGB Surface EPR route meshing requires explicit activated regions. "
@@ -462,6 +471,7 @@ def _solution_regions_from_activated(
     activated_regions: Sequence[ActivatedRegion],
     component_bounds: tuple[float, float, float, float],
 ) -> tuple[dict[str, Any], dict[str, str], tuple[tuple[str, float, float], ...]]:
+    """Build SGB solution-region records from explicitly activated regions."""
     regions: dict[str, Any] = {}
     stack_layers: dict[str, str] = {}
     host_void_regions: list[tuple[str, float, float]] = []
@@ -550,6 +560,7 @@ def _host_void_for_layer(
     *,
     default: str,
 ) -> str:
+    """Return the host void region with greatest z-overlap for a layer."""
     zmin = float(layer.zmin)
     zmax = _layer_zmax(layer)
     best_name = default
@@ -563,6 +574,7 @@ def _host_void_for_layer(
 
 
 def _layer_zmax(layer: Any) -> float:
+    """Return a layer's explicit or thickness-derived upper z coordinate."""
     zmax = getattr(layer, "zmax", None)
     if zmax is not None:
         return float(zmax)
@@ -578,6 +590,7 @@ def _solution_region_record(
     zmax: float,
     stack_layer: str,
 ) -> dict[str, Any]:
+    """Build one SGB solution-region record."""
     xmin, ymin, xmax, ymax = bounds
     return {
         "role": "solution_region",
@@ -607,6 +620,7 @@ def _sgb_layer_record(
     host_void_semantic_id: str,
     selector: Any | None,
 ) -> dict[str, Any]:
+    """Build one SGB layout-extrusion record for a conductor or via layer."""
     is_via = layer.layer_type == "via"
     geometry = {
         "z_um": float(layer.zmin),
@@ -648,6 +662,7 @@ def _sgb_layer_record(
 
 
 def _gds_layers_in_file(path: Path) -> set[tuple[int, int]]:
+    """Return GDS layer/datatype pairs present in an exported layout file."""
     try:
         import gdstk
     except ImportError as error:
@@ -657,12 +672,13 @@ def _gds_layers_in_file(path: Path) -> set[tuple[int, int]]:
     library = gdstk.read_gds(str(path))
     layers: set[tuple[int, int]] = set()
     for cell in library.cells:
-        for polygon in cell.get_polygons(apply_repetitions=True):
+        for polygon in cast(Any, cell).get_polygons(apply_repetitions=True):
             layers.add((int(polygon.layer), int(polygon.datatype)))
     return layers
 
 
 def _component_bounds(component: Any) -> tuple[float, float, float, float]:
+    """Return a component's planar bounding box as numeric coordinates."""
     bbox_np = getattr(component, "bbox_np", None)
     if bbox_np is not None:
         bbox = bbox_np()
@@ -682,11 +698,13 @@ def _expanded_bounds(
     margin_x: float,
     margin_y: float,
 ) -> tuple[float, float, float, float]:
+    """Expand planar bounds independently along each axis."""
     xmin, ymin, xmax, ymax = bounds
     return (xmin - margin_x, ymin - margin_y, xmax + margin_x, ymax + margin_y)
 
 
 def _semantic_id(value: str) -> str:
+    """Normalize a nonempty value into an SGB semantic identifier."""
     normalized = _SEMANTIC_ID_RE.sub("_", value.strip()).strip("_")
     if not normalized:
         raise ValueError("Empty semantic id.")
@@ -699,6 +717,7 @@ def _groups_from_sgb_records(
     semantic_layer_map: Mapping[str, str],
     semantic_stack_layer_map: Mapping[str, str],
 ) -> dict[str, dict[str, Any]]:
+    """Translate live SGB physical-group records into gsim mesh groups."""
     groups: dict[str, dict[str, Any]] = {
         "volumes": {},
         "conductor_surfaces": {},
@@ -753,6 +772,7 @@ def _setup_xao_refinement(
     refined_cellsize: float,
     max_cellsize: float,
 ) -> None:
+    """Apply line refinement around active SGB boundary and port surfaces."""
     lines: set[int] = set()
     for surface_group in ("boundary_surfaces", "pec_surfaces", "port_surfaces"):
         for info in groups.get(surface_group, {}).values():
@@ -778,13 +798,14 @@ def _setup_xao_refinement(
 
 
 def _assert_tetra_mesh_valid(mesh_path: Path) -> None:
+    """Raise when a readable tetrahedral mesh has invalid topology."""
     try:
         import meshio
     except ImportError:
         return
 
     mesh = meshio.read(mesh_path)
-    faces: defaultdict[tuple[int, int, int], int] = defaultdict(int)
+    faces: defaultdict[tuple[int, ...], int] = defaultdict(int)
     face_indices = ((0, 1, 2), (0, 1, 3), (0, 2, 3), (1, 2, 3))
     zero_volume_tets = 0
     for block in mesh.cells:
@@ -822,6 +843,7 @@ def _assert_tetra_mesh_valid(mesh_path: Path) -> None:
 
 
 def _live_physical_groups() -> dict[tuple[int, str], tuple[int, tuple[int, ...]]]:
+    """Return named physical groups currently registered in Gmsh."""
     live: dict[tuple[int, str], tuple[int, tuple[int, ...]]] = {}
     for dim, phys_group in gmsh.model.getPhysicalGroups():
         name = gmsh.model.getPhysicalName(dim, phys_group)
@@ -842,6 +864,7 @@ def _volume_group_info(
     record: Mapping[str, Any],
     semantic_stack_layer_map: Mapping[str, str],
 ) -> dict[str, Any]:
+    """Build gsim volume-group metadata from one SGB physical-group record."""
     stack_layer = semantic_stack_layer_map.get(name, name)
     return {
         "phys_group": phys_group,
@@ -865,6 +888,7 @@ def _add_surface_group_records(
     record: Mapping[str, Any],
     semantic_layer_map: Mapping[str, str],
 ) -> None:
+    """Classify one SGB surface record into gsim boundary and PEC groups."""
     if str(record.get("role")) == "domain_boundary":
         bbox = _entities_bbox(2, entity_tags)
         groups["boundary_surfaces"][name] = {
@@ -965,6 +989,7 @@ def _parse_surface_physical_name(
 
 
 def _semantic_source_parts(parts: Sequence[str]) -> Sequence[str]:
+    """Remove numeric and face-kind suffixes from an interface source name."""
     source_parts = list(parts)
     while source_parts and (
         source_parts[-1].isdigit() or source_parts[-1] in _FACE_KIND_SEGMENTS
@@ -974,6 +999,7 @@ def _semantic_source_parts(parts: Sequence[str]) -> Sequence[str]:
 
 
 def _entities_bbox(dim: int, entity_tags: Sequence[int]) -> list[float]:
+    """Return the enclosing Gmsh bounding box for entities of one dimension."""
     bboxes = [gmsh.model.getBoundingBox(dim, tag) for tag in entity_tags]
     if not bboxes:
         return []
@@ -988,6 +1014,7 @@ def _entities_bbox(dim: int, entity_tags: Sequence[int]) -> list[float]:
 
 
 def _bbox_centroid(bbox: Sequence[float]) -> list[float]:
+    """Return the centroid of a six-coordinate Gmsh bounding box."""
     if len(bbox) != 6:
         return []
     return [

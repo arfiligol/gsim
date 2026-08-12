@@ -4,6 +4,7 @@ import json
 import os
 import stat
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -594,6 +595,7 @@ def test_package_palace_run_handoff_archive_writes_tar_with_empty_result_dirs(
 
     result = package_palace_run_handoff_archive(tmp_path)
 
+    assert result.archive_path is not None
     assert result.archive_path == tmp_path.parent / f"{tmp_path.name}-palace.tar.gz"
     assert result.archive_path.exists()
     assert result.manifest_path == (
@@ -834,7 +836,7 @@ def test_palace_slurm_resource_spec_rejects_unsafe_values(
     }
 
     with pytest.raises(ValueError, match=match):
-        PalaceSlurmResourceSpec(**values)
+        PalaceSlurmResourceSpec(**cast(Any, values))
 
 
 @pytest.mark.parametrize(
@@ -861,4 +863,4 @@ def test_palace_slurm_sbatch_spec_rejects_unsafe_values(
     }
 
     with pytest.raises(ValueError, match=match):
-        PalaceSlurmSbatchSpec(**values)
+        PalaceSlurmSbatchSpec(**cast(Any, values))

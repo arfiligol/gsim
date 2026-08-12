@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 def float_or_nan(value: Any) -> float:
     """Return ``value`` as ``float`` or ``nan`` when conversion fails."""
     try:
-        return float(cast("Any", value))
+        return float(value)
     except (TypeError, ValueError):
         return float("nan")
 

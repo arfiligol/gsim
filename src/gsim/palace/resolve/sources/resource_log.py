@@ -319,4 +319,5 @@ def parse_palace_resource_log(log_path: str | Path) -> dict[str, Any]:
 
 
 def _ordered_amr_pass_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Project one AMR pass row into the canonical column order."""
     return {column: row.get(column) for column in PALACE_AMR_PASS_COLUMNS}

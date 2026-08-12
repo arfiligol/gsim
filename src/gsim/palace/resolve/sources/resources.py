@@ -184,6 +184,7 @@ def write_palace_resource_record_from_log(
 
 
 def _resource_record_path(source: str | Path, *, filename: str) -> Path:
+    """Resolve the resource-record path from a source path or directory."""
     path = Path(source)
     return path if path.suffix.lower() == ".json" else path / filename
 
@@ -193,6 +194,7 @@ def _write_resource_record_csv(
     rows: list[dict[str, Any]],
     columns: tuple[str, ...],
 ) -> None:
+    """Write one tabular resource record sidecar as CSV."""
     import pandas as pd
 
     frame = pd.DataFrame.from_records(rows, columns=columns)

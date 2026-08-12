@@ -35,6 +35,7 @@ def load_domain_energy_summary(
     *,
     index_map_path: str | Path | None = None,
 ) -> pd.DataFrame:
+    """Load indexed quantities into a provenance-aware summary table."""
     """Load ``domain-E.csv`` as one row per sampled domain index.
 
     The returned frame preserves Palace quantities such as ``E_elec`` and
@@ -174,6 +175,7 @@ def _load_indexed_quantity_summary(
     quantity_columns: dict[str, str],
     index_map_path: str | Path | None,
 ) -> pd.DataFrame:
+    """Load indexed quantities into a provenance-aware summary table."""
     import pandas as pd
 
     indexed = load_indexed_csv(
@@ -226,6 +228,7 @@ def _load_indexed_quantity_summary(
 
 
 def _drop_native_mask_surface_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    """Exclude native-mask rows from generic surface summaries."""
     if frame.empty or "metadata" not in frame.columns:
         return frame
     keep = [
@@ -238,6 +241,7 @@ def _drop_native_mask_surface_rows(frame: pd.DataFrame) -> pd.DataFrame:
 def _sample_metadata(
     source_row: Any, sample_columns: list[str], row_offset: int
 ) -> dict[str, Any]:
+    """Extract row-order and sample-column metadata from one source row."""
     row: dict[str, Any] = {"row_index": row_offset}
     if not sample_columns:
         return row
@@ -256,6 +260,7 @@ def _sample_metadata(
 
 
 def _sample_column_alias(column: str) -> str | None:
+    """Map known Palace sample column labels to canonical summary names."""
     normalized = column.strip().lower()
     if normalized in {"m", "mode"}:
         return "mode_index"
@@ -267,6 +272,7 @@ def _sample_column_alias(column: str) -> str | None:
 
 
 def _coerce_sample_value(value: Any, *, integer: bool) -> Any:
+    """Convert a sample value to numeric form when possible."""
     try:
         numeric = float(value)
     except (TypeError, ValueError):
@@ -277,6 +283,7 @@ def _coerce_sample_value(value: Any, *, integer: bool) -> Any:
 
 
 def _inverse_q_values(values: Any) -> pd.Series:
+    """Convert a series of Q values to inverse-Q values."""
     import pandas as pd
 
     numeric = cast("pd.Series", pd.to_numeric(values, errors="coerce")).fillna(
@@ -286,6 +293,7 @@ def _inverse_q_values(values: Any) -> pd.Series:
 
 
 def _fraction_values(values: Any, totals: Any) -> pd.Series:
+    """Return finite per-row fractions for values and their totals."""
     import pandas as pd
 
     numeric_values = cast("pd.Series", pd.to_numeric(values, errors="coerce")).fillna(
@@ -305,6 +313,7 @@ def _fraction_values(values: Any, totals: Any) -> pd.Series:
 
 
 def _sample_group_columns(frame: pd.DataFrame) -> list[str]:
+    """Return present columns that identify one sampled report row."""
     return [
         column
         for column in ("mode_index", "source_index", "frequency_ghz", "sample_value")

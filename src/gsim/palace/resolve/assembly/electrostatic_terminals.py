@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from gsim.palace.resolve.assembly.common import report_source_row
 from gsim.palace.resolve.derived.terminal_matrices import (
@@ -254,10 +254,7 @@ def load_terminal_matrix_history_for_report(
             label="Final",
             is_final=True,
         )
-        return cast(
-            "pd.DataFrame",
-            add_terminal_matrix_convergence_columns(pd.DataFrame(final_history)),
-        )
+        return add_terminal_matrix_convergence_columns(pd.DataFrame(final_history))
 
 
 def terminal_matrix_pass_summary(history: pd.DataFrame) -> pd.DataFrame:

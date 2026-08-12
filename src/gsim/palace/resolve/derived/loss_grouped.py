@@ -88,6 +88,7 @@ def _loss_budget_row(
     *,
     frequency_ghz: float | None,
 ) -> dict[str, Any]:
+    """Build one aggregate loss-budget row for a grouping."""
     domain_inverse_q = sum_numeric_column(domain_loss, "inverse_q")
     surface_inverse_q = sum_numeric_column(surface_loss, "inverse_q")
     total_inverse_q = domain_inverse_q + surface_inverse_q
@@ -118,6 +119,7 @@ def _loss_group_columns(
     domain_loss: pd.DataFrame,
     surface_loss: pd.DataFrame,
 ) -> tuple[str, ...]:
+    """Choose shared columns that identify comparable loss groups."""
     frames = [frame for frame in (domain_loss, surface_loss) if not frame.empty]
     if not frames:
         return ()
@@ -149,6 +151,7 @@ def _loss_group_values(
     surface_loss: pd.DataFrame,
     group_columns: tuple[str, ...],
 ) -> list[dict[str, Any]]:
+    """Collect unique group values across domain and surface losses."""
     if not group_columns:
         return []
 
@@ -170,6 +173,7 @@ def _rows_for_loss_group(
     frame: pd.DataFrame,
     group_values: dict[str, Any],
 ) -> pd.DataFrame:
+    """Select rows matching one loss-group value mapping."""
     if frame.empty or not group_values:
         return frame
 

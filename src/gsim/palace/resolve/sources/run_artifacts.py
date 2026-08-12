@@ -75,6 +75,7 @@ def find_sweep_handoff_metadata_json(source: str | Path | dict) -> Path | None:
 
 
 def _candidate_roots(source: str | Path | dict, name: str) -> list[Path]:
+    """Return plausible artifact roots for one source and filename."""
     if isinstance(source, dict):
         explicit = source.get(name)
         if explicit is not None:
@@ -86,6 +87,7 @@ def _candidate_roots(source: str | Path | dict, name: str) -> list[Path]:
 
 
 def _first_existing(candidates: list[Path]) -> Path | None:
+    """Return the first existing path from ordered candidates."""
     for candidate in candidates:
         if candidate.exists():
             return candidate
@@ -93,6 +95,7 @@ def _first_existing(candidates: list[Path]) -> Path | None:
 
 
 def _find_execution_input(source: str | Path | dict, name: str) -> Path | None:
+    """Find an execution input across canonical run-folder locations."""
     if isinstance(source, dict) and source.get(name) is not None:
         return Path(source[name])
 
@@ -113,6 +116,7 @@ def _find_execution_input(source: str | Path | dict, name: str) -> Path | None:
 
 
 def _find_metadata_sidecar(source: str | Path | dict, name: str) -> Path | None:
+    """Find a metadata sidecar across canonical run-folder locations."""
     if isinstance(source, dict) and source.get(name) is not None:
         return Path(source[name])
 

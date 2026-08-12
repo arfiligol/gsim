@@ -59,6 +59,7 @@ def _palace_lumped_port_direction(value: PalaceDirectionInput) -> list[float]:
 
 
 def _default_refinement_config() -> dict[str, Any]:
+    """Return the standard Palace mesh-refinement defaults."""
     return {
         "Tol": 1.0e-2,
         "MaxIts": 0,
@@ -74,6 +75,7 @@ def _default_refinement_config() -> dict[str, Any]:
 def _merged_refinement_config(
     refinement_config: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
+    """Merge caller refinement overrides into the standard defaults."""
     refinement = _default_refinement_config()
     if refinement_config:
         _deep_merge_config(refinement, dict(refinement_config))
@@ -622,7 +624,9 @@ def generate_palace_config(
                 else:
                     # Single-element port
                     if port.port_type == PortType.LUMPED:
-                        direction = _palace_lumped_port_direction(port.direction)
+                        direction = _palace_lumped_port_direction(
+                            cast(PalaceDirectionInput, port.direction)
+                        )
 
                         has_reactive = (
                             port.resistance is not None
@@ -774,7 +778,7 @@ def generate_palace_config(
         # can wire EPR/flux domains without hand-editing config.json.
         existing_boundary_postprocessing = boundaries.get("Postprocessing")
         boundary_postprocessing: dict[str, Any] = (
-            dict(existing_boundary_postprocessing)
+            dict(cast(Mapping[str, Any], existing_boundary_postprocessing))
             if isinstance(existing_boundary_postprocessing, dict)
             else {}
         )
@@ -838,6 +842,7 @@ def _material_resolution_config_row(
     palace_material: dict[str, object],
     resolution: dict[str, Any],
 ) -> dict[str, Any]:
+    """Build one material-resolution provenance row for generated config."""
     row = {
         "material_row_index": material_row_index,
         "material_attribute": material_attribute,
@@ -856,6 +861,7 @@ def _selector_entries(
     stack: LayerStack,
     selectors: list[Any],
 ) -> tuple[list[dict[str, object]], set[int], set[str]]:
+    """Resolve terminal selectors into Palace entries and selected attributes."""
     entries: list[dict[str, object]] = []
     assigned_pgs: set[int] = set()
     selected_vias: set[str] = set()
@@ -970,6 +976,7 @@ def _volume_interface_boundary_attributes(
     selector: Any | None = None,
     volume_ids: set[str] | None = None,
 ) -> list[int]:
+    """Return boundary attributes for matching volume-interface child surfaces."""
     attrs: list[int] = []
     for surf_info in _volume_interface_child_surfaces(groups):
         if (
@@ -990,6 +997,7 @@ def _volume_interface_boundary_attributes(
 
 
 def _volume_interface_child_surfaces(groups: dict[str, Any]):
+    """Yield active volume-interface child surface records."""
     for surf_info in groups.get("boundary_surfaces", {}).values():
         if not isinstance(surf_info, dict):
             continue
@@ -1003,6 +1011,7 @@ def _volume_interface_child_surfaces(groups: dict[str, Any]):
 
 
 def _c_volume_ids_for_selector(groups: dict[str, Any], selector: Any) -> set[str]:
+    """Return conductor-volume identifiers selected by a terminal center."""
     if selector.center is None:
         return set()
     volume_ids: set[str] = set()
@@ -1026,6 +1035,7 @@ def _boundary_attributes_for_conductor_surface(
     groups: dict[str, Any],
     surf_info: dict[str, object],
 ) -> list[int]:
+    """Return terminal boundary attributes for one conductor-surface record."""
     if surf_info.get("source") == "finite_conductor_terminal_shell":
         source_id = surf_info.get("source_id")
         if isinstance(source_id, str) and source_id:
@@ -1044,6 +1054,7 @@ def _finite_conductor_split_boundary_attributes(
     *,
     representation: str | None = None,
 ) -> list[int]:
+    """Return active child attributes for a finite-conductor split source."""
     attrs: list[int] = []
     for info in groups.get("conductor_surfaces", {}).values():
         if not isinstance(info, dict):
@@ -1066,6 +1077,7 @@ def _finite_conductor_split_source_ids(
     *,
     representation: str | None = None,
 ) -> tuple[str, ...]:
+    """Return ordered unique active finite-conductor split source identifiers."""
     source_ids: list[str] = []
     for info in groups.get("conductor_surfaces", {}).values():
         if not isinstance(info, dict):
@@ -1089,6 +1101,7 @@ def _finite_conductor_split_sources_for_selector(
     *,
     representation: str | None = None,
 ) -> tuple[str, ...]:
+    """Return finite-conductor split sources matching a terminal selector."""
     source_ids: list[str] = []
     for info in groups.get("conductor_surfaces", {}).values():
         if not isinstance(info, dict):
@@ -1118,6 +1131,7 @@ def _conductor_matches_selector(
     surf_info: dict[str, object],
     selector: Any,
 ) -> bool:
+    """Return whether a conductor surface record matches a terminal selector."""
     surf_layer = surf_info.get("layer", surf_name.rsplit("_", 1)[0])
     if surf_layer != selector.layer and surf_name != selector.layer:
         return False
@@ -1190,6 +1204,7 @@ def _pec_matches_selector(
     pec_info: dict[str, object],
     selector: Any,
 ) -> bool:
+    """Return whether a PEC surface record matches a terminal selector."""
     pec_layer = pec_info.get("layer", pec_name)
     if pec_layer != selector.layer and pec_name != selector.layer:
         return False
@@ -1202,6 +1217,7 @@ def _bbox_contains_center(
     bbox: Any,
     center: tuple[float, float],
 ) -> bool:
+    """Return whether a two-dimensional center lies within a bounding box."""
     if (
         not isinstance(bbox, (list, tuple))
         or len(bbox) != 6
@@ -1228,6 +1244,7 @@ def _via_touches_layer(
 
 
 def _physical_group_values(value: Any) -> list[int]:
+    """Normalize one physical-group value into integer attributes."""
     if isinstance(value, bool) or value is None:
         return []
     if isinstance(value, int):
@@ -1240,6 +1257,7 @@ def _physical_group_values(value: Any) -> list[int]:
 
 
 def _outer_boundary_attributes(groups: dict[str, Any]) -> list[int]:
+    """Return physical attributes for the generated absorbing outer boundary."""
     boundary_info = groups.get("boundary_surfaces", {}).get("absorbing")
     if not isinstance(boundary_info, dict):
         return []
@@ -1252,6 +1270,7 @@ def _resolve_boundary_dielectric_interfaces(
     material_frequency_hz: float,
     material_overlay: Any | None,
 ) -> list[dict[str, Any]]:
+    """Resolve material-backed boundary dielectric rows and record provenance."""
     dielectric_rows = boundary_postprocessing.get("Dielectric")
     if not isinstance(dielectric_rows, list):
         return []
@@ -1260,6 +1279,7 @@ def _resolve_boundary_dielectric_interfaces(
     for interface_row_index, interface in enumerate(dielectric_rows, start=1):
         if not isinstance(interface, dict):
             continue
+        interface = cast(dict[str, Any], interface)
         material_name = interface.pop("_MaterialName", None)
         if material_name is None:
             continue
@@ -1299,6 +1319,7 @@ def _resolve_boundary_dielectric_interfaces(
 
 
 def _deep_merge_config(target: dict[str, Any], updates: dict[str, Any]) -> None:
+    """Recursively merge config updates into a mutable target mapping."""
     for key, value in updates.items():
         existing = target.get(key)
         if isinstance(existing, dict) and isinstance(value, dict):
@@ -1317,6 +1338,7 @@ _PROTECTED_HINT_PATHS: tuple[tuple[str, ...], ...] = (
 
 
 def _hint_path(path: tuple[str, ...]) -> str:
+    """Format a nested config hint path for diagnostics."""
     return ".".join(path)
 
 
@@ -1325,6 +1347,7 @@ def _reject_protected_config_hints(
     *,
     path: tuple[str, ...] = (),
 ) -> None:
+    """Reject hints that would overwrite typed Palace configuration owners."""
     for key, value in hints.items():
         current_path = (*path, str(key))
         if current_path in _PROTECTED_HINT_PATHS:
@@ -1342,6 +1365,7 @@ def _resolve_single_interface_material(
     material_frequency_hz: float,
     material_overlay: Any | None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Resolve one named interface material with its provenance record."""
     from gsim.palace.materials import resolve_palace_materials_with_report
 
     resolved, report = resolve_palace_materials_with_report(
@@ -1368,6 +1392,7 @@ def _interface_material_resolution_config_row(
     palace_interface: dict[str, object],
     resolution: dict[str, Any],
 ) -> dict[str, Any]:
+    """Build one interface-material resolution provenance row."""
     row = {
         "interface_row_index": interface_row_index,
         "surface_index": surface_index,
@@ -1381,6 +1406,7 @@ def _interface_material_resolution_config_row(
 
 
 def _optional_int(value: Any) -> int | None:
+    """Return an integer-like value unless it is boolean or absent."""
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
@@ -1389,6 +1415,7 @@ def _optional_int(value: Any) -> int | None:
 
 
 def _int_list(value: Any) -> list[int]:
+    """Normalize an iterable of numeric values to integer attributes."""
     if isinstance(value, (str, bytes)) or value is None:
         return []
     try:

@@ -260,6 +260,7 @@ class SimulationBenchmark:
         return {**self.tables(), **self.figures()}
 
     def _table_path(self, name: str) -> Path | None:
+        """Resolve a named benchmark table path from record metadata."""
         tables = as_mapping(self.resource.get("tables"))
         table = as_mapping(tables.get(name))
         path_value = table.get("path")
@@ -281,6 +282,7 @@ class SimulationBenchmark:
         return run_root / path
 
     def _table_records(self, name: str) -> tuple[Mapping[str, Any], ...]:
+        """Load optional named benchmark table rows."""
         import pandas as pd
 
         path = self._table_path(name)
@@ -290,6 +292,7 @@ class SimulationBenchmark:
         return tuple(cast("Mapping[str, Any]", row) for row in frame.to_dict("records"))
 
     def _fill_summary_metrics(self, rows: dict[int, dict[str, Any]]) -> None:
+        """Fill final-pass summary metrics from resource-record fields."""
         model_size = as_mapping(self.resource.get("model_size"))
         runtime = as_mapping(self.resource.get("runtime"))
         memory = as_mapping(self.resource.get("memory"))
@@ -312,6 +315,7 @@ class SimulationBenchmark:
 
 
 def _is_total_stage(row: Mapping[str, Any]) -> bool:
+    """Return whether a stage-timing row represents the total stage."""
     return str(row.get("stage", "")).casefold() == "total"
 
 
@@ -323,6 +327,7 @@ def _trace_panel(
     y_title: str,
     y_scale: float = 1.0,
 ) -> Mapping[str, Any] | None:
+    """Build one adaptive-pass trace panel when its metric is available."""
     if frame.empty or column not in frame:
         return None
     series = frame[["adaptive_pass", column]].dropna()

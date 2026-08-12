@@ -83,6 +83,7 @@ def build_interface_surface_catalog(
 
 
 def _iter_mapping(value: Any) -> Iterable[tuple[str, Mapping[str, Any]]]:
+    """Iterate mapping entries whose values are group metadata mappings."""
     if not isinstance(value, Mapping):
         return ()
     return (
@@ -94,6 +95,7 @@ def _interface_surface_from_group(
     name: str,
     info: Mapping[str, Any],
 ) -> InterfaceSurface | None:
+    """Build one Surface EPR catalog record from compatible group metadata."""
     interface_type = info.get("interface_type")
     if interface_type not in {"MS", "MA", "SA"}:
         return None
@@ -121,6 +123,7 @@ def _interface_surface_from_group(
 
 
 def _int_tuple(value: Any) -> tuple[int, ...]:
+    """Normalize integer-valued metadata to a tuple of tags."""
     if isinstance(value, bool) or value is None:
         return ()
     if isinstance(value, int):
@@ -131,6 +134,7 @@ def _int_tuple(value: Any) -> tuple[int, ...]:
 
 
 def _optional_string(value: Any) -> str | None:
+    """Return a non-empty string value when present."""
     return value if isinstance(value, str) and value else None
 
 

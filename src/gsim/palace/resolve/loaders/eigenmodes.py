@@ -225,6 +225,7 @@ def summarize_eigenmode_history(
 
 
 def _resolve_eig_csv(source: str | Path | dict) -> Path:
+    """Resolve the final Eigenmode CSV from a path or artifact mapping."""
     if isinstance(source, dict):
         explicit = source.get("eig.csv")
         if explicit is not None:
@@ -250,6 +251,7 @@ def _resolve_eig_csv(source: str | Path | dict) -> Path:
 
 
 def _find_eig_csv(base: Path) -> Path | None:
+    """Find an Eigenmode CSV in canonical Palace output locations."""
     candidates = [
         base / "eig.csv",
         base / "results" / "palace" / "eig.csv",
@@ -270,6 +272,7 @@ def _find_eigenmode_column(
     *,
     default: str | None,
 ) -> str | None:
+    """Find the first column containing a configured name pattern."""
     normalized_patterns = tuple(pattern.lower() for pattern in patterns)
     for column in columns:
         lower = column.lower().strip()
@@ -295,7 +298,7 @@ def eigenmodes_to_history_frame(
     frame.insert(0, "is_final", is_final)
     frame.insert(0, "label", label)
     frame.insert(0, "iteration_index", iteration_index)
-    return cast("pd.DataFrame", frame)
+    return frame
 
 
 def add_eigenmode_convergence_columns(history: pd.DataFrame) -> pd.DataFrame:
@@ -367,6 +370,7 @@ def add_eigenmode_convergence_columns(history: pd.DataFrame) -> pd.DataFrame:
 
 
 def _next_eigenmode_iteration(pass_frames: list[pd.DataFrame]) -> int:
+    """Return the next AMR iteration index after existing frames."""
     max_index = 0
     for frame in pass_frames:
         max_index = max(max_index, int(cast("Any", frame["iteration_index"].max())))
@@ -374,6 +378,7 @@ def _next_eigenmode_iteration(pass_frames: list[pd.DataFrame]) -> int:
 
 
 def _eigenmode_tables_match(left: pd.DataFrame, right: pd.DataFrame) -> bool:
+    """Return whether two Eigenmode tables agree on comparison columns."""
     columns = [
         "mode_index",
         "freq_real_ghz",
@@ -457,6 +462,7 @@ def eigenmode_history_source(source: str | Path | dict, eig_csv_path: Path) -> P
 
 
 def _iteration_dirs(output_dir: Path) -> tuple[tuple[Path, int], ...]:
+    """Return sorted Palace Eigenmode iteration directories."""
     if not output_dir.exists():
         raise FileNotFoundError(output_dir)
     dirs: list[tuple[Path, int]] = []

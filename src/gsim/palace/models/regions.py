@@ -34,6 +34,7 @@ class ActivatedRegion(BaseModel):
     @field_validator("layer", "die", "lower_die", "upper_die", "material")
     @classmethod
     def _strip_non_empty(cls, value: str | None) -> str | None:
+        """Strip optional region names and reject blank values."""
         if value is None:
             return None
         stripped = value.strip()
@@ -43,6 +44,7 @@ class ActivatedRegion(BaseModel):
 
     @model_validator(mode="after")
     def _validate_role_fields(self) -> Self:
+        """Require the role-specific region fields."""
         if self.role == "inter_die_vacuum" and (
             self.lower_die is None or self.upper_die is None
         ):

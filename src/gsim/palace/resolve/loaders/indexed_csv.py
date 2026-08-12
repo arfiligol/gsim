@@ -107,6 +107,7 @@ def load_indexed_csv(
 
 
 def _section_for_csv(csv_name: str) -> str:
+    """Return the index-map section associated with a Palace CSV name."""
     try:
         return _CSV_INDEX_SECTIONS[csv_name]
     except KeyError:
@@ -169,6 +170,7 @@ def indexed_column_provenance(
 
 
 def _metadata_string(metadata: dict[str, Any], key: str) -> str | None:
+    """Return a non-empty string metadata value for one key."""
     value = metadata.get(key)
     if isinstance(value, str) and value:
         return value

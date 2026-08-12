@@ -46,7 +46,7 @@ class PalaceRunArtifacts:
         """Return a JSON-friendly artifact bundle."""
         source: str | dict[str, str]
         if isinstance(self.source, Mapping):
-            source = {name: str(path) for name, path in self.source.items()}
+            source = {str(name): str(path) for name, path in self.source.items()}
         else:
             source = str(self.source)
         return {

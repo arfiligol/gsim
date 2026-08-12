@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
+from typing import cast
 
 _ITERATION_DIR_RE = re.compile(r"iteration(\d+)$")
 
@@ -65,7 +66,7 @@ def resolve_report_csv(
         if csv_val is None:
             msg = f"Results dict has no {resolved_name!r} entry"
             raise FileNotFoundError(msg)
-        return Path(csv_val)
+        return Path(cast(str | Path, csv_val))
 
     path = Path(source)
     if path.is_file():

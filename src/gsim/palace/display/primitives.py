@@ -203,10 +203,12 @@ def display_items(
 
 
 def _is_plotly_figure(value: DisplayValue) -> TypeGuard[PlotlyFigure]:
+    """Return whether a display value provides the Plotly figure protocol."""
     return hasattr(value, "update_layout") and hasattr(value, "write_html")
 
 
 def _display_value_for_name(name: str, value: DisplayValue) -> DisplayValue:
+    """Apply table formatting appropriate to a named display value."""
     if name not in {"domain_epr_summary_table", "surface_epr_summary_table"}:
         return value
 
@@ -223,7 +225,7 @@ def _display_value_for_name(name: str, value: DisplayValue) -> DisplayValue:
         for column in ("participation", "inverse_q", "q_equivalent", "t1_us")
         if column in value.columns
     }
-    return value.style.format(formats) if formats else value
+    return value.style.format(cast(Any, formats)) if formats else value
 
 
 __all__ = [

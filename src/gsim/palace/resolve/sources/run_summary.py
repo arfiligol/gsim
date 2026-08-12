@@ -103,6 +103,7 @@ def _artifact_status(
     *,
     include_hashes: bool,
 ) -> PalaceArtifactStatus:
+    """Build artifact presence and optional checksum status for one path."""
     if path is None or not path.exists() or not path.is_file():
         return PalaceArtifactStatus(name=name, path=path, present=False)
     return PalaceArtifactStatus(

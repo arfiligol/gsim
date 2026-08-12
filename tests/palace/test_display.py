@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import tarfile
 from pathlib import Path
-from typing import get_type_hints
+from typing import Any, cast, get_type_hints
 
 import pytest
 
@@ -187,8 +187,8 @@ def test_eigenmode_loss_typed_data_is_report_owned(tmp_path: Path) -> None:
     assert "surface_epr_loss_table" not in items
     assert "domain_inverse_q_bar_plot" not in items
     assert "surface_inverse_q_bar_plot" not in items
-    domain_summary = items["domain_epr_summary_table"]
-    surface_summary = items["surface_epr_summary_table"]
+    domain_summary = cast(Any, items["domain_epr_summary_table"])
+    surface_summary = cast(Any, items["surface_epr_summary_table"])
     assert domain_summary.iloc[0]["participation"] == pytest.approx(0.5)
     assert surface_summary.iloc[0]["participation"] == pytest.approx(1.0e-7)
     assert domain_summary.iloc[0]["participation_percent"] == pytest.approx(100.0)
@@ -250,12 +250,12 @@ def test_electrostatic_report_adds_surface_epr_convergence_plot(
 
     items = report.result_items()
 
-    domain_figure = items["domain_epr_convergence_trace_plot"]
+    domain_figure = cast(Any, items["domain_epr_convergence_trace_plot"])
     assert {trace.name for trace in domain_figure.data} == {"source 1 substrate"}
     for trace in domain_figure.data:
         assert list(trace.x) == [1, 2, 3]
 
-    figure = items["surface_epr_convergence_trace_plot"]
+    figure = cast(Any, items["surface_epr_convergence_trace_plot"])
     assert {trace.name for trace in figure.data} == {
         "source 1 surface 2 i=1 MS MS:metal__substrate",
         "source 1 surface 3 i=1 MS MS:metal__air",
@@ -263,7 +263,7 @@ def test_electrostatic_report_adds_surface_epr_convergence_plot(
     }
     for trace in figure.data:
         assert list(trace.x) == [1, 2, 3]
-    summary = items["surface_epr_summary_table"]
+    summary = cast(Any, items["surface_epr_summary_table"])
     assert "loss_channel" not in summary.columns
     assert set(summary["interface_type"]) == {"MS", "MA"}
     assert "attributes" in summary.columns

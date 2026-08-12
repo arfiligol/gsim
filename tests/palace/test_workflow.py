@@ -10,7 +10,7 @@ import json
 import subprocess
 from pathlib import Path
 from textwrap import dedent
-from typing import Self
+from typing import Literal, Self, cast
 
 import gdsfactory as gf
 import pytest
@@ -833,7 +833,7 @@ def test_run_local_direct_palace_rejects_unknown_executable_mode(tmp_path):
     with pytest.raises(ValueError, match="executable_mode"):
         sim.run_local(
             use_apptainer=False,
-            executable_mode="unknown",  # type: ignore[arg-type]
+            executable_mode=cast(Literal["wrapper", "binary"], "unknown"),
             palace_executable="/usr/bin/true",
             verbose=False,
         )
@@ -1186,7 +1186,9 @@ class TestMagnetostaticSimWorkflow:
         )
 
         index_map = json.loads(
-            (Path(sim._output_dir) / "metadata" / "palace_index_map.json").read_text()
+            (
+                Path(cast(Path, sim._output_dir)) / "metadata" / "palace_index_map.json"
+            ).read_text()
         )
         source_rows = [
             row

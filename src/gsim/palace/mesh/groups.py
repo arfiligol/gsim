@@ -39,6 +39,7 @@ def _volume_material_name(
     volume_info: Mapping[str, object],
     stack: LayerStack | None,
 ) -> str:
+    """Resolve a volume material from group metadata or the stack layer."""
     material = volume_info.get("material")
     if isinstance(material, str) and material:
         return material
@@ -242,19 +243,20 @@ def assign_physical_groups(
         for name, info in groups["volumes"].items()
     }
 
-    def _live_tags(dim: int, tags: Sequence[object]) -> list[int]:
+    def _live_tags(dim: int, tags: Sequence[int]) -> list[int]:
         live: list[int] = []
         for tag in tags:
+            entity_tag = int(tag)
             with contextlib.suppress(Exception):
-                kernel.getBoundingBox(dim, int(tag))
+                kernel.getBoundingBox(dim, entity_tag)
                 if dim == 2:
                     gmsh.model.getBoundary(
-                        [(2, int(tag))],
+                        [(2, entity_tag)],
                         combined=False,
                         oriented=False,
                         recursive=False,
                     )
-                live.append(int(tag))
+                live.append(entity_tag)
         return live
 
     # --- PEC surfaces (planar conductors) ---

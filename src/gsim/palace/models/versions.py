@@ -8,7 +8,7 @@ assembly.
 
 from __future__ import annotations
 
-from typing import Literal, cast
+from typing import Literal
 
 PalaceConfigVersion = Literal["0.15.0", "0.16.0"]
 SUPPORTED_PALACE_CONFIG_VERSIONS: tuple[PalaceConfigVersion, ...] = (
@@ -21,8 +21,10 @@ DEFAULT_PALACE_CONFIG_VERSION: PalaceConfigVersion = "0.16.0"
 def normalize_palace_config_version(version: str) -> PalaceConfigVersion:
     """Return a supported Palace config version or fail fast."""
     normalized = str(version).removeprefix("v")
-    if normalized in SUPPORTED_PALACE_CONFIG_VERSIONS:
-        return cast(PalaceConfigVersion, normalized)
+    if normalized == "0.15.0":
+        return "0.15.0"
+    if normalized == "0.16.0":
+        return "0.16.0"
     supported = ", ".join(SUPPORTED_PALACE_CONFIG_VERSIONS)
     raise ValueError(
         f"Unsupported Palace config version {version!r}. "

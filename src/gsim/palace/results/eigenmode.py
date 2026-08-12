@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from gsim.palace.display import DisplayValue, PlotlyFigure, make_trace_figure
 
@@ -70,7 +70,7 @@ class Eigenmodes:
                 "error_absolute": "absolute_error",
             }
         )
-        return cast("pd.DataFrame", frame)
+        return frame
 
     def plot_frequencies(self) -> PlotlyFigure | None:
         """Plot final eigenmode frequencies by mode index."""

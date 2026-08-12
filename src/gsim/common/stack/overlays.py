@@ -163,6 +163,7 @@ def _expand_material_aliases(
 
 
 def _material_alias_name(name: Any) -> str:
+    """Validate one overlay material alias name."""
     if isinstance(name, bool) or not isinstance(name, str) or not name:
         msg = "material_aliases entries must be non-empty strings."
         raise ValueError(msg)
@@ -229,6 +230,7 @@ def _canonical_material_name(
     name: str,
     materials: dict[str, MaterialProperties],
 ) -> str:
+    """Resolve a material name against aliases and case-insensitive entries."""
     from gsim.common.stack.materials import MATERIAL_ALIASES
 
     if name in materials:

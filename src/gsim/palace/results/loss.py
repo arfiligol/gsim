@@ -200,7 +200,7 @@ class EprLossTable(DataFrameResult):
             self._epr_row(cast("Mapping[str, Any]", row.to_dict()))
             for _, row in self.dataframe.iterrows()
         ]
-        return cast("pd.DataFrame", pd.DataFrame.from_records(rows, columns=columns))
+        return pd.DataFrame.from_records(rows, columns=columns)
 
     def tables(self) -> dict[str, pd.DataFrame]:
         """Return source and semantic EPR tables for direct channel review."""
@@ -211,9 +211,10 @@ class EprLossTable(DataFrameResult):
 
     def visualize(self) -> dict[str, DisplayValue]:
         """Return direct channel tables for notebooks."""
-        return self.tables()
+        return cast(dict[str, DisplayValue], self.tables())
 
     def _epr_row(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        """Normalize one raw loss row to the common EPR schema."""
         index_value = row.get("source_index")
         if is_missing_value(index_value):
             index_value = row.get(self.index_column)
@@ -612,10 +613,11 @@ def _surface_epr_trace_name(
 
 
 def _trace_label_value(value: object) -> str:
+    """Render a compact trace-label token from a numeric or text value."""
     if is_missing_value(value):
         return ""
     try:
-        numeric = float(value)
+        numeric = float(cast(Any, value))
     except (TypeError, ValueError):
         return str(value)
     return str(int(numeric)) if numeric.is_integer() else str(value)

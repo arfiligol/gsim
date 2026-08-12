@@ -8,7 +8,7 @@ benchmark records.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from gsim.palace.resolve.sources.run_artifacts import NON_RESULT_ARTIFACT_NAMES
 
@@ -44,6 +44,8 @@ def palace_sweep_point_source(
         ),
         default=Path("results") / point_slug / "palace",
     )
+    run_dir = cast(Path, run_dir)
+    result_dir = cast(Path, result_dir)
     source: dict[str, Path] = {}
 
     _add_sweep_source_file(
@@ -138,6 +140,7 @@ def _resolve_sweep_path(
     *,
     default: Path | None = None,
 ) -> Path | None:
+    """Resolve one optional sweep path relative to the sweep root."""
     if value is None:
         if default is None:
             return None
@@ -148,6 +151,7 @@ def _resolve_sweep_path(
 
 
 def _first_mapping_value(mapping: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    """Return the first non-null value among alternate mapping keys."""
     for key in keys:
         value = mapping.get(key)
         if value is not None:
@@ -160,6 +164,7 @@ def _add_sweep_source_file(
     name: str,
     *candidates: Path | None,
 ) -> None:
+    """Record the first existing candidate for a named sweep artifact."""
     for candidate in candidates:
         if candidate is None:
             continue
@@ -173,6 +178,7 @@ def _add_sweep_source_file(
 
 
 def _add_sweep_result_files(source: dict[str, Path], result_dir: Path | None) -> None:
+    """Add visible result files from one optional Palace result directory."""
     if result_dir is None or not result_dir.exists() or not result_dir.is_dir():
         return
     for child in sorted(result_dir.iterdir()):

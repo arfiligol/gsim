@@ -21,7 +21,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from numbers import Integral
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import gmsh
 
@@ -556,6 +556,7 @@ class MeshResult:
     manifest: MeshManifest = field(default_factory=MeshManifest)
 
     def __post_init__(self) -> None:
+        """Derive a manifest from mesh groups when one was not supplied."""
         if self.groups and not self.manifest.entries:
             self.manifest = build_mesh_manifest(self.groups)
 
@@ -939,7 +940,10 @@ def generate_mesh(
             refined_mesh_size=refined_mesh_size,
             max_mesh_size=max_mesh_size,
             fmax=fmax,
-            simulation_type=simulation_type,
+            simulation_type=cast(
+                Literal["driven", "eigenmode", "electrostatic", "magnetostatic"],
+                simulation_type,
+            ),
             driven_config=driven_config,
             eigenmode_config=eigenmode_config,
             numerical_config=numerical_config,

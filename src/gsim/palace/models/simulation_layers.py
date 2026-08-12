@@ -47,11 +47,13 @@ class SimulationLayer(BaseModel):
     @field_validator("gds_layer", mode="before")
     @classmethod
     def _validate_gds_layer(cls, value: Any) -> tuple[int, int]:
+        """Normalize the declared GDS layer tuple."""
         return normalize_gds_layer(value)
 
     @field_validator("role", mode="before")
     @classmethod
     def _validate_role(cls, value: Any) -> Any:
+        """Reject unsupported simulation-layer roles."""
         if value == "surface_epr_band":
             raise ValueError(
                 "Source-polygon Surface EPR bands are not supported as "
@@ -62,6 +64,7 @@ class SimulationLayer(BaseModel):
     @field_validator("z")
     @classmethod
     def _validate_z(cls, value: float | None) -> float | None:
+        """Require a finite optional sheet z coordinate."""
         if value is None:
             return None
         z = float(value)
@@ -123,6 +126,7 @@ class SimulationLayerCatalog(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _coerce_mapping(cls, value: Any) -> Any:
+        """Coerce shorthand catalog mappings to named layer records."""
         if isinstance(value, SimulationLayerCatalog):
             return value
         if isinstance(value, Mapping) and "layers" not in value:
@@ -151,6 +155,7 @@ class SimulationLayerCatalog(BaseModel):
 
     @model_validator(mode="after")
     def _validate_unique_gds_layers(self) -> Self:
+        """Ensure each simulation-layer GDS tuple is unique."""
         seen: dict[tuple[int, int], str] = {}
         for name, layer in self.layers.items():
             if layer.gds_layer in seen:

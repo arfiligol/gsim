@@ -271,7 +271,9 @@ class TestDrivenSimValidation:
         sim.set_simulation_layers({"sim_sheet": {"gds_layer": (202, 1), "z": 0.0}})
 
         assert sim._simulation_layers is not None
-        assert sim._simulation_layers.for_gds_layer((202, 1)).name == "sim_sheet"
+        layer = sim._simulation_layers.for_gds_layer((202, 1))
+        assert layer is not None
+        assert layer.name == "sim_sheet"
 
     def test_simulation_layer_catalog_rejects_duplicate_gds_layers(self):
         """A full GDS tuple can only have one simulation-layer meaning."""
@@ -417,13 +419,15 @@ class TestMagnetostaticSimValidation:
         source = CurrentSourceConfig(
             name="loop",
             elements=(
-                {"layer": "metal1", "center": (0, 0), "direction": "+X"},
-                {
-                    "layer": "metal1",
-                    "center": (0, 31),
-                    "direction": [0.0, -1.0, 0.0],
-                    "coordinate_system": "Cartesian",
-                },
+                CurrentSourceElementConfig(
+                    layer="metal1", center=(0, 0), direction="+X"
+                ),
+                CurrentSourceElementConfig(
+                    layer="metal1",
+                    center=(0, 31),
+                    direction=[0.0, -1.0, 0.0],
+                    coordinate_system="Cartesian",
+                ),
             ),
         )
         assert source.layer is None
@@ -436,11 +440,11 @@ class TestMagnetostaticSimValidation:
             CurrentSourceConfig(
                 name="loop",
                 elements=(
-                    {
-                        "layer": "metal1",
-                        "direction": "+X",
-                        "coordinate_system": "Cartesian",
-                    },
+                    CurrentSourceElementConfig(
+                        layer="metal1",
+                        direction="+X",
+                        coordinate_system="Cartesian",
+                    ),
                 ),
             )
 
@@ -450,7 +454,7 @@ class TestMagnetostaticSimValidation:
             CurrentSourceConfig(
                 name="loop",
                 layer="metal1",
-                elements=({"layer": "metal1", "direction": "+X"},),
+                elements=(CurrentSourceElementConfig(layer="metal1", direction="+X"),),
             )
 
     def test_multielement_current_source_rejects_parent_direction(self):
@@ -459,7 +463,7 @@ class TestMagnetostaticSimValidation:
             CurrentSourceConfig(
                 name="loop",
                 direction="-X",
-                elements=({"layer": "metal1", "direction": "+X"},),
+                elements=(CurrentSourceElementConfig(layer="metal1", direction="+X"),),
             )
 
     def test_current_source_requires_layer_or_elements(self):

@@ -134,6 +134,7 @@ def resolve_palace_materials_with_report(
 def _material_database(
     material_overlay: MaterialOverlayInput,
 ) -> dict[str, MaterialProperties] | None:
+    """Return the merged material database for an optional overlay."""
     if material_overlay is None:
         return None
     return merge_overlay(_load_material_overlay(material_overlay))
@@ -142,6 +143,7 @@ def _material_database(
 def _load_material_overlay(
     material_overlay: MaterialOverlayInput,
 ) -> dict[str, MaterialProperties]:
+    """Load one accepted material-overlay representation."""
     if material_overlay is None:
         return {}
 
@@ -169,6 +171,7 @@ def _lookup_material(
     material_name: str,
     material_db: dict[str, MaterialProperties] | None,
 ) -> MaterialProperties | None:
+    """Resolve material properties by name from overlay or base data."""
     lookup = _lookup_material_with_name(material_name, material_db)
     return None if lookup is None else lookup[1]
 
@@ -177,6 +180,7 @@ def _lookup_material_with_name(
     material_name: str,
     material_db: dict[str, MaterialProperties] | None,
 ) -> tuple[str, MaterialProperties] | None:
+    """Resolve material properties together with their matched database name."""
     if material_db is not None:
         if material_name in material_db:
             return material_name, material_db[material_name]
@@ -209,6 +213,7 @@ def _material_resolution_row(
     frequency_hz: float,
     evaluated: Any | None,
 ) -> dict[str, Any]:
+    """Build one material-resolution provenance row."""
     row = {
         "stack_material_name": stack_material_name,
         "matched_material_name": matched_material_name,

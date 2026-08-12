@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, overload
+from typing import TYPE_CHECKING, cast, overload
 
 from gsim.palace.resolve.models import (
     PalaceResolvedResult,
@@ -107,7 +107,9 @@ def resolve_palace_result(
             run-summary loader.
     """
     summary_source: str | Path | dict[str, str | Path] = (
-        dict(source) if isinstance(source, Mapping) else source
+        dict(cast(Mapping[str, str | Path], source))
+        if isinstance(source, Mapping)
+        else source
     )
     summary = load_palace_run_summary(summary_source, include_hashes=include_hashes)
     resolved_problem = problem_type or summary.problem_type

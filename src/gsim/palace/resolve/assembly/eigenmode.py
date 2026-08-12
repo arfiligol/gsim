@@ -8,7 +8,7 @@ summaries, material/index lookup data, and run benchmarks into an
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from gsim.palace.resolve.assembly.common import (
     REPORT_SOURCE_COLUMNS,
@@ -302,7 +302,4 @@ def _load_eigenmode_history_for_report(
             source_kind="final",
             source_iteration=None,
         )
-        return cast(
-            "pd.DataFrame",
-            add_eigenmode_convergence_columns(pd.DataFrame(final_history)),
-        )
+        return add_eigenmode_convergence_columns(pd.DataFrame(final_history))

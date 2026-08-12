@@ -66,6 +66,7 @@ def write_palace_sweep_points(
 
 
 def _sweep_points_path(source: str | Path, *, filename: str) -> Path:
+    """Resolve the sweep-points sidecar path."""
     path = Path(source)
     return path if path.suffix.lower() == ".json" else path / filename
 
@@ -73,6 +74,7 @@ def _sweep_points_path(source: str | Path, *, filename: str) -> Path:
 def _sweep_point_spec_row(
     point: PalaceSweepPointSpec | Mapping[str, Any],
 ) -> dict[str, Any]:
+    """Normalize one sweep point specification to a JSON-ready row."""
     if isinstance(point, PalaceSweepPointSpec):
         row = point.to_dict()
     elif isinstance(point, Mapping):
@@ -105,6 +107,7 @@ def _sweep_point_spec_row(
 
 
 def _raise_for_duplicate_sweep_point_slugs(point_rows: list[dict[str, Any]]) -> None:
+    """Reject point rows with duplicate stable slugs."""
     duplicates = duplicate_values(str(row["point_slug"]) for row in point_rows)
     if duplicates:
         duplicate_text = ", ".join(repr(value) for value in duplicates)

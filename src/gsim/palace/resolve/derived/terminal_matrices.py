@@ -70,7 +70,7 @@ def load_terminal_matrix_from_csv(
         index_map_path=index_map_path,
         terminal_names=terminal_names,
     )
-    matrix = cast("pd.DataFrame", raw.copy())
+    matrix = raw.copy()
     matrix.index = labels
     matrix.columns = labels
     matrix.attrs.update(
@@ -85,13 +85,15 @@ def load_terminal_matrix_from_csv(
         matrix_kind=matrix_kind,
         dataframe=matrix,
         terminal_names=tuple(labels),
-        source_unit=spec["source_unit"],
+        source_unit=cast(str, spec["source_unit"]),
         display_scale=(
             float(spec["display_scale"])
             if display_scale is None
             else float(display_scale)
         ),
-        display_unit=spec["display_unit"] if display_unit is None else display_unit,
+        display_unit=(
+            cast(str, spec["display_unit"]) if display_unit is None else display_unit
+        ),
     )
 
 

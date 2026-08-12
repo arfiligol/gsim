@@ -6,6 +6,7 @@ import json
 import shutil
 from pathlib import Path
 from textwrap import dedent
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -1299,7 +1300,9 @@ class TestPalaceRunSummary:
         assert "simulation_benchmark_adaptive_pass_table" in benchmark_items
         assert "simulation_benchmark_adaptive_pass_trace_plot" in benchmark_items
         assert "simulation_benchmark_metrics_bar_plot" not in benchmark_items
-        figure = benchmark_items["simulation_benchmark_adaptive_pass_trace_plot"]
+        figure = cast(
+            Any, benchmark_items["simulation_benchmark_adaptive_pass_trace_plot"]
+        )
         assert figure.data[0].y[-1] == pytest.approx(121.0 / 60.0)
         assert figure.layout.yaxis.title.text == "Wall time (minutes)"
         assert figure.layout.yaxis2.title.text == (

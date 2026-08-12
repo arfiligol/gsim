@@ -162,6 +162,7 @@ def summarize_handoff_metadata_json(path: Path | None) -> dict[str, Any]:
 
 
 def _referenced_sidecar_path(sidecar_path: Path, value: Any) -> Path | None:
+    """Resolve an optional sidecar reference relative to its metadata root."""
     if value is None:
         return None
     path = Path(str(value))
@@ -245,6 +246,7 @@ def _normalize_resource_runtime(
     runtime: dict[str, Any],
     allocation: Mapping[str, Any],
 ) -> None:
+    """Fill normalized runtime fields from related allocation evidence."""
     wall_time_seconds = _first_optional_float(
         runtime,
         ("wall_time_seconds", "elapsed_seconds", "total_elapsed_seconds"),
@@ -258,6 +260,7 @@ def _normalize_resource_runtime(
 
 
 def _normalize_resource_memory(memory: dict[str, Any]) -> None:
+    """Fill normalized memory fields from byte-valued evidence."""
     if memory.get("peak_total_hwm_gib") is None:
         peak_bytes = _first_optional_float(
             memory,
@@ -268,6 +271,7 @@ def _normalize_resource_memory(memory: dict[str, Any]) -> None:
 
 
 def _resource_core_count(allocation: Mapping[str, Any]) -> float | None:
+    """Infer an allocated core count from supported allocation fields."""
     for key in ("cores", "num_cpus"):
         value = _optional_float(allocation.get(key))
         if value is not None:
@@ -283,6 +287,7 @@ def _first_optional_float(
     mapping: Mapping[str, Any],
     keys: Iterable[str],
 ) -> float | None:
+    """Return the first mapping value convertible to float."""
     for key in keys:
         value = _optional_float(mapping.get(key))
         if value is not None:
@@ -291,12 +296,14 @@ def _first_optional_float(
 
 
 def _list_of_mappings(value: Any) -> list[dict[str, Any]]:
+    """Return list members that are mapping records."""
     if not isinstance(value, list):
         return []
     return [dict(item) for item in value if isinstance(item, dict)]
 
 
 def _len_list(value: Any) -> int:
+    """Return a list length, treating non-lists as empty."""
     return len(value) if isinstance(value, list) else 0
 
 
@@ -304,6 +311,7 @@ def _count_mapping_values(
     rows: list[dict[str, Any]],
     key: str,
 ) -> dict[str, int]:
+    """Count stringified values for one key across mapping rows."""
     counts: dict[str, int] = {}
     for row in rows:
         value = row.get(key)

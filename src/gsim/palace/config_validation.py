@@ -29,6 +29,7 @@ class PalaceConfigValidationError(ValueError):
 
 
 def _json_path(path: Iterable[str | int]) -> str:
+    """Render a JSON-path-like location for a schema error."""
     parts = list(path)
     if not parts:
         return "$"
@@ -42,6 +43,7 @@ def _json_path(path: Iterable[str | int]) -> str:
 
 
 def _truncate_value(value: object, *, max_chars: int = 240) -> str:
+    """Render a value within the configured diagnostic length."""
     rendered = repr(value)
     if len(rendered) <= max_chars:
         return rendered
@@ -81,6 +83,7 @@ def palace_subschema_properties(
 
 @lru_cache
 def _palace_config_validator(version: PalaceConfigVersion) -> Any:
+    """Build and cache the JSON-schema validator for one Palace version."""
     normalized = normalize_palace_config_version(version)
     schema_path = schema_root_path(normalized) / "config-schema.json"
     schema = dict(palace_config_schema(normalized))

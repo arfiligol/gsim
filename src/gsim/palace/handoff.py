@@ -21,7 +21,7 @@ import tarfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 from gsim.palace._shared import (
     as_mapping as _as_mapping,
@@ -151,6 +151,7 @@ class PalaceSlurmResourceSpec:
     gres: str | None = None
 
     def __post_init__(self) -> None:
+        """Validate scheduler-facing resource values at construction."""
         _validate_sbatch_token("account", self.account)
         _validate_sbatch_token("partition", self.partition)
         if _WALL_TIME_PATTERN.match(self.wall_time) is None:
@@ -206,6 +207,7 @@ class PalaceSlurmLauncherSpec:
     srun_args: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
+        """Validate optional launcher hints at construction."""
         if self.palace_executable is not None and (
             not self.palace_executable or "\n" in self.palace_executable
         ):
@@ -265,6 +267,7 @@ class PalaceSlurmProfileSpec:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        """Validate profile-owned resources, launcher, and metadata."""
         _validate_sbatch_token("profile name", self.name)
         if not isinstance(self.resources, PalaceSlurmResourceSpec):
             raise TypeError("resources must be a PalaceSlurmResourceSpec")
@@ -360,6 +363,7 @@ class PalaceSlurmSbatchSpec:
     mail_type: tuple[str, ...] = ("BEGIN", "END", "FAIL", "TIME_LIMIT")
 
     def __post_init__(self) -> None:
+        """Validate a render-ready sbatch specification."""
         _validate_job_name(self.job_name)
         _validate_relative_path("config_path", self.config_path)
         _validate_relative_path("mesh_path", self.mesh_path)
@@ -473,6 +477,7 @@ class PalaceSlurmSbatchSpec:
         return "\n".join(lines)
 
     def _render_palace_command(self) -> str:
+        """Render the Palace launch command for a single Slurm run."""
         executable = '"$PALACE_EXECUTABLE"'
         config = '"$PALACE_CONFIG"'
         command = ["srun", *self.srun_args, executable]
@@ -515,6 +520,7 @@ class PalaceSlurmSweepArraySpec:
     mail_type: tuple[str, ...] = ("BEGIN", "END", "FAIL", "TIME_LIMIT")
 
     def __post_init__(self) -> None:
+        """Validate a render-ready Slurm array specification."""
         _validate_job_name(self.job_name)
         if self.max_parallel is not None:
             _validate_positive_int("max_parallel", self.max_parallel)
@@ -1129,6 +1135,7 @@ def _render_sweep_array_sbatch(
     point_rows: Sequence[Mapping[str, str | int]],
     max_parallel: int,
 ) -> str:
+    """Render a Slurm array script for resolved Palace sweep points."""
     array_last_index = len(point_rows) - 1
     lines = [
         "#!/bin/bash",
@@ -1242,6 +1249,7 @@ def _render_sweep_array_sbatch(
 
 
 def _render_sweep_palace_command(spec: PalaceSlurmSweepArraySpec) -> str:
+    """Render the Palace command executed by one Slurm array task."""
     executable = '"$PALACE_EXECUTABLE"'
     config = '"$CONFIG_PATH"'
     command = ["srun", *spec.srun_args, executable]
@@ -1263,6 +1271,7 @@ def _normalize_slurm_profile_spec(
     name: str,
     profile: PalaceSlurmProfileSpec | Mapping[str, Any],
 ) -> PalaceSlurmProfileSpec:
+    """Normalize one caller profile into its validated typed representation."""
     if isinstance(profile, PalaceSlurmProfileSpec):
         if profile.name != name:
             raise ValueError("profile mapping key must match profile.name")
@@ -1312,6 +1321,7 @@ def _normalize_slurm_profile_spec(
 def _normalize_slurm_profile_resources(
     resources: PalaceSlurmResourceSpec | Mapping[str, Any],
 ) -> PalaceSlurmResourceSpec:
+    """Normalize caller resource data into a validated resource specification."""
     if isinstance(resources, PalaceSlurmResourceSpec):
         return resources
     if not isinstance(resources, Mapping):
@@ -1330,6 +1340,7 @@ def _normalize_slurm_profile_resources(
 def _normalize_slurm_profile_launcher(
     launcher: PalaceSlurmLauncherSpec | Mapping[str, Any],
 ) -> PalaceSlurmLauncherSpec:
+    """Normalize caller launcher data into a validated launcher specification."""
     if isinstance(launcher, PalaceSlurmLauncherSpec):
         return launcher
     if not isinstance(launcher, Mapping):
@@ -1346,12 +1357,18 @@ def _normalize_slurm_profile_launcher(
         msg = "Unknown Slurm launcher field(s): "
         msg += ", ".join(str(field) for field in unknown_fields)
         raise ValueError(msg)
-    command_style = _optional_string(launcher.get("command_style"))
-    if command_style is not None and command_style not in {"binary", "wrapper"}:
+    command_style_value = _optional_string(launcher.get("command_style"))
+    if command_style_value is None:
+        command_style = None
+    elif command_style_value == "binary":
+        command_style = "binary"
+    elif command_style_value == "wrapper":
+        command_style = "wrapper"
+    else:
         raise ValueError("command_style must be 'binary' or 'wrapper'")
     return PalaceSlurmLauncherSpec(
         palace_executable=_optional_string(launcher.get("palace_executable")),
-        command_style=cast("Literal['binary', 'wrapper'] | None", command_style),
+        command_style=command_style,
         setup_commands=_optional_tuple(launcher.get("setup_commands")),
         petsc_options=_optional_tuple(launcher.get("petsc_options")),
         srun_args=_optional_tuple(launcher.get("srun_args")),
@@ -1359,6 +1376,7 @@ def _normalize_slurm_profile_launcher(
 
 
 def _normalize_slurm_profile_solver(solver: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and normalize supported Slurm solver hint fields."""
     if not isinstance(solver, Mapping):
         raise TypeError("profile solver must be a mapping")
     allowed_fields = {"backend", "device"}
@@ -1379,6 +1397,7 @@ def _normalize_slurm_profile_solver(solver: Mapping[str, Any]) -> dict[str, Any]
 def _slurm_profile_catalog_profiles(
     payload: Mapping[str, Any],
 ) -> Mapping[str, Any]:
+    """Extract profile mappings from a supported Slurm catalog payload."""
     if "schema_version" not in payload and "profiles" not in payload:
         return payload
 
@@ -1398,6 +1417,7 @@ def _slurm_profile_catalog_profiles(
 
 
 def _sweep_point_specs(payload: Any) -> list[Mapping[str, Any]]:
+    """Extract and validate point mappings from a sweep payload."""
     if isinstance(payload, list):
         points = payload
     elif isinstance(payload, dict):
@@ -1416,6 +1436,7 @@ def _sweep_array_rows(
     sweep_root: Path,
     point_specs: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, str | int]]:
+    """Build validated Slurm array rows from sweep point specifications."""
     rows: list[dict[str, str | int]] = []
     seen_slugs: set[str] = set()
     for index, point in enumerate(point_specs):
@@ -1460,6 +1481,7 @@ def _write_sweep_array_points_csv(
     path: Path,
     rows: Sequence[Mapping[str, str | int]],
 ) -> None:
+    """Write the deterministic point lookup CSV used by a Slurm array."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as stream:
         fieldnames: tuple[str, ...] = (
@@ -1480,6 +1502,7 @@ def _write_sweep_array_points_csv(
 
 
 def _normalize_sweep_path(sweep_root: Path, value: str) -> str:
+    """Return a sweep-relative POSIX path for a point artifact."""
     path = Path(value)
     if path.is_absolute():
         return path.resolve().relative_to(sweep_root.resolve()).as_posix()
@@ -1487,6 +1510,7 @@ def _normalize_sweep_path(sweep_root: Path, value: str) -> str:
 
 
 def _render_petsc_options(options: Sequence[str]) -> list[str]:
+    """Render shell statements that append configured PETSc options."""
     if not options:
         return []
     option_string = shlex.quote(" ".join(options))
@@ -1503,6 +1527,7 @@ def _render_petsc_options(options: Sequence[str]) -> list[str]:
 
 
 def _validate_sbatch_token(label: str, value: str) -> None:
+    """Reject empty or shell-unsafe Slurm directive tokens."""
     if not value:
         raise ValueError(f"{label} must not be empty")
     if any(char in _SBATCH_TOKEN_FORBIDDEN for char in value):
@@ -1510,6 +1535,7 @@ def _validate_sbatch_token(label: str, value: str) -> None:
 
 
 def _validate_job_name(value: str) -> None:
+    """Reject job names unsafe for a Slurm directive."""
     if not value:
         raise ValueError("job_name must not be empty")
     if any(char in _SBATCH_JOB_NAME_FORBIDDEN for char in value):
@@ -1517,6 +1543,7 @@ def _validate_job_name(value: str) -> None:
 
 
 def _validate_single_line_text(label: str, value: str) -> None:
+    """Reject empty or multiline text fields."""
     if not value:
         raise ValueError(f"{label} must not be empty")
     if "\n" in value or "\r" in value:
@@ -1524,6 +1551,7 @@ def _validate_single_line_text(label: str, value: str) -> None:
 
 
 def _optional_tuple(value: Any) -> tuple[str, ...] | None:
+    """Normalize an optional launcher scalar or sequence to string tuple."""
     if value is None:
         return None
     if isinstance(value, str):
@@ -1534,15 +1562,18 @@ def _optional_tuple(value: Any) -> tuple[str, ...] | None:
 
 
 def _validate_profile_solver(value: Mapping[str, Any]) -> None:
+    """Validate supported Slurm profile solver hints."""
     _normalize_slurm_profile_solver(value)
 
 
 def _validate_shell_tokens(label: str, values: Sequence[str]) -> None:
+    """Validate each token intended for shell rendering."""
     for value in values:
         _validate_sbatch_token(label, value)
 
 
 def _validate_setup_commands(commands: Sequence[str]) -> None:
+    """Validate one nonempty single-line shell command per setup entry."""
     for command in commands:
         if not command.strip():
             raise ValueError("setup_commands must not contain empty commands")
@@ -1551,6 +1582,7 @@ def _validate_setup_commands(commands: Sequence[str]) -> None:
 
 
 def _validate_relative_path(label: str, value: str) -> None:
+    """Reject paths outside the run directory or containing line breaks."""
     if not value:
         raise ValueError(f"{label} must not be empty")
     path = Path(value)
@@ -1561,16 +1593,19 @@ def _validate_relative_path(label: str, value: str) -> None:
 
 
 def _validate_csv_field(label: str, value: str) -> None:
+    """Reject values that cannot occupy one unquoted CSV field."""
     if "," in value or "\n" in value or "\r" in value:
         raise ValueError(f"{label} must not contain CSV separators")
 
 
 def _validate_positive_int(label: str, value: int) -> None:
+    """Reject nonpositive integer settings."""
     if value < 1:
         raise ValueError(f"{label} must be positive")
 
 
 def _require_file(path: Path, label: str) -> None:
+    """Raise a contextual error unless a required file exists."""
     if not path.is_file():
         raise FileNotFoundError(f"Missing {label}: {path}")
 
@@ -1582,6 +1617,7 @@ def _record_handoff_archive_manifest(
     manifest_path: str | Path,
     archive_path: str | Path | None,
 ) -> Path:
+    """Attach an archive-manifest reference to existing handoff metadata."""
     existing_path = _existing_handoff_metadata_path(source, filename)
     existing = (
         json.loads(existing_path.read_text(encoding="utf-8"))
@@ -1606,6 +1642,7 @@ def _record_handoff_archive_manifest(
 
 
 def _existing_handoff_metadata_path(source: Path, filename: str) -> Path | None:
+    """Return an existing handoff metadata file in supported locations."""
     candidates = [source / "metadata" / filename, source / filename]
     for path in candidates:
         if path.is_file():
@@ -1621,6 +1658,7 @@ def _run_archive_manifest_entries_from_folder(
     manifest_root: Path | None = None,
     point_slug: str | None = None,
 ) -> list[dict[str, Any]]:
+    """Collect archive-manifest entries directly from a run-folder layout."""
     files: list[dict[str, Any]] = []
     entry_root = root if manifest_root is None else manifest_root
     _append_manifest_entry(
@@ -1697,6 +1735,7 @@ def _run_archive_manifest_entries(
     include_hashes: bool,
     point_slug: str | None = None,
 ) -> list[dict[str, Any]]:
+    """Collect archive-manifest entries represented by a loaded run summary."""
     files: list[dict[str, Any]] = []
     for artifact in summary.artifacts.values():
         _append_status_manifest_entry(
@@ -1749,6 +1788,7 @@ def _extend_handoff_reference_entries(
     role_prefix: str = "",
     point_slug: str | None = None,
 ) -> None:
+    """Append handoff metadata and referenced script entries when present."""
     handoff_path_value = handoff.get("path")
     if handoff.get("present") is not True or handoff_path_value is None:
         return
@@ -1785,6 +1825,7 @@ def _append_status_manifest_entry(
     include_hashes: bool,
     point_slug: str | None = None,
 ) -> None:
+    """Append one present run-summary artifact as a manifest entry."""
     if not artifact.present or artifact.path is None:
         return
     entry = _manifest_entry(
@@ -1810,6 +1851,7 @@ def _append_manifest_entry(
     include_hashes: bool,
     point_slug: str | None = None,
 ) -> None:
+    """Append a manifest entry only when its referenced file exists."""
     if path.is_file():
         files.append(
             _manifest_entry(
@@ -1832,6 +1874,7 @@ def _manifest_entry(
     include_hashes: bool,
     point_slug: str | None,
 ) -> dict[str, Any]:
+    """Build one archive manifest entry for a file below its root."""
     resolved_path = path.resolve()
     root_path = root.resolve()
     try:
@@ -1857,6 +1900,7 @@ def _resolve_handoff_archive_path(
     run_dir: Path,
     archive_path: str | Path | None,
 ) -> Path:
+    """Resolve an archive path and reject paths inside the run directory."""
     path = (
         _default_palace_handoff_archive_path(run_dir)
         if archive_path is None
@@ -1874,6 +1918,7 @@ def _resolve_handoff_archive_path(
 
 
 def _archive_path_reference(run_dir: Path, archive_path: Path) -> str:
+    """Return an archive path expressed relative to its run directory."""
     return Path(
         os.path.relpath(archive_path.resolve(), start=run_dir.resolve())
     ).as_posix()
@@ -1885,6 +1930,7 @@ def _filter_run_handoff_tarinfo(
     *,
     include_results: bool,
 ) -> tarfile.TarInfo | None:
+    """Exclude result and log members when a compact archive is requested."""
     if include_results:
         return info
     parts = Path(info.name).parts
@@ -1908,6 +1954,7 @@ def _archive_manifest_payload(
     archive_path: str | Path | None,
     metadata: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
+    """Build the schema-v1 archive-manifest payload."""
     archive = {}
     if archive_path is not None:
         archive["path"] = str(archive_path)
@@ -1929,6 +1976,7 @@ def _archive_manifest_payload(
 def _deduplicate_manifest_entries(
     files: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
+    """Return manifest rows deduplicated by relative path in first-seen order."""
     deduplicated: list[dict[str, Any]] = []
     seen_paths: set[str] = set()
     for row in files:
@@ -1941,6 +1989,7 @@ def _deduplicate_manifest_entries(
 
 
 def _resolve_sidecar_reference(sidecar_path: Path, value: Any) -> Path:
+    """Resolve a sidecar-relative artifact reference to a filesystem path."""
     path = Path(str(value))
     if path.is_absolute():
         return path
@@ -1953,11 +2002,13 @@ def _resolve_sidecar_reference(sidecar_path: Path, value: Any) -> Path:
 
 
 def _read_json_mapping(path: Path) -> dict[str, Any]:
+    """Read a JSON file as a mapping, returning empty for non-mappings."""
     data = json.loads(path.read_text(encoding="utf-8"))
     return dict(data) if isinstance(data, Mapping) else {}
 
 
 def _relative_path(root: Path, path: Path) -> str:
+    """Return a resolved relative path when possible, otherwise the input path."""
     try:
         return path.resolve().relative_to(root.resolve()).as_posix()
     except ValueError:
@@ -1965,10 +2016,12 @@ def _relative_path(root: Path, path: Path) -> str:
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
+    """Write a mapping as stable indented JSON, creating parent directories."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def _optional_dict(value: Any) -> dict[str, Any] | None:
+    """Return a nonempty mapping copy or ``None``."""
     data = _as_mapping(value)
     return data or None

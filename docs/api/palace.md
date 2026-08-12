@@ -388,12 +388,17 @@ example-specific recommendations and site/profile defaults.
 After the Palace job finishes, enter the remote run folder and choose the
 smallest archive that supports local analysis.
 
-| Profile | Archive suffix | Use it when | Includes | Excludes |
-| --- | --- | --- | --- | --- |
-| `light` | `-light.tar.gz` | You only need scalar tables, logs, metadata, and report inputs. | CSVs, logs, metadata, manifests, report inputs. | Palace field directories, VTK/BP/HDF5 field files, and meshes. |
-| `with-fields` | `-with-fields.tar.gz` | Numeric postprocessing needs Palace GridFunction field output. | Everything in `light`, plus `results/**/gridfunction/**`. | ParaView output, VTK/PVTU field files, and solver `.msh` files. |
-| `with-fields-and-meshes` | `-with-fields-and-meshes.tar.gz` | Local audit needs solver mesh identity or physical groups. | Everything in `with-fields`, plus solver mesh and mesh-generation identity artifacts. | ParaView output and VTK/PVTU field files by default. |
-| `full` | `-full.tar.gz` | You intentionally need the complete run folder. | The whole run folder. | Nothing by default. |
+- `light` (`-light.tar.gz`): use when you only need scalar tables, logs, metadata, and report inputs.
+  Includes CSVs, logs, metadata, manifests, and report inputs. Excludes Palace field directories, VTK/BP/HDF5
+  field files, and meshes.
+- `with-fields` (`-with-fields.tar.gz`): use when numeric postprocessing needs Palace GridFunction field output.
+  Includes everything in `light`, plus `results/**/gridfunction/**`. Excludes ParaView output, VTK/PVTU field
+  files, and solver `.msh` files.
+- `with-fields-and-meshes` (`-with-fields-and-meshes.tar.gz`): use when local audit needs solver mesh identity
+  or physical groups. Includes everything in `with-fields`, plus solver mesh and mesh-generation identity
+  artifacts. Excludes ParaView output and VTK/PVTU field files by default.
+- `full` (`-full.tar.gz`): use when you intentionally need the complete run folder. Includes the whole run
+  folder. Excludes nothing by default.
 
 Light result package:
 

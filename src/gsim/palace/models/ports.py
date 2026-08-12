@@ -14,7 +14,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from enum import Enum
-from typing import Literal, Self
+from typing import Literal, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -66,9 +66,12 @@ def normalize_palace_direction(value: PalaceDirectionInput) -> PalaceDirection:
     if norm == 0.0:
         raise ValueError("LumpedPort vector Direction must be nonzero.")
 
-    return tuple(
-        0.0 if abs(component / norm) < 1e-15 else component / norm
-        for component in vector
+    return cast(
+        PalaceDirection,
+        tuple(
+            0.0 if abs(component / norm) < 1e-15 else component / norm
+            for component in vector
+        ),
     )
 
 
@@ -220,6 +223,7 @@ class PortConfig(BaseModel):
     def _validate_direction(
         cls, value: PalaceDirectionInput | None
     ) -> PalaceDirection | None:
+        """Normalize an optional LumpedPort direction."""
         if value is None:
             return None
         return normalize_palace_direction(value)

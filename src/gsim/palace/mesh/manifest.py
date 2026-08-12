@@ -7,7 +7,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from numbers import Integral
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from gsim.palace._shared import int_tuple
 
@@ -148,7 +148,7 @@ def build_mesh_manifest(groups: Mapping[str, Any]) -> MeshManifest:
                         entries,
                         name=f"{port_name}_E{index}",
                         role="port_surface",
-                        info=element,
+                        info=cast(Mapping[str, Any], element),
                         metadata={
                             "port": port_name,
                             "port_type": "cpw",
@@ -198,6 +198,7 @@ def _append_entry(
     info: Mapping[str, Any],
     metadata: Mapping[str, Any] | None = None,
 ) -> None:
+    """Append one role-aware physical-group manifest entry."""
     entry_metadata = _metadata(info)
     if metadata:
         entry_metadata.update(metadata)
@@ -220,6 +221,7 @@ def _append_entry(
 
 
 def _iter_group_items(value: Any) -> Iterable[tuple[str, Mapping[str, Any]]]:
+    """Iterate mapping entries that contain group metadata mappings."""
     if not isinstance(value, Mapping):
         return ()
     return (
@@ -228,6 +230,7 @@ def _iter_group_items(value: Any) -> Iterable[tuple[str, Mapping[str, Any]]]:
 
 
 def _metadata(info: Mapping[str, Any]) -> dict[str, Any]:
+    """Extract manifest metadata excluding transport fields."""
     return {
         str(key): value
         for key, value in info.items()
@@ -237,6 +240,7 @@ def _metadata(info: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _physical_names(*, name: str, info: Mapping[str, Any]) -> tuple[str, ...]:
+    """Normalize singular or plural physical-group names."""
     value = info.get("physical_names", info.get("physical_name", name))
     if isinstance(value, str):
         return (value,)
@@ -246,6 +250,7 @@ def _physical_names(*, name: str, info: Mapping[str, Any]) -> tuple[str, ...]:
 
 
 def _dimension(*, role: MeshRole, info: Mapping[str, Any]) -> int | None:
+    """Resolve a group dimension from explicit metadata or its role."""
     dim = info.get("dim")
     if isinstance(dim, Integral) and not isinstance(dim, bool):
         return int(dim)
@@ -255,6 +260,7 @@ def _dimension(*, role: MeshRole, info: Mapping[str, Any]) -> int | None:
 def _parse_physical_relation(
     physical_names: tuple[str, ...],
 ) -> tuple[tuple[str, str] | None, str | None]:
+    """Parse an interface pair or exterior relation from physical names."""
     for physical_name in physical_names:
         for delimiter in _INTERFACE_DELIMITERS:
             if delimiter not in physical_name:
@@ -271,6 +277,7 @@ def _parse_physical_relation(
 
 
 def _is_exterior_side(name: str) -> bool:
+    """Return whether a physical-name side denotes an exterior medium."""
     return name.lower() in _EXTERIOR_SIDE_NAMES
 
 
