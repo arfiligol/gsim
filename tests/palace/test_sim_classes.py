@@ -1,182 +1,70 @@
-"""Tests for Palace simulation classes."""
+"""Tests for Palace simulation classes and the Palace binary resolver.
+
+Covers DrivenSim/EigenmodeSim/ElectrostaticSim validation and config, plus
+the ``gsim.palace.runtime`` binary resolver (``resolve_palace_binary`` etc.).
+"""
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 import pytest
 
-from gsim.common.stack import Layer, LayerStack
-from gsim.palace import DrivenSim, EigenmodeSim, ElectrostaticSim, MagnetostaticSim
-from gsim.palace.models import (
-    ActivatedRegion,
-    CurrentSourceConfig,
-    CurrentSourceElementConfig,
-    MeshConfig,
-    PalacePort,
-    PortConfig,
-    PortGeometry,
-    PortType,
-    SimulationLayerCatalog,
+from gsim.palace import (
+    BoundaryModeSim,
+    DrivenSim,
+    EigenmodeSim,
+    ElectrostaticSim,
+    resolve_palace_result,
 )
-
-
-def test_current_source_models_stay_in_models_owner_module() -> None:
-    import gsim.palace as palace
-    import gsim.palace.models as models
-
-    assert models.CurrentSourceConfig is CurrentSourceConfig
-    assert models.CurrentSourceElementConfig is CurrentSourceElementConfig
-    assert not hasattr(palace, "CurrentSourceConfig")
-    assert not hasattr(palace, "CurrentSourceElementConfig")
-
-
-def test_port_lowering_api_stays_in_owner_modules() -> None:
-    import gsim.palace as palace
-    import gsim.palace.models as models
-    import gsim.palace.ports as ports
-
-    assert models.CPWPortConfig.__name__ == "CPWPortConfig"
-    assert models.PortConfig.__name__ == "PortConfig"
-    assert models.TerminalConfig.__name__ == "TerminalConfig"
-    assert models.WavePortConfig.__name__ == "WavePortConfig"
-    assert models.SimulationLayerCatalog.__name__ == "SimulationLayerCatalog"
-    assert models.PalacePort is PalacePort
-    assert models.PortGeometry is PortGeometry
-    assert models.PortType is PortType
-    assert callable(ports.configure_cpw_port)
-    assert callable(ports.configure_inplane_port)
-    assert callable(ports.configure_via_port)
-    assert callable(ports.configure_wave_port)
-    assert callable(ports.extract_ports)
-    assert not hasattr(ports, "PalacePort")
-    assert not hasattr(ports, "PortGeometry")
-    assert not hasattr(ports, "PortType")
-
-    root_only_names = (
-        "CPWPortConfig",
-        "PalacePort",
-        "PortConfig",
-        "PortGeometry",
-        "PortType",
-        "TerminalConfig",
-        "WavePortConfig",
-        "SimulationLayerCatalog",
-        "configure_cpw_port",
-        "configure_inplane_port",
-        "configure_via_port",
-        "configure_wave_port",
-        "extract_ports",
-    )
-    assert all(not hasattr(palace, name) for name in root_only_names)
-
-
-def test_config_models_stay_in_models_owner_module() -> None:
-    import gsim.palace as palace
-    import gsim.palace.models as models
-
-    owner_model_names = (
-        "DrivenConfig",
-        "EigenmodeConfig",
-        "ElectrostaticConfig",
-        "MagnetostaticConfig",
-        "MaterialConfig",
-        "NumericalConfig",
-        "PECBlockConfig",
-        "TransientConfig",
-        "ValidationResult",
-    )
-    assert all(hasattr(models, name) for name in owner_model_names)
-    assert all(not hasattr(palace, name) for name in owner_model_names)
-    assert palace.MeshConfig is models.MeshConfig
-    assert models.ActivatedRegion is ActivatedRegion
-    assert not hasattr(palace, "ActivatedRegion")
-
-
-def test_versioned_config_setters_write_official_fragments() -> None:
-    sim = DrivenSim()
-
-    assert sim.palace_version == "0.16.0"
-    sim.set_palace_version("v0.15.0")
-    assert sim.palace_version == "0.15.0"
-    with pytest.raises(ValueError, match="Unsupported Palace config version"):
-        sim.set_palace_version("0.14.0")
-
-    sim.set_palace_version("0.16.0")
-    sim.set_refinement(max_its=4, tol=1.0e-3, uniform_levels=1)
-    refinement = sim.refinement
-    assert refinement["MaxIts"] == 4
-    assert refinement["Tol"] == 1.0e-3
-    assert refinement["UniformLevels"] == 1
-
-    sim.set_linear_solver(type="AMS", estimator_mg=True, ams_max_its=2)
-    solver = sim.numerical.to_solver_config(palace_version=sim.palace_version)
-    assert solver["Linear"]["Type"] == "AMS"
-    assert solver["Linear"]["EstimatorMG"] is True
-    assert solver["Linear"]["AMSMaxIts"] == 2
-
-    sim.set_output_formats(paraview=True, grid_function=True)
-    assert sim.output_formats == {"Paraview": True, "GridFunction": True}
-
-
-def test_common_stack_viz_cloud_helpers_stay_in_owner_modules() -> None:
-    import gsim.common as common
-    import gsim.common.stack as stack
-    import gsim.gcloud as gcloud
-    import gsim.palace as palace
-    import gsim.palace.materials as materials
-    import gsim.viz as viz
-
-    assert stack.MATERIALS_DB
-    assert common.Geometry.__name__ == "Geometry"
-    assert common.Stack is common.LayerStack
-    assert stack.StackLayer.__name__ == "StackLayer"
-    assert stack.MaterialProperties.__name__ == "MaterialProperties"
-    assert callable(stack.extract_from_pdk)
-    assert callable(stack.extract_layer_stack)
-    assert callable(stack.get_material_properties)
-    assert callable(stack.get_stack)
-    assert callable(stack.load_stack_yaml)
-    assert callable(stack.parse_layer_stack)
-    assert callable(stack.plot_stack)
-    assert callable(stack.print_stack)
-    assert callable(stack.print_stack_table)
-    assert callable(viz.plot_cross_section)
-    assert callable(viz.plot_mesh)
-    assert callable(gcloud.print_job_summary)
-    assert callable(gcloud.run_simulation)
-    assert callable(materials.resolve_palace_materials_at_frequency)
-    assert callable(materials.resolve_palace_materials_with_report)
-
-    owner_only_names = (
-        "MATERIALS_DB",
-        "Geometry",
-        "Layer",
-        "LayerStack",
-        "Stack",
-        "StackLayer",
-        "MaterialProperties",
-        "extract_from_pdk",
-        "extract_layer_stack",
-        "get_material_properties",
-        "get_stack",
-        "load_stack_yaml",
-        "parse_layer_stack",
-        "plot_cross_section",
-        "plot_mesh",
-        "plot_stack",
-        "print_job_summary",
-        "print_stack",
-        "print_stack_table",
-        "resolve_palace_materials_at_frequency",
-        "resolve_palace_materials_with_report",
-        "run_simulation",
-    )
-    assert all(not hasattr(palace, name) for name in owner_only_names)
+from gsim.palace.mesh.generator import MeshResult
+from gsim.palace.models import MeshConfig
+from gsim.palace.models.results import SimulationResult
 
 
 class TestDrivenSimValidation:
     """Test DrivenSim validation logic."""
+
+    def test_native_set_stack_preserves_typed_extractor_output(self) -> None:
+        """PDK extraction, not ``set_stack``, owns typed SGB layer semantics."""
+        from gdsfactory.technology import LayerLevel
+        from gdsfactory.technology import LayerStack as GfLayerStack
+
+        from gsim.common.stack import extract_layer_stack
+
+        gf_stack = GfLayerStack(
+            layers={
+                "metal": LayerLevel(
+                    layer=(1, 0),
+                    thickness=0.1,
+                    zmin=0.0,
+                    material="Al",
+                    info={
+                        "part_role": "face_metal",
+                        "net_id": "Ground",
+                        "equipotential_id": "Ground",
+                    },
+                )
+            }
+        )
+        stack = extract_layer_stack(
+            gf_stack,
+            pdk_name="public",
+            include_substrate=False,
+            add_oxide_dielectric=False,
+            add_passivation_dielectric=False,
+        )
+        sim = DrivenSim()
+        sim.set_stack(stack)
+        assert sim.stack is stack
+        assert sim.stack.layers["metal"].part_role == "face_metal"
+        assert sim.stack.layers["metal"].net_id == "Ground"
 
     def test_missing_geometry(self):
         """Test validation catches missing geometry."""
@@ -224,66 +112,6 @@ class TestDrivenSimValidation:
         assert any(
             "Excitation port 'nonexistent' not found" in e for e in result.errors
         )
-
-    def test_lumped_port_direction_labels_normalize_to_vectors(self):
-        """LumpedPort labels are normalized at the port model boundary."""
-        config = PortConfig(name="o1", layer="metal1", direction="-y")
-
-        assert config.direction == (0.0, -1.0, 0.0)
-
-    def test_lumped_port_direction_vectors_normalize_to_unit_vectors(self):
-        """Arbitrary Cartesian vectors become unit Palace Direction vectors."""
-        config = PortConfig(name="o1", layer="metal1", direction=[3.0, 4.0, 0.0])
-
-        assert config.direction == pytest.approx((0.6, 0.8, 0.0))
-
-    @pytest.mark.parametrize(
-        "direction",
-        [
-            "+R",
-            "-R",
-            "diagonal",
-            [0.0, 0.0, 0.0],
-            [1.0, 0.0],
-            [1.0, float("nan"), 0.0],
-        ],
-    )
-    def test_lumped_port_direction_rejects_invalid_inputs(self, direction):
-        """LumpedPort v1 accepts only finite nonzero Cartesian directions."""
-        with pytest.raises(ValueError, match="LumpedPort"):
-            PortConfig(name="o1", layer="metal1", direction=direction)
-
-    def test_authored_sheet_mode_is_inplane_only(self):
-        """Layout-authored horizontal sheets do not apply to vertical via ports."""
-        with pytest.raises(ValueError, match="Authored sheets"):
-            PortConfig(
-                name="junction",
-                geometry="via",
-                from_layer="metal1",
-                to_layer="metal2",
-                generate_sheet=False,
-            )
-
-    def test_set_simulation_layers_accepts_pdk_catalog_mapping(self):
-        """PDK-owned catalogs are stored as sim-level mesh inputs."""
-        sim = DrivenSim()
-
-        sim.set_simulation_layers({"sim_sheet": {"gds_layer": (202, 1), "z": 0.0}})
-
-        assert sim._simulation_layers is not None
-        layer = sim._simulation_layers.for_gds_layer((202, 1))
-        assert layer is not None
-        assert layer.name == "sim_sheet"
-
-    def test_simulation_layer_catalog_rejects_duplicate_gds_layers(self):
-        """A full GDS tuple can only have one simulation-layer meaning."""
-        with pytest.raises(ValueError, match="share GDS layer"):
-            SimulationLayerCatalog(
-                {
-                    "sheet_a": {"gds_layer": (202, 1), "z": 0.0},
-                    "sheet_b": {"gds_layer": (202, 1), "z": 1.0},
-                }
-            )
 
 
 class TestEigenSimValidation:
@@ -354,128 +182,74 @@ class TestElectrostaticSimValidation:
         assert not any("at least 2 terminals" in e for e in result.errors)
 
 
-class TestMagnetostaticSimValidation:
-    """Test MagnetostaticSim validation logic."""
+class TestBoundaryModeSimValidation:
+    """Test BoundaryModeSim validation and API behavior."""
 
     def test_missing_geometry(self):
         """Test validation catches missing geometry."""
-        sim = MagnetostaticSim()
+        sim = BoundaryModeSim()
         result = sim.validate_config()
         assert not result.valid
         assert any("No component set" in e for e in result.errors)
 
-    def test_requires_current_source(self):
-        """Test validation requires at least one current source."""
-        sim = MagnetostaticSim()
+    def test_requires_explicit_cross_section(self):
+        """Boundary mode requires explicit cross-section selection."""
+        sim = BoundaryModeSim()
         result = sim.validate_config()
         assert not result.valid
-        assert any("at least 1 current source" in e for e in result.errors)
+        assert any("explicit cross-section plane" in e for e in result.errors)
 
-    def test_current_source_valid(self):
-        """Current source validation passes when a source is present."""
-        sim = MagnetostaticSim()
-        sim.add_current_source("signal", layer="metal1")
+    def test_set_cross_section_from_string(self):
+        """String plane spec should parse into axis/value fields."""
+        sim = BoundaryModeSim()
+        sim.set_cross_section("y=100")
+        assert sim.cross_section is not None
+        assert sim.cross_section.axis == "y"
+        assert sim.cross_section.value == pytest.approx(100.0)
+
+    def test_set_cross_section_rejects_invalid_spec(self):
+        """Invalid plane spec should raise ValueError."""
+        sim = BoundaryModeSim()
+        with pytest.raises(ValueError, match="Invalid plane spec"):
+            sim.set_cross_section("foo")
+
+    def test_z_cross_section_rejected_for_native_2d(self):
+        """Native 2D BoundaryMode currently supports only x/y sections."""
+        sim = BoundaryModeSim()
+        sim.set_cross_section("z=0")
         result = sim.validate_config()
-        assert any("No component set" in e for e in result.errors)
-        assert not any("at least 1 current source" in e for e in result.errors)
+        assert not result.valid
+        assert any("supports only x/y" in e for e in result.errors)
 
-    def test_current_source_direction_is_normalized(self):
-        """Direction shorthand is normalized at the source model boundary."""
-        sim = MagnetostaticSim()
-        sim.add_current_source("signal", layer="metal1", direction="x")
-        assert sim.current_sources[0].direction == "+X"
+    def test_port_api_rejected_for_boundarymode(self):
+        """BoundaryMode native 2D does not accept explicit port definitions."""
+        sim = BoundaryModeSim()
+        sim.set_cross_section("x=0")
+        sim.add_wave_port("o1", layer="metal1")
+        result = sim.validate_config()
+        assert not result.valid
+        assert any("cross_section-only native 2D" in e for e in result.errors)
 
-    def test_current_source_accepts_vector_direction(self):
-        """Vector directions are accepted for Palace current sources."""
-        sim = MagnetostaticSim()
-        sim.add_current_source(
-            "signal",
-            layer="metal1",
-            direction=[0.0, 1.0, 0.0],
-            coordinate_system="Cartesian",
+    def test_set_boundary_mode_updates_model(self):
+        """set_boundary_mode should populate BoundaryModeConfig fields."""
+        sim = BoundaryModeSim()
+        sim.set_boundary_mode(
+            freq=8e9,
+            num_modes=3,
+            save=2,
+            target=2.2,
+            tolerance=1e-8,
+            max_size=60,
+            solver_type="SLEPc",
         )
-        assert sim.current_sources[0].direction == (0.0, 1.0, 0.0)
-        assert sim.current_sources[0].coordinate_system == "Cartesian"
-
-    def test_current_source_rejects_coordinate_system_with_string_direction(self):
-        """Palace does not accept CoordinateSystem with string directions."""
-        sim = MagnetostaticSim()
-        with pytest.raises(ValueError, match="Coordinate system"):
-            sim.add_current_source(
-                "signal",
-                layer="metal1",
-                direction="+X",
-                coordinate_system="Cartesian",
-            )
-
-    def test_current_source_accepts_radial_direction_keyword(self):
-        """Radial Palace direction keywords are normalized at the model boundary."""
-        sim = MagnetostaticSim()
-        sim.add_current_source("signal", layer="metal1", direction="r")
-        assert sim.current_sources[0].direction == "+R"
-
-    def test_multielement_current_source_keeps_element_selectors(self):
-        """Multielement sources put selectors on elements, not raw attributes."""
-        source = CurrentSourceConfig(
-            name="loop",
-            elements=(
-                CurrentSourceElementConfig(
-                    layer="metal1", center=(0, 0), direction="+X"
-                ),
-                CurrentSourceElementConfig(
-                    layer="metal1",
-                    center=(0, 31),
-                    direction=[0.0, -1.0, 0.0],
-                    coordinate_system="Cartesian",
-                ),
-            ),
-        )
-        assert source.layer is None
-        assert len(source.elements) == 2
-        assert source.elements[1].direction == (0.0, -1.0, 0.0)
-
-    def test_multielement_current_source_rejects_element_string_coordinate(self):
-        """Element CoordinateSystem is valid only for vector directions."""
-        with pytest.raises(ValueError, match="Coordinate system"):
-            CurrentSourceConfig(
-                name="loop",
-                elements=(
-                    CurrentSourceElementConfig(
-                        layer="metal1",
-                        direction="+X",
-                        coordinate_system="Cartesian",
-                    ),
-                ),
-            )
-
-    def test_multielement_current_source_rejects_parent_layer(self):
-        """A multielement source cannot mix parent and element selectors."""
-        with pytest.raises(ValueError, match="Multielement current sources"):
-            CurrentSourceConfig(
-                name="loop",
-                layer="metal1",
-                elements=(CurrentSourceElementConfig(layer="metal1", direction="+X"),),
-            )
-
-    def test_multielement_current_source_rejects_parent_direction(self):
-        """Parent direction would be ignored by Palace Elements lowering."""
-        with pytest.raises(ValueError, match="direction fields on each element"):
-            CurrentSourceConfig(
-                name="loop",
-                direction="-X",
-                elements=(CurrentSourceElementConfig(layer="metal1", direction="+X"),),
-            )
-
-    def test_current_source_requires_layer_or_elements(self):
-        """Single-element source selectors must include a layer."""
-        with pytest.raises(ValueError, match="layer is required"):
-            CurrentSourceConfig(name="signal")
-
-    def test_invalid_current_source_direction_raises(self):
-        """Invalid source directions are rejected before config generation."""
-        sim = MagnetostaticSim()
-        with pytest.raises(ValueError, match="Current source direction"):
-            sim.add_current_source("signal", layer="metal1", direction="diagonal")
+        cfg = sim.boundary_mode
+        assert cfg.freq == pytest.approx(8e9)
+        assert cfg.num_modes == 3
+        assert cfg.save == 2
+        assert cfg.target == pytest.approx(2.2)
+        assert cfg.tolerance == pytest.approx(1e-8)
+        assert cfg.max_size == 60
+        assert cfg.solver_type == "SLEPc"
 
 
 class TestMixinMethods:
@@ -483,7 +257,7 @@ class TestMixinMethods:
 
     def test_set_output_dir(self, tmp_path):
         """Test set_output_dir works on all sim classes."""
-        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim, MagnetostaticSim]:
+        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim, BoundaryModeSim]:
             sim = cls()
             sim.set_output_dir(tmp_path / "test")
             assert sim.output_dir == tmp_path / "test"
@@ -491,8 +265,8 @@ class TestMixinMethods:
             assert sim.output_dir.exists()
 
     def test_set_stack(self):
-        """Test set_stack no longer stores airbox parameters."""
-        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim, MagnetostaticSim]:
+        """Test set_stack works on all sim classes."""
+        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim, BoundaryModeSim]:
             sim = cls()
             sim.set_stack(air_above=500.0, air_below=25.0)
             assert "air_above" not in sim._stack_kwargs
@@ -505,137 +279,9 @@ class TestMixinMethods:
         assert "air_above" not in sim._stack_kwargs
         assert "air_below" not in sim._stack_kwargs
 
-    def test_set_stack_copies_prebuilt_stack(self):
-        """Direct LayerStack inputs become simulation-owned copies."""
-        source_stack = LayerStack(
-            layers={
-                "D0_SUBSTRATE": Layer(
-                    name="D0_SUBSTRATE",
-                    gds_layer=(201, 0),
-                    zmin=-500.0,
-                    zmax=0.0,
-                    thickness=500.0,
-                    material="Si",
-                    layer_type="substrate",
-                )
-            },
-            materials={"Si": {"permittivity": 11.9}},
-            dielectrics=[
-                {
-                    "name": "D0_SUBSTRATE",
-                    "zmin": -500.0,
-                    "zmax": 0.0,
-                    "material": "Si",
-                }
-            ],
-        )
-        sim = DrivenSim()
-
-        sim.set_stack(source_stack)
-        source_stack.layers["D0_SUBSTRATE"].material = "mutated"
-        sim.set_material("Si", material_type="dielectric", permittivity=12.0)
-        resolved = sim._resolve_stack()
-
-        assert resolved is sim.stack
-        assert resolved.layers["D0_SUBSTRATE"].material == "Si"
-        assert resolved.materials["Si"]["permittivity"] == 12.0
-        assert source_stack.materials["Si"]["permittivity"] == 11.9
-
-    def test_activate_regions_store_explicit_stack_intent(self):
-        """Explicit region APIs record semantic stack layer names."""
-        sim = DrivenSim()
-
-        sim.activate_substrate(
-            " D0_SUBSTRATE ",
-            die=" D0 ",
-            margin_x=5.0,
-            margin_y=7.0,
-            material=" Si",
-        )
-        sim.activate_substrate("D1_SUBSTRATE", die="D1", margin_x=6.0, margin_y=8.0)
-        sim.activate_inter_die_vacuum(
-            lower_die="D0",
-            upper_die="D1",
-            margin_x=3.0,
-            margin_y=4.0,
-        )
-        sim.activate_outer_vacuum(
-            margin_x=10.0,
-            margin_y=12.0,
-            z_above=500.0,
-            z_below=20.0,
-        )
-
-        assert [region.layer for region in sim._activated_region_values()] == [
-            "D0_SUBSTRATE",
-            "D0_TO_D1_GAP",
-            "D1_SUBSTRATE",
-            "OUTER_VACUUM",
-        ]
-        assert sim._activated_regions["D0_SUBSTRATE"].role == "substrate"
-        assert sim._activated_regions["D0_SUBSTRATE"].die == "D0"
-        assert sim._activated_regions["D0_SUBSTRATE"].margin_x == 5.0
-        assert sim._activated_regions["D0_SUBSTRATE"].margin_y == 7.0
-        assert sim._activated_regions["D0_SUBSTRATE"].material == "Si"
-        assert sim._activated_regions["D0_TO_D1_GAP"].role == "inter_die_vacuum"
-        assert sim._activated_regions["D0_TO_D1_GAP"].lower_die == "D0"
-        assert sim._activated_regions["D0_TO_D1_GAP"].upper_die == "D1"
-        assert sim._activated_regions["OUTER_VACUUM"].role == "outer_vacuum"
-        assert sim._activated_regions["OUTER_VACUUM"].z_above == 500.0
-        assert sim._activated_regions["OUTER_VACUUM"].z_below == 20.0
-
-    def test_activate_region_api_validates_names_and_extents(self):
-        """Activation APIs reject empty names and negative region extents."""
-        sim = DrivenSim()
-
-        with pytest.raises(ValueError, match="non-empty"):
-            sim.activate_substrate(" ")
-        with pytest.raises(ValueError, match="non-empty"):
-            sim.activate_substrate("D0_SUBSTRATE", die=" ")
-        with pytest.raises(ValueError):
-            sim.activate_substrate("D0_SUBSTRATE", margin_x=-1.0)
-        with pytest.raises(ValueError, match="non-empty"):
-            sim.activate_inter_die_vacuum(lower_die="")
-        with pytest.raises(ValueError):
-            sim.activate_outer_vacuum(z_above=-1.0)
-
-    def test_activate_regions_reject_set_airbox_mixing(self):
-        """Explicit region mode and set_airbox mode are mutually exclusive."""
-        sim = DrivenSim()
-        sim.activate_outer_vacuum()
-
-        with pytest.raises(ValueError, match="cannot be mixed with set_airbox"):
-            sim.set_airbox(margin_x=50.0, margin_y=50.0, z_above=10.0, z_below=10.0)
-
-        sim = DrivenSim()
-        sim.set_airbox(margin_x=50.0, margin_y=50.0, z_above=10.0, z_below=10.0)
-        with pytest.raises(ValueError, match="cannot be mixed with set_airbox"):
-            sim.activate_outer_vacuum()
-
-    def test_activate_regions_reject_mesh_time_airbox_z_kwargs(self):
-        """Explicit region mode rejects mesh-time vertical airbox controls."""
-        sim = DrivenSim()
-        sim.activate_outer_vacuum()
-
-        with pytest.raises(ValueError, match="mesh-time airbox"):
-            sim._apply_airbox_overrides(z_above=10.0)
-
-        sim._apply_airbox_overrides(margin_x=50.0, margin_y=20.0)
-        assert sim._airbox_config == {}
-
-    def test_activate_regions_reject_stored_mesh_airbox_margin(self):
-        """Explicit region mode refuses stored legacy airbox expansion."""
-        sim = DrivenSim()
-        sim.activate_outer_vacuum()
-
-        with pytest.raises(ValueError, match="mesh airbox controls"):
-            sim._reject_explicit_region_airbox_config(
-                MeshConfig.default(airbox_margin=1.0)
-            )
-
     def test_set_airbox(self):
         """Test set_airbox stores explicit airbox margins and z extents."""
-        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim, MagnetostaticSim]:
+        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim, BoundaryModeSim]:
             sim = cls()
             sim.set_airbox(margin_x=50.0, margin_y=30.0, z_above=100.0, z_below=80.0)
             assert sim._airbox_config == {
@@ -647,7 +293,7 @@ class TestMixinMethods:
 
     def test_set_airbox_defaults_to_zero(self):
         """Unassigned set_airbox arguments should default to 0.0."""
-        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim, MagnetostaticSim]:
+        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim]:
             sim = cls()
             sim.set_airbox()
             assert sim._airbox_config == {
@@ -737,6 +383,65 @@ class TestMixinMethods:
             "z_above": 120.0,
             "z_below": 80.0,
         }
+
+    def test_mesh_returns_summary_and_retains_manifest_provenance(
+        self, monkeypatch, tmp_path
+    ):
+        """mesh() preserves the rich result internally behind its native summary."""
+        groups = {"volumes": {"substrate": {"physical_group": 1}}}
+        output_dir = tmp_path / "sim"
+        expected = MeshResult(
+            mesh_path=tmp_path / "palace.msh",
+            output_dir=output_dir,
+            groups=groups,
+            model_name="preserved-model",
+            fmax=42.0,
+            periodic_axis="x",
+        )
+        sim = DrivenSim()
+        sim.set_output_dir(output_dir)
+
+        monkeypatch.setattr(
+            DrivenSim,
+            "validate_config",
+            lambda _self: SimpleNamespace(valid=True, errors=[]),
+        )
+        monkeypatch.setattr(DrivenSim, "_resolve_stack", lambda _self: object())
+        monkeypatch.setattr(
+            DrivenSim,
+            "_configure_ports_on_component",
+            lambda _self, _stack: None,
+        )
+        monkeypatch.setattr(
+            "gsim.palace.ports.extract_ports",
+            lambda _component, _stack: [],
+        )
+
+        def _fake_generate_mesh(**kwargs):
+            assert kwargs["model_name"] == expected.model_name
+            assert kwargs["fmax"] == expected.fmax
+            assert kwargs["periodic_axis"] == expected.periodic_axis
+            return expected
+
+        monkeypatch.setattr(
+            "gsim.palace.mesh.generator.generate_mesh", _fake_generate_mesh
+        )
+
+        result = sim.mesh(
+            model_name=expected.model_name,
+            fmax=expected.fmax,
+            periodic_axis=expected.periodic_axis,
+            verbose=False,
+        )
+
+        assert isinstance(result, SimulationResult)
+        assert result.mesh_path == expected.mesh_path
+        assert result.output_dir == tmp_path / "sim"
+        assert sim._last_mesh_result is expected
+        assert sim._last_mesh_result.groups is groups
+        assert sim._last_mesh_result.manifest is not None
+        resolved = resolve_palace_result(output_dir, problem_type="Driven")
+        assert resolved.run_summary.mesh_manifest["entry_count"] == 1
 
     def test_set_airbox_margin_y_zero_reaches_generate_mesh(
         self, monkeypatch, tmp_path
@@ -838,7 +543,7 @@ class TestMixinMethods:
 
     def test_set_material(self):
         """Test set_material works on all sim classes."""
-        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim, MagnetostaticSim]:
+        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim, BoundaryModeSim]:
             sim = cls()
             sim.set_material(
                 "custom_metal", material_type="conductor", conductivity=1e7
@@ -848,7 +553,7 @@ class TestMixinMethods:
 
     def test_set_numerical(self):
         """Test set_numerical works on all sim classes."""
-        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim, MagnetostaticSim]:
+        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim, BoundaryModeSim]:
             sim = cls()
             sim.set_numerical(
                 order=3,
@@ -867,7 +572,7 @@ class TestMixinMethods:
 
     def test_mesh_requires_output_dir(self):
         """Test mesh() raises if output_dir not set."""
-        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim, MagnetostaticSim]:
+        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim, BoundaryModeSim]:
             sim = cls()
             with pytest.raises(ValueError, match="Output directory not set"):
                 sim.mesh()
@@ -877,8 +582,8 @@ class TestAddPec:
     """Test add_pec() on all simulation classes."""
 
     def test_add_pec_stores_config(self):
-        """add_pec() stores PECBlockConfig on all 3 sim classes."""
-        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim, MagnetostaticSim]:
+        """add_pec() stores PECBlockConfig on all simulation classes."""
+        for cls in [DrivenSim, EigenmodeSim, ElectrostaticSim, BoundaryModeSim]:
             sim = cls()
             sim.add_pec(gds_layer=(65000, 0), from_layer="metal1", to_layer="topmetal2")
             assert len(sim._pec_blocks) == 1
@@ -901,3 +606,135 @@ class TestAddPec:
         assert len(sim._pec_blocks) == 2
         assert sim._pec_blocks[0].from_layer == "metal1"
         assert sim._pec_blocks[1].from_layer == "metal2"
+
+
+# ---------------------------------------------------------------------------
+# Palace binary resolver tests (gsim.palace.runtime)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _mock_gcloud(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mock gsim.gcloud so we can import gsim.palace.runtime without gdsfactoryplus."""
+    import types
+
+    gcloud = types.ModuleType("gsim.gcloud")
+    for name in (
+        "get_status",
+        "wait_for_results",
+        "register_result_parser",
+        "print_job_summary",
+        "run_simulation",
+    ):
+        setattr(gcloud, name, lambda *a, **kw: None)  # noqa: ARG005
+    gcloud.RunResult = type("RunResult", (), {})  # ty: ignore[unresolved-attribute]
+    monkeypatch.setitem(sys.modules, "gsim.gcloud", gcloud)
+
+
+@pytest.fixture
+def _no_palacetoolkit(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
+    """Ensure palacetoolkit_palace_cpu is unavailable during the test."""
+    if "palacetoolkit_palace_cpu" in sys.modules:
+        old = sys.modules["palacetoolkit_palace_cpu"]
+        monkeypatch.delitem(sys.modules, "palacetoolkit_palace_cpu", raising=False)
+        yield
+        sys.modules["palacetoolkit_palace_cpu"] = old
+    else:
+        yield
+
+
+class TestResolvePalaceBinary:
+    @pytest.mark.usefixtures("_mock_gcloud", "_no_palacetoolkit")
+    def test_returns_none_when_nothing_found(self) -> None:
+        from gsim.palace.runtime import resolve_palace_binary
+
+        with pytest.MonkeyPatch().context() as mp:
+            mp.delenv("PALACE_BIN", raising=False)
+            mp.delenv("PALACE_EXECUTABLE", raising=False)
+            with mp.context() as mp2:
+                mp2.setattr("gsim.palace.runtime._palace_cpu_available", lambda: False)
+                result = resolve_palace_binary()
+                assert result is None
+
+    @pytest.mark.usefixtures("_mock_gcloud")
+    def test_uses_palace_bin_env(self) -> None:
+        from gsim.palace.runtime import resolve_palace_binary
+
+        fake_bin = Path("/usr/local/bin/palace")
+
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setenv("PALACE_BIN", str(fake_bin))
+            mp.setattr("gsim.palace.runtime._binary_is_runnable", lambda _: True)
+            mp.setattr("pathlib.Path.is_file", lambda _: True)
+            result = resolve_palace_binary()
+            assert result is not None
+
+    @pytest.mark.usefixtures("_mock_gcloud")
+    def test_delegates_to_palacetoolkit(self) -> None:
+        from gsim.palace.runtime import resolve_palace_binary
+
+        fake_ptk_bin = Path("/opt/palacetoolkit/bin/palace")
+
+        class _FakePalaceCPU:
+            @staticmethod
+            def palace_binary_path() -> Path:
+                return fake_ptk_bin
+
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setitem(sys.modules, "palacetoolkit_palace_cpu", _FakePalaceCPU())
+            mp.setattr("gsim.palace.runtime._palace_cpu_available", lambda: True)
+            mp.setattr("gsim.palace.runtime._binary_is_runnable", lambda _: True)
+            mp.setattr("pathlib.Path.is_file", lambda _: True)
+            result = resolve_palace_binary()
+            assert result is not None
+
+    @pytest.mark.usefixtures("_mock_gcloud")
+    def test_prefer_bundled_skips_env(self) -> None:
+        from gsim.palace.runtime import resolve_palace_binary
+
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setenv("PALACE_BIN", "/usr/bin/palace")
+            mp.setattr("gsim.palace.runtime._palace_cpu_available", lambda: False)
+            result = resolve_palace_binary(prefer_bundled=True)
+            assert result is None
+
+
+class TestResolvePalaceLibraryDir:
+    @pytest.mark.usefixtures("_mock_gcloud", "_no_palacetoolkit")
+    def test_returns_none_without_palacetoolkit(self) -> None:
+        from gsim.palace.runtime import resolve_palace_library_dir
+
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setattr("gsim.palace.runtime._palace_cpu_available", lambda: False)
+            assert resolve_palace_library_dir() is None
+
+    @pytest.mark.usefixtures("_mock_gcloud")
+    def test_delegates_to_palacetoolkit(self) -> None:
+        from gsim.palace.runtime import resolve_palace_library_dir
+
+        fake_lib = Path("/opt/palacetoolkit/lib")
+
+        class _FakePalaceCPU:
+            @staticmethod
+            def palace_library_path() -> Path:
+                return fake_lib
+
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setitem(sys.modules, "palacetoolkit_palace_cpu", _FakePalaceCPU())
+            mp.setattr("gsim.palace.runtime._palace_cpu_available", lambda: True)
+            mp.setattr("pathlib.Path.is_dir", lambda _: True)
+            result = resolve_palace_library_dir()
+            assert result is not None
+
+
+class TestPalacetoolkitAvailable:
+    @pytest.mark.usefixtures("_mock_gcloud")
+    def test_true_when_installed(self) -> None:
+        from gsim.palace.runtime import _palace_cpu_available
+
+        # Since we mocked gcloud but not palacetoolkit_palace_cpu, if it's
+        # actually installed on the system, this will be True. We can't force
+        # it to be True via mock here without patching importlib, which is
+        # fragile.  Instead we just verify the function runs.
+        result = _palace_cpu_available()
+        assert isinstance(result, bool)

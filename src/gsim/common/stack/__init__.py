@@ -44,7 +44,6 @@ from gsim.common.stack.materials import (
 )
 from gsim.common.stack.overlays import (
     load_overlay,
-    load_overlay_data,
     merge_overlay,
 )
 from gsim.common.stack.visualization import (
@@ -152,6 +151,13 @@ def load_stack_yaml(yaml_path: str | Path) -> LayerStack:
             material=layer_data["material"],
             layer_type=layer_data["type"],
             mesh_resolution=layer_data.get("mesh_resolution", "medium"),
+            part_role=layer_data.get("part_role"),
+            attached_face_metal_semantic_id=layer_data.get(
+                "attached_face_metal_semantic_id"
+            ),
+            net_id=layer_data.get("net_id"),
+            equipotential_id=layer_data.get("equipotential_id"),
+            exclude_from_simulation=layer_data.get("exclude_from_simulation", False),
         )
 
     # Load dielectrics
@@ -180,7 +186,6 @@ __all__ = [
     "get_material_properties",
     "get_stack",
     "load_overlay",
-    "load_overlay_data",
     "load_stack_yaml",
     "merge_overlay",
     "parse_layer_stack",

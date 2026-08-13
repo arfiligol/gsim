@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 
-from gsim.palace.mesh.gmsh_utils import _create_wire_loop, is_exterior_physical_name
+from gsim.palace.mesh.gmsh_utils import _create_wire_loop
 
 
 class _FakeKernel:
@@ -62,15 +62,6 @@ class _FakeKernel:
         del tag
         self.curve_loops.append(list(curves))
         return self._new_tag()
-
-
-def test_exterior_physical_name_accepts_none_and_boundary_suffixes() -> None:
-    """One-sided exterior physical names may use None or boundary suffixes."""
-    assert is_exterior_physical_name("metal___None")
-    assert is_exterior_physical_name("metal__None")
-    assert is_exterior_physical_name("metal___boundary")
-    assert is_exterior_physical_name("metal__boundary")
-    assert not is_exterior_physical_name("metal___substrate")
 
 
 def test_bspline_curve_fit_splits_at_large_angles() -> None:

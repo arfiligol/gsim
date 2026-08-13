@@ -239,8 +239,13 @@ sim.set_output_dir("./palace-sim-cpw")
 sim.set_geometry(c)
 
 # Configure layer stack from active PDK
-stack = get_stack(air_above=300.0)  # auto-detects active PDK
+stack = get_stack()  # auto-detects active PDK
 sim.set_stack(stack)
+
+# Surround the design with air. Without this the absorbing boundary sits
+# directly on the passivation, microns above the metal, and adds large
+# spurious loss and reflection.
+sim.set_airbox(margin_x=50, margin_y=50, z_above=100, z_below=100)
 
 # Configure left CPW port (single port at signal center)
 sim.add_cpw_port("o1", layer="topmetal2", s_width=20, gap_width=15)
@@ -260,23 +265,6 @@ sim.mesh(preset="default", planar_conductors=False)
 
 # %% papermill={"duration": 0.712163, "end_time": "2026-04-18T15:52:04.317884", "exception": false, "start_time": "2026-04-18T15:52:03.605721", "status": "completed"}
 sim.plot_mesh(show_groups=["metal", "P", "via"])
-
-# %% [markdown]
-# ### Generate handoff package
-#
-# This writes the canonical Palace run folder and packages it as a `.tar.gz`
-# archive that can be transferred to an HPC system before solver execution.
-
-# %%
-from pathlib import Path
-
-run_dir = sim.output_dir
-assert run_dir is not None
-HANDOFF_PACKAGE_DIR = Path()
-handoff_archive = HANDOFF_PACKAGE_DIR / f"{run_dir.name}-palace.tar.gz"
-
-handoff_bundle = sim.generate_handoff_package(archive_path=handoff_archive)
-handoff_archive
 
 # %% [markdown] papermill={"duration": 0.001816, "end_time": "2026-04-18T15:52:04.322025", "exception": false, "start_time": "2026-04-18T15:52:04.320209", "status": "completed"}
 # ### Run simulation on cloud

@@ -33,7 +33,7 @@ def _conductor_polygons_by_layer(
 
     layout = component.kcl.layout
     index_to_gds: dict[int, tuple[int, int]] = {}
-    for layer_index in range(layout.layers()):
+    for layer_index in layout.layer_indexes():
         if layout.is_valid_layer(layer_index):
             info = layout.get_info(layer_index)
             index_to_gds[layer_index] = (info.layer, info.datatype)

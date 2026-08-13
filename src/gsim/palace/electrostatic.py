@@ -7,13 +7,17 @@ capacitance matrices between terminals.
 from __future__ import annotations
 
 import logging
-from typing import Literal
+from pathlib import Path
+from typing import Any, Literal
 
-from pydantic import Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
-from gsim.palace.base import PalaceSimBase
+from gsim.common import Geometry, LayerStack
+from gsim.palace.base import PalaceSimMixin
 from gsim.palace.models import (
     ElectrostaticConfig,
+    MaterialConfig,
+    NumericalConfig,
     TerminalConfig,
     WavePortConfig,
 )
@@ -21,7 +25,7 @@ from gsim.palace.models import (
 logger = logging.getLogger(__name__)
 
 
-class ElectrostaticSim(PalaceSimBase):
+class ElectrostaticSim(PalaceSimMixin, BaseModel):
     """Electrostatic simulation for capacitance matrix extraction.
 
     This class configures and runs electrostatic simulations to extract
@@ -52,12 +56,19 @@ class ElectrostaticSim(PalaceSimBase):
         numerical: Numerical solver configuration
     """
 
+    model_config = ConfigDict(
+        validate_assignment=True,
+        arbitrary_types_allowed=True,
+    )
     simulation_type: Literal["electrostatic"] = "electrostatic"
 
     driven: None = None
     ports: None = None
     cpw_ports: None = None
     wave_ports: list[WavePortConfig] = Field(default_factory=list)
+    # Composed objects (from common)
+    geometry: Geometry | None = None
+    stack: LayerStack | None = None
 
     # Terminal configurations (no ports in electrostatic)
     terminals: list[TerminalConfig] = Field(default_factory=list)
@@ -67,6 +78,18 @@ class ElectrostaticSim(PalaceSimBase):
     eigenmode: None = None
     absorbing_boundary: bool = False
 
+    # Material overrides and numerical config
+    materials: dict[str, MaterialConfig] = Field(default_factory=dict)
+    numerical: NumericalConfig = Field(default_factory=NumericalConfig)
+
+    # Stack configuration (stored as kwargs until resolved)
+    _stack_kwargs: dict[str, Any] = PrivateAttr(default_factory=dict)
+    _airbox_config: dict[str, float] = PrivateAttr(default_factory=dict)
+    _pec_blocks: list = PrivateAttr(default_factory=list)
+    _hints: dict[str, Any] = PrivateAttr(default_factory=dict)
+
+    # Internal state
+    _output_dir: Path | None = PrivateAttr(default=None)
     _configured_terminals: bool = PrivateAttr(default=False)
 
     # -------------------------------------------------------------------------
@@ -77,7 +100,8 @@ class ElectrostaticSim(PalaceSimBase):
         self,
         name: str,
         *,
-        layer: str,
+        layer: str | None = None,
+        net_id: str | None = None,
         center: tuple[float, float] | None = None,
         port_name: str | None = None,
         physical_label: str | None = None,
@@ -88,12 +112,9 @@ class ElectrostaticSim(PalaceSimBase):
 
         Args:
             name: Terminal name
-            layer: Target conductor layer
-            center: Optional XY point used to select one conductor island on
-                ``layer``. When omitted, all conductor surfaces on the layer
-                are assigned to the terminal.
-            port_name: Optional component port name used to derive ``center``.
-            physical_label: Optional short label for generated physical names.
+            layer: Legacy selector layer.
+            net_id: Exact structured SGB conductor net. Mutually exclusive
+                with the selector arguments.
 
         Example:
             >>> sim.add_terminal("T1", layer="topmetal2")
@@ -109,6 +130,7 @@ class ElectrostaticSim(PalaceSimBase):
             TerminalConfig(
                 name=name,
                 layer=layer,
+                net_id=net_id,
                 center=center,
                 port_name=port_name,
                 physical_label=physical_label,
@@ -123,6 +145,8 @@ class ElectrostaticSim(PalaceSimBase):
         self,
         *,
         save_fields: int = 0,
+        unassigned_conductor_policy: Literal["ground", "error"] = "ground",
+        exterior_boundary_policy: Literal["none", "ground"] = "none",
     ) -> None:
         """Configure electrostatic simulation.
 
@@ -134,6 +158,8 @@ class ElectrostaticSim(PalaceSimBase):
         """
         self.electrostatic = ElectrostaticConfig(
             save_fields=save_fields,
+            unassigned_conductor_policy=unassigned_conductor_policy,
+            exterior_boundary_policy=exterior_boundary_policy,
         )
 
 

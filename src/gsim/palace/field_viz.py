@@ -10,7 +10,7 @@ from typing import Any, Literal, cast
 import numpy as np
 import pyvista as pv
 
-from gsim.palace.resolve.loaders.fields import load_fields
+from gsim.palace.results import load_fields
 
 logger = logging.getLogger(__name__)
 

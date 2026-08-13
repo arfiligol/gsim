@@ -1,38 +1,14 @@
-"""Notebook-facing facade for Palace simulation, Resolve, and Results.
+"""Palace API module for EM simulation with gdsfactory.
 
-The package root exposes the small public surface users need for notebooks:
-problem-specific simulation classes, mesh generation entrypoints, the Resolve
-entrypoint, report bundle models, concrete report models, and selected Typed
-Data classes.
+This module provides a comprehensive API for setting up and running
+electromagnetic simulations using the Palace solver with gdsfactory components.
 
-Implementation responsibility is intentionally below the root:
-
-* ``gsim.palace.run_folder`` owns the canonical Palace-only run folder:
-  root execution inputs, ``metadata/`` sidecars, ``logs/``, optional
-  ``geometry/design.gds``, and raw ``results/palace/`` solver outputs.
-* ``gsim.palace.run_stage`` owns lightweight run-stage handles returned by
-  package/execution APIs before Resolve starts.
-* ``gsim.palace.run`` owns concrete execution implementations, such as local
-  Palace process execution. ``PalaceSimBase`` keeps notebook-facing method
-  entrypoints and delegates execution details to this package.
-* ``gsim.palace.handoff`` owns Palace archive/script packaging around that
-  run folder. AEDT/HFSS export and result packaging belong to public PDK code,
-  not to this package.
-* ``gsim.palace.resolve`` adapts completed Palace run folders/cloud mappings
-  into source-audit objects. Its root entrypoint is
-  ``resolve_palace_result(...)``; report loading remains an explicit second
-  step through ``PalaceResolvedResult.load_report(...)``.
-* ``gsim.palace.results`` owns semantic Typed Data and Problem Type Reports.
-* ``gsim.palace.display`` owns generic table/plot primitives used by Typed
-  Data visualizers.
-* ``gsim.palace.mesh`` owns mesh and postprocessing config generation.
-
-The root does not expose direct problem-specific report loaders. Review code
-should use ``resolve_palace_result(...).load_report()`` so the source audit,
-typed report construction, and concrete report type remain visible.
-Missing artifacts are represented by the Resolve summary until callers choose
-``require_report=True`` or call ``require_report()``, which raise instead of
-returning placeholder reports.
+Features:
+    - Problem-specific simulation classes (DrivenSim, EigenmodeSim, ElectrostaticSim)
+    - Layer stack extraction from PDK
+    - Port configuration (inplane, via, CPW)
+    - Mesh generation with quality presets
+    - Palace config file generation
 
 Usage:
     from gsim.palace import DrivenSim
@@ -49,71 +25,221 @@ Usage:
     sim.set_output_dir("./sim")
     sim.mesh(preset="fine")
     results = sim.run()
-
-    # Generate a reviewable handoff package
-    handle = sim.generate_handoff_package()
-
-    # Or resolve artifacts first, then compose a typed report explicitly
-    resolved = resolve_palace_result("./sim", problem_type="Driven")
-    report_bundle = resolved.load_report(require_report=True)
-    report = report_bundle.require_report()
 """
 
 from __future__ import annotations
 
-from gsim.gcloud import RunResult, register_result_parser
+from functools import partial
+
+# Common components (shared with FDTD)
+from gsim.common import Geometry, LayerStack, Stack
+
+# Stack utilities (from common, shared with FDTD)
+from gsim.common.stack import (
+    MATERIALS_DB,
+    Layer,
+    MaterialProperties,
+    StackLayer,
+    extract_from_pdk,
+    extract_layer_stack,
+    get_material_properties,
+    get_stack,
+    load_stack_yaml,
+    parse_layer_stack,
+    plot_stack,
+    print_stack,
+    print_stack_table,
+)
+from gsim.gcloud import RunResult, print_job_summary, register_result_parser
+from gsim.gcloud import run_simulation as _run_simulation
+
+# New simulation classes (composition, no inheritance)
 from gsim.palace.boundarymode import BoundaryModeSim
 from gsim.palace.driven import DrivenSim
 from gsim.palace.eigenmode import EigenmodeSim
 from gsim.palace.electrostatic import ElectrostaticSim
-from gsim.palace.field_viz import extract_streamplot_inputs_2d, plot_fields_2d
-from gsim.palace.magnetostatic import MagnetostaticSim
+
+# Field-visualization (NaN-free direct mesh rendering)
+from gsim.palace.fields import (
+    BoundaryFieldData,
+    SelectorContext,
+    VolumeFieldData,
+    activate_vector_component,
+    build_selector_context,
+    extract_axis_slice,
+    extract_boundary_cells,
+    extract_plane_slice,
+    extract_slice_contours,
+    load_boundary_field_data,
+    load_field_context,
+    load_volume_field_data,
+    plot_boundary_field,
+    plot_volume_contours,
+    plot_volume_slice,
+    resolve_boundary_type_attributes,
+    resolve_entity_attributes,
+    resolve_scalar_field,
+)
+
+# Material resolution with dispersion
+from gsim.palace.materials import resolve_palace_materials_at_frequency
+
+# Mesh utilities
 from gsim.palace.mesh import (
     MeshConfig,
+    MeshResult,
     generate_mesh,
 )
-from gsim.palace.models import BoundaryModeConfig, CrossSectionPlaneConfig
+
+# Models (new submodule)
+from gsim.palace.models import (
+    BoundaryModeConfig,
+    CPWPortConfig,
+    CrossSectionPlaneConfig,
+    DrivenConfig,
+    EigenmodeConfig,
+    ElectrostaticConfig,
+    GeometryConfig,
+    MagnetostaticConfig,
+    MaterialConfig,
+    NumericalConfig,
+    PECBlockConfig,
+    PortConfig,
+    SimulationResult,
+    TerminalConfig,
+    TransientConfig,
+    ValidationResult,
+    WavePortConfig,
+)
+
+# Port utilities
+from gsim.palace.ports import (
+    PalacePort,
+    PortGeometry,
+    PortType,
+    configure_cpw_port,
+    configure_inplane_port,
+    configure_via_port,
+    extract_ports,
+)
+
+# Resolve utilities
 from gsim.palace.resolve import (
     PalaceResolvedResult,
     PalaceResultBundle,
-    PalaceRunArtifacts,
-    PalaceRunSummary,
     resolve_palace_result,
 )
-from gsim.palace.results.driven import SParams
-from gsim.palace.results.reports.driven import DrivenReport
-from gsim.palace.results.reports.eigenmode import EigenmodeReport
-from gsim.palace.results.reports.electrostatic import ElectrostaticReport
-from gsim.palace.run_stage import PalaceRunHandle
+
+# Results utilities
+from gsim.palace.results import (
+    SParam,
+    SParams,
+    get_port_map,
+    load_fields,
+    load_sparams,
+)
+from gsim.palace.results.reports import (
+    DrivenReport,
+    EigenmodeReport,
+    ElectrostaticReport,
+)
+
+# Runtime / binary resolution (optional palace-toolkit-cpu dependency)
+from gsim.palace.runtime import resolve_palace_binary, resolve_palace_library_dir
+
+# Visualization
+from gsim.viz import plot_cross_section, plot_mesh
 
 __all__ = [
+    "MATERIALS_DB",
+    "BoundaryFieldData",
     "BoundaryModeConfig",
     "BoundaryModeSim",
+    "CPWPortConfig",
     "CrossSectionPlaneConfig",
+    "DrivenConfig",
     "DrivenReport",
     "DrivenSim",
+    "EigenmodeConfig",
     "EigenmodeReport",
     "EigenmodeSim",
+    "ElectrostaticConfig",
     "ElectrostaticReport",
     "ElectrostaticSim",
-    "MagnetostaticSim",
+    "Geometry",
+    "GeometryConfig",
+    "Layer",
+    "LayerStack",
+    "MagnetostaticConfig",
+    "MaterialConfig",
+    "MaterialProperties",
     "MeshConfig",
+    "MeshResult",
+    "NumericalConfig",
+    "PECBlockConfig",
+    "PalacePort",
     "PalaceResolvedResult",
     "PalaceResultBundle",
-    "PalaceRunArtifacts",
-    "PalaceRunHandle",
-    "PalaceRunSummary",
+    "PortConfig",
+    "PortGeometry",
+    "PortType",
+    "SParam",
     "SParams",
-    "extract_streamplot_inputs_2d",
+    "SelectorContext",
+    "SimulationResult",
+    "Stack",
+    "StackLayer",
+    "TerminalConfig",
+    "TransientConfig",
+    "ValidationResult",
+    "VolumeFieldData",
+    "WavePortConfig",
+    "activate_vector_component",
+    "build_selector_context",
+    "configure_cpw_port",
+    "configure_inplane_port",
+    "configure_via_port",
+    "extract_axis_slice",
+    "extract_boundary_cells",
+    "extract_from_pdk",
+    "extract_layer_stack",
+    "extract_plane_slice",
+    "extract_ports",
+    "extract_slice_contours",
     "generate_mesh",
-    "plot_fields_2d",
+    "get_material_properties",
+    "get_port_map",
+    "get_stack",
+    "load_boundary_field_data",
+    "load_field_context",
+    "load_fields",
+    "load_sparams",
+    "load_stack_yaml",
+    "load_volume_field_data",
+    "parse_layer_stack",
+    "plot_boundary_field",
+    "plot_cross_section",
+    "plot_mesh",
+    "plot_stack",
+    "plot_volume_contours",
+    "plot_volume_slice",
+    "print_job_summary",
+    "print_stack",
+    "print_stack_table",
+    "resolve_boundary_type_attributes",
+    "resolve_entity_attributes",
+    "resolve_palace_binary",
+    "resolve_palace_library_dir",
+    "resolve_palace_materials_at_frequency",
     "resolve_palace_result",
+    "resolve_scalar_field",
+    "run_simulation",
 ]
 
 
 def _parse_palace_result(run_result: RunResult) -> SParams | dict:
     """Parse Palace cloud results into SParams."""
-    from gsim.palace.results.driven import load_sparams
+    from gsim.palace.results import load_sparams
 
     try:
         return load_sparams(run_result.files)
@@ -122,3 +248,6 @@ def _parse_palace_result(run_result: RunResult) -> SParams | dict:
 
 
 register_result_parser("palace", _parse_palace_result)
+
+# Palace-specific run_simulation with job_type preset
+run_simulation = partial(_run_simulation, job_type="palace")

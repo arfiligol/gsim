@@ -10,12 +10,10 @@ import json
 from pathlib import Path
 
 import gdsfactory as gf
-import gmsh
 import pytest
 
 from gsim.common import Layer, LayerStack
-from gsim.palace import DrivenSim
-from gsim.palace.mesh.gmsh_utils import is_exterior_physical_name
+from gsim.palace import BoundaryModeSim, DrivenSim
 
 
 def _make_cpw_component():
@@ -70,23 +68,16 @@ def _make_sim(component, tmp_path, planar_conductors=False, layer="topmetal2"):
     return sim
 
 
-def _mesh_physical_names(mesh_path: Path) -> set[str]:
-    """Read physical group names from a generated mesh artifact."""
-    was_initialized = gmsh.isInitialized()
-    if not was_initialized:
-        gmsh.initialize()
-    try:
-        gmsh.open(str(mesh_path))
-        names = {
-            gmsh.model.getPhysicalName(dim, tag)
-            for dim, tag in gmsh.model.getPhysicalGroups()
-            if gmsh.model.getPhysicalName(dim, tag)
-        }
-        gmsh.clear()
-    finally:
-        if not was_initialized:
-            gmsh.finalize()
-    return names
+def _make_boundarymode_sim(component, tmp_path):
+    """Create, configure, and mesh a native 2D BoundaryModeSim."""
+    sim = BoundaryModeSim()
+    sim.set_output_dir(str(tmp_path / "palace-sim-boundarymode"))
+    sim.set_geometry(component)
+    sim.set_stack(substrate_thickness=2.0, air_above=300.0)
+    sim.set_cross_section("x=0")
+    sim.set_boundary_mode(freq=10e9, num_modes=1, save=0)
+    sim.mesh(preset="coarse")
+    return sim
 
 
 @pytest.fixture(scope="module")
@@ -103,6 +94,75 @@ def planar_sim(tmp_path_factory):
     tmp_path = tmp_path_factory.mktemp("planar")
     component = _make_cpw_component()
     return _make_sim(component, tmp_path, planar_conductors=True, layer="metal1")
+
+
+@pytest.fixture(scope="module")
+def boundarymode_sim(tmp_path_factory):
+    """Mesh once with native 2D boundary mode, share across tests."""
+    tmp_path = tmp_path_factory.mktemp("boundarymode2d")
+    component = _make_cpw_component()
+    return _make_boundarymode_sim(component, tmp_path)
+
+
+class TestBoundaryModeNative2D:
+    """Test native 2D BoundaryMode meshing/config behavior."""
+
+    def test_mesh_has_no_ports(self, boundarymode_sim):
+        """Native 2D BoundaryMode should not emit port groups."""
+        groups = boundarymode_sim._last_mesh_result.groups
+        assert groups["port_surfaces"] == {}
+
+    def test_mesh_has_domains_and_boundary_conductors(self, boundarymode_sim):
+        """Native 2D BoundaryMode mesh includes domains and boundary conductors."""
+        groups = boundarymode_sim._last_mesh_result.groups
+        assert len(groups["volumes"]) > 0, "No 2D material domains found"
+        assert (
+            len(groups["conductor_surfaces"]) > 0 or len(groups["pec_surfaces"]) > 0
+        ), "No conductive/PEC edge groups found"
+
+    def test_mesh_conductors_not_in_domain_volumes(self, boundarymode_sim):
+        """Conductor interiors should be excluded from BoundaryMode volume domains."""
+        groups = boundarymode_sim._last_mesh_result.groups
+        for layer_name in groups["conductor_surfaces"]:
+            assert layer_name not in groups["volumes"]
+
+    def test_mesh_stats_are_2d(self, boundarymode_sim):
+        """Native BoundaryMode mesh should not report tetrahedra."""
+        stats = boundarymode_sim._last_mesh_result.mesh_stats
+        assert stats.get("tetrahedra", 0) == 0
+
+    def test_config_is_boundarymode_native_2d(self, boundarymode_sim):
+        """Config should be BoundaryMode with conductive/PEC boundaries and no ports."""
+        boundarymode_sim.write_config()
+        config_path = Path(boundarymode_sim._output_dir) / "config.json"
+        config = json.loads(config_path.read_text())
+
+        assert config["Problem"]["Type"] == "BoundaryMode"
+        assert "Attributes" not in config["Solver"]["BoundaryMode"]
+
+        boundaries = config["Boundaries"]
+        assert "Conductivity" in boundaries or "PEC" in boundaries, (
+            "Missing conductive/PEC boundaries in native 2D BoundaryMode"
+        )
+        assert "WavePort" not in boundaries
+        assert "LumpedPort" not in boundaries
+
+    def test_config_has_non_air_dielectric_materials(self, boundarymode_sim):
+        """Native 2D BoundaryMode config must include non-air dielectric domains."""
+        boundarymode_sim.write_config()
+        config_path = Path(boundarymode_sim._output_dir) / "config.json"
+        config = json.loads(config_path.read_text())
+
+        materials = config["Domains"]["Materials"]
+        perms = [
+            float(m.get("Permittivity", 1.0))
+            for m in materials
+            if isinstance(m.get("Permittivity"), int | float)
+        ]
+        assert any(p > 1.1 for p in perms), (
+            "Expected at least one non-air dielectric material in BoundaryMode "
+            "Domains/Materials"
+        )
 
 
 class TestCPWMeshVolumetricConductors:
@@ -138,45 +198,6 @@ class TestCPWMeshVolumetricConductors:
         """Absorbing boundary surfaces must be present."""
         groups = volumetric_sim._last_mesh_result.groups
         assert "absorbing" in groups["boundary_surfaces"], "No absorbing boundary"
-
-    def test_generated_interface_names_use_meshwell_delimiter(self, volumetric_sim):
-        """Generated interface physical names use meshwell-style delimiters."""
-        mesh_path = Path(volumetric_sim._output_dir) / "palace.msh"
-        physical_names = _mesh_physical_names(mesh_path)
-
-        assert any("___" in name for name in physical_names)
-        assert any(name.endswith("___None") for name in physical_names)
-        assert not any(
-            name.endswith("__None") and not name.endswith("___None")
-            for name in physical_names
-        )
-
-    def test_manifest_preserves_generated_interface_identities(self, volumetric_sim):
-        """Generated internal interface groups remain visible in the manifest."""
-        groups = volumetric_sim._last_mesh_result.groups
-        interface_names = {
-            name
-            for name in groups["boundary_surfaces"]
-            if "___" in name and not is_exterior_physical_name(name)
-        }
-
-        assert interface_names
-
-        manifest_entries = {
-            entry.name: entry
-            for entry in volumetric_sim._last_mesh_result.manifest.entries
-            if entry.interface_of is not None
-        }
-
-        assert interface_names <= set(manifest_entries)
-        for name in interface_names:
-            entry = manifest_entries[name]
-            assert entry.role == "boundary_surface"
-            assert entry.attributes
-            assert entry.entity_tags
-            assert entry.physical_names == (name,)
-            assert entry.interface_of is not None
-            assert "None" not in entry.interface_of
 
     def test_config_json_valid(self, volumetric_sim):
         """Generated config.json must have required Palace sections."""
@@ -502,8 +523,9 @@ class TestPECBlockMesh:
 class TestShapedDielectric:
     """Test mesh generation with shaped dielectric volumes."""
 
+    @classmethod
     @pytest.fixture(scope="class")
-    def shaped_dielectric_sim(self, tmp_path_factory):
+    def shaped_dielectric_sim(cls, tmp_path_factory):
         """Create and mesh a component with a shaped dielectric core."""
         from gsim.common.stack.materials import MATERIALS_DB
 

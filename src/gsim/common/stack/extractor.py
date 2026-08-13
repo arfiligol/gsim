@@ -23,22 +23,20 @@ from gsim.common.stack.materials import (
 logger = logging.getLogger(__name__)
 
 
-class Layer(BaseModel):
-    """Layer information for Palace simulation.
+def _optional_layer_info_string(
+    info: dict[str, Any], layer_name: str, key: str
+) -> str | None:
+    """Read one explicitly typed optional LayerLevel.info value."""
+    value = info.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Layer {layer_name!r} provides invalid {key}.")
+    return value.strip()
 
-    For structured SGB Route A/B lowering, ``part_role``, ``net_id``, and
-    ``equipotential_id`` are authored ``LayerLevel.info`` authority. ``net_id``
-    is the default identity for an unselected layer or its residual connected
-    islands; a terminal selector overrides only its selected island with the
-    deterministic ``{layer}@{label}`` identity and clears that selected
-    record's inherited layer-default ``equipotential_id``. ``equipotential_id``
-    is otherwise the authored component identity propagated alongside the
-    layer record. A contact pad
-    additionally declares its authored ``attached_face_metal_semantic_id``.
-    ``exclude_from_simulation`` is an authored boolean that omits the layer
-    from SGB simulation lowering.
-    No role, net, equipotential, or attachment is inferred from names.
-    """
+
+class Layer(BaseModel):
+    """Layer information for Palace simulation."""
 
     model_config = ConfigDict(validate_assignment=True)
 
@@ -90,14 +88,15 @@ class Layer(BaseModel):
         }
         if self.sidewall_angle != 0.0:
             d["sidewall_angle"] = self.sidewall_angle
-        if self.part_role is not None:
-            d["part_role"] = self.part_role
-        if self.attached_face_metal_semantic_id is not None:
-            d["attached_face_metal_semantic_id"] = self.attached_face_metal_semantic_id
-        if self.net_id is not None:
-            d["net_id"] = self.net_id
-        if self.equipotential_id is not None:
-            d["equipotential_id"] = self.equipotential_id
+        for key in (
+            "part_role",
+            "attached_face_metal_semantic_id",
+            "net_id",
+            "equipotential_id",
+        ):
+            value = getattr(self, key)
+            if value is not None:
+                d[key] = value
         if self.exclude_from_simulation:
             d["exclude_from_simulation"] = True
         return d
@@ -430,57 +429,25 @@ def extract_layer_stack(
         sidewall_angle = getattr(layer_level, "sidewall_angle", 0.0) or 0.0
         part_role = info.get("part_role")
         if part_role is not None:
-            if not isinstance(part_role, str):
+            if not isinstance(part_role, str) or part_role.strip().lower() not in {
+                "face_metal",
+                "contact_pad",
+                "bump_body",
+            }:
                 raise ValueError(
-                    f"Layer {layer_name!r} provides invalid part_role {part_role!r}. "
-                    "Expected face_metal, contact_pad, or bump_body."
+                    f"Layer {layer_name!r} provides invalid part_role {part_role!r}."
                 )
             part_role = part_role.strip().lower()
-            if part_role not in {"face_metal", "contact_pad", "bump_body"}:
-                raise ValueError(
-                    f"Layer {layer_name!r} provides invalid part_role {part_role!r}. "
-                    "Expected face_metal, contact_pad, or bump_body."
-                )
 
-        attached_face_metal_semantic_id = info.get("attached_face_metal_semantic_id")
-        if attached_face_metal_semantic_id is None:
-            attached_face_metal_semantic_id = None
-        elif isinstance(attached_face_metal_semantic_id, str):
-            attached_face_metal_semantic_id = (
-                attached_face_metal_semantic_id.strip() or None
-            )
-        else:
-            raise ValueError(
-                f"Layer {layer_name!r} provides invalid "
-                "attached_face_metal_semantic_id."
-            )
-        if (
-            "attached_face_metal_semantic_id" in info
-            and not attached_face_metal_semantic_id
-        ):
-            raise ValueError(
-                f"Layer {layer_name!r} provides an empty "
-                "attached_face_metal_semantic_id."
-            )
-
-        raw_net_id = info.get("net_id")
-        if raw_net_id is None:
-            net_id = None
-        elif isinstance(raw_net_id, str) and raw_net_id.strip():
-            net_id = raw_net_id.strip()
-        else:
-            raise ValueError(f"Layer {layer_name!r} provides invalid net_id.")
-
-        raw_equipotential_id = info.get("equipotential_id")
-        if raw_equipotential_id is None:
-            equipotential_id = None
-        elif isinstance(raw_equipotential_id, str) and raw_equipotential_id.strip():
-            equipotential_id = raw_equipotential_id.strip()
-        else:
-            raise ValueError(f"Layer {layer_name!r} provides invalid equipotential_id.")
-
-        raw_exclude_from_simulation = info.get("exclude_from_simulation", False)
-        if type(raw_exclude_from_simulation) is not bool:
+        attached_face_metal_semantic_id = _optional_layer_info_string(
+            info, layer_name, "attached_face_metal_semantic_id"
+        )
+        net_id = _optional_layer_info_string(info, layer_name, "net_id")
+        equipotential_id = _optional_layer_info_string(
+            info, layer_name, "equipotential_id"
+        )
+        exclude_from_simulation = info.get("exclude_from_simulation", False)
+        if type(exclude_from_simulation) is not bool:
             raise ValueError(
                 f"Layer {layer_name!r} provides invalid exclude_from_simulation."
             )
@@ -501,7 +468,7 @@ def extract_layer_stack(
             attached_face_metal_semantic_id=attached_face_metal_semantic_id,
             net_id=net_id,
             equipotential_id=equipotential_id,
-            exclude_from_simulation=raw_exclude_from_simulation,
+            exclude_from_simulation=exclude_from_simulation,
         )
         layer._source_expression = layer_level.layer  # noqa: SLF001
 

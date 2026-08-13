@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -22,7 +21,7 @@ class FakeJob:
     id: str = "job-abc123"
     job_name: str = "palace-abc123"
     job_def_name: str = "prod-palace-simulation"
-    status: SimStatus = SimStatus.COMPLETED
+    status: str | SimStatus = SimStatus.COMPLETED
     exit_code: int | None = 0
     download_urls: dict | None = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -122,6 +121,36 @@ class TestResultParserRegistry:
 
 
 # ---------------------------------------------------------------------------
+# SDK layout compatibility
+# ---------------------------------------------------------------------------
+
+
+class TestSdkLayoutCompatibility:
+    """Tests for SDK helpers that moved between 1.x and 2.x."""
+
+    @patch("gsim.gcloud.sim")
+    def test_get_job_logs_from_sdk_1_module(self, mock_sim):
+        """SDK 1.x exposes the log fetcher directly on sim."""
+        from gsim.gcloud import _get_job_logs_callable
+
+        fetch_logs = MagicMock()
+        mock_sim._get_job_logs = fetch_logs
+
+        assert _get_job_logs_callable() is fetch_logs
+
+    @patch("gsim.gcloud.sim")
+    def test_get_job_logs_from_sdk_2_web_module(self, mock_sim):
+        """SDK 2.x exposes the log fetcher from the nested web module."""
+        from gsim.gcloud import _get_job_logs_callable
+
+        fetch_logs = MagicMock()
+        mock_sim._get_job_logs = None
+        mock_sim.web._get_job_logs = fetch_logs
+
+        assert _get_job_logs_callable() is fetch_logs
+
+
+# ---------------------------------------------------------------------------
 # upload()
 # ---------------------------------------------------------------------------
 
@@ -194,6 +223,15 @@ class TestGetStatus:
         assert status == "running"
         mock_sim.get_job.assert_called_once_with("job-abc")
 
+    @patch("gsim.gcloud.sim")
+    def test_returns_sdk_2_string_status(self, mock_sim):
+        """SDK 2.x string statuses are returned without enum conversion."""
+        from gsim.gcloud import get_status
+
+        mock_sim.get_job.return_value = FakeJob(status="running")
+
+        assert get_status("job-abc") == "running"
+
 
 # ---------------------------------------------------------------------------
 # wait_for_results() — single job
@@ -214,11 +252,6 @@ class TestWaitForResultsSingle:
             job_def_name="prod-palace-simulation",
             status=SimStatus.COMPLETED,
             exit_code=0,
-            started_at=datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
-            finished_at=datetime(2026, 1, 1, 0, 1, 5, tzinfo=UTC),
-            output_size_bytes=4,
-            requested_cpu=4,
-            requested_memory_mb=8192,
         )
         mock_sim.SimStatus = SimStatus
         mock_sim.get_job.return_value = fake_job
@@ -232,29 +265,25 @@ class TestWaitForResultsSingle:
             result = wait_for_results("job-1", verbose="quiet", parent_dir=tmp_path)
             assert result["parsed"] is True
             assert "result.csv" in result["files"]
-            assert "palace_run_metadata.json" in result["files"]
-            metadata = json.loads(
-                result["files"]["palace_run_metadata.json"].read_text()
-            )
-            assert metadata["schema_version"] == 1
-            assert metadata["status"] == "completed"
-            assert metadata["return_code"] == 0
-            assert metadata["elapsed_seconds"] == 65.0
-            assert metadata["launcher"] == {
-                "kind": "gdsfactoryplus_cloud",
-                "solver": "palace",
-                "job_name": "palace-done",
-                "job_definition": "prod-palace-simulation",
-            }
-            assert metadata["resources"] == {
-                "requested_cpu": 4,
-                "requested_memory_mb": 8192,
-            }
-            assert metadata["cloud"]["job_id"] == "job-1"
-            assert metadata["cloud"]["output_size_bytes"] == 4
-            assert metadata["outputs"]["result.csv"]["bytes"] == 4
         finally:
             del _RESULT_PARSERS["palace"]
+
+    @patch("gsim.gcloud.sim")
+    def test_already_completed_with_sdk_2_string_status(self, mock_sim, tmp_path):
+        """SDK 2.x string terminal statuses are recognized."""
+        from gsim.gcloud import wait_for_results
+
+        mock_sim.SimStatus = SimStatus
+        mock_sim.get_job.return_value = FakeJob(
+            job_def_name="unknown", status="completed"
+        )
+        output_file = tmp_path / "result.csv"
+        output_file.write_text("data")
+        mock_sim.download_results.return_value = {"output": output_file}
+
+        result = wait_for_results("job-1", verbose="quiet", parent_dir=tmp_path)
+
+        assert "result.csv" in result.files
 
     @patch("gsim.gcloud.sim")
     def test_list_input(self, mock_sim, tmp_path):
@@ -383,11 +412,7 @@ class TestRunSimulationBackwardCompat:
         mock_sim.start_simulation.return_value = started_job
 
         finished_job = FakeJob(
-            id="job-bc",
-            job_name="palace-bc",
-            status=SimStatus.COMPLETED,
-            started_at=datetime.now(UTC),
-            finished_at=datetime.now(UTC) + timedelta(seconds=3),
+            id="job-bc", job_name="palace-bc", status=SimStatus.COMPLETED
         )
         mock_sim.wait_for_simulation.return_value = finished_job
 
@@ -403,11 +428,6 @@ class TestRunSimulationBackwardCompat:
         )
         assert result.job_name == "palace-bc"
         assert "result.csv" in result.files
-        assert "palace_run_metadata.json" in result.files
-        metadata = json.loads(result.files["palace_run_metadata.json"].read_text())
-        assert metadata["launcher"]["kind"] == "gdsfactoryplus_cloud"
-        assert metadata["launcher"]["solver"] == "palace"
-        assert metadata["elapsed_seconds"] == pytest.approx(3.0)
 
 
 # ---------------------------------------------------------------------------

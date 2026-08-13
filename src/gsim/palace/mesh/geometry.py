@@ -1,15 +1,7 @@
-"""Geometry extraction and Gmsh entity creation for Palace meshes.
+"""Geometry extraction and creation for Palace mesh generation.
 
-This module turns component polygons, dielectric boxes, PEC blocks, generated
-port sheets, and selected authored port sheets into raw Gmsh geometry tags. It
-also delegates layout-authored sheet selection to the sheet helpers when a port
-requests that source.
-
-PDK simulation-layer catalogs and port intent are supplied before this stage.
-Physical group assignment, Palace JSON generation, and result resolution are
-handled by later layers. In the mesh pipeline, this module creates geometry
-after ``mesh.generator`` has gathered inputs and before ``mesh.groups`` assigns
-physical meaning.
+This module handles extracting polygons from gdsfactory components
+and creating 3D geometry in gmsh.
 """
 
 from __future__ import annotations
@@ -17,40 +9,67 @@ from __future__ import annotations
 import contextlib
 import logging
 import math
-from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Literal
 
 from shapely import Polygon as ShapelyPolygon
 from shapely import buffer
 from shapely.ops import unary_union
 
-from gsim.palace.models.ports import PortGeometry, PortType
+from gsim.palace.ports.config import PortType
 
 from . import gmsh_utils
-from .sheets import (
-    AuthoredSheetPolygon,
-    create_authored_sheet_surface,
-    select_authored_sheet_polygon,
-)
 
 if TYPE_CHECKING:
     from gsim.common.stack import LayerStack
-    from gsim.palace.models import ActivatedRegion
     from gsim.palace.models.pec import PECBlockConfig
-    from gsim.palace.models.ports import PalacePort
-    from gsim.palace.models.simulation_layers import SimulationLayerCatalog
+    from gsim.palace.ports.config import PalacePort
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class MetalGeometryResult:
-    """Metal tags plus metadata needed by later mesh stages."""
+def _contains_air_token(name: str | None) -> bool:
+    """Return True when *name* reads as an air/vacuum region name."""
+    if not name:
+        return False
 
-    metal_tags: dict
-    shaped_dielectric_names: set[str]
-    pec_surface_bboxes: dict
+    normalized = name.strip().lower().replace("-", "_")
+    if normalized in {"air", "vacuum"}:
+        return True
+
+    tokens = [tok for tok in normalized.split("_") if tok]
+    return "air" in tokens or "vacuum" in tokens
+
+
+def is_air_like_material(
+    stack: LayerStack,
+    material_name: str,
+    dielectric_name: str | None = None,
+) -> bool:
+    """Return True when a stack material behaves as air/vacuum.
+
+    A material qualifies if it is a dielectric with permittivity 1, or if
+    either the material or region name contains an ``air``/``vacuum`` token.
+    """
+    mat = stack.materials.get(material_name)
+    if isinstance(mat, dict):
+        mat_type = str(mat.get("type", "")).strip().lower()
+        eps = mat.get("permittivity")
+    else:
+        mat_type = str(getattr(mat, "type", "")).strip().lower()
+        eps = getattr(mat, "permittivity", None)
+
+    if mat_type == "dielectric":
+        try:
+            if eps is not None and abs(float(eps) - 1.0) <= 1e-9:
+                return True
+        except (TypeError, ValueError):
+            pass
+
+    if _contains_air_token(material_name):
+        return True
+
+    return _contains_air_token(dielectric_name)
 
 
 @dataclass
@@ -93,7 +112,6 @@ def resolve_dielectric_regions(
     airbox_margin_y: float | None = None,
     airbox_z_above: float | None = None,
     airbox_z_below: float | None = None,
-    activated_regions: Sequence[ActivatedRegion] | None = None,
 ) -> list[DielectricRegion]:
     """Resolve dielectric/airbox regions exactly as the 3D pipeline does.
 
@@ -104,24 +122,14 @@ def resolve_dielectric_regions(
     if margin_y is None:
         margin_y = margin_x
 
-    has_activated_regions = bool(activated_regions)
-    if has_activated_regions:
-        _reject_activated_region_airbox_controls(
-            air_margin=air_margin,
-            airbox_margin_x=airbox_margin_x,
-            airbox_margin_y=airbox_margin_y,
-            airbox_z_above=airbox_z_above,
-            airbox_z_below=airbox_z_below,
-        )
-    else:
-        if airbox_margin_x is None:
-            airbox_margin_x = air_margin
-        if airbox_margin_y is None:
-            airbox_margin_y = air_margin
-        if airbox_z_above is None:
-            airbox_z_above = air_margin
-        if airbox_z_below is None:
-            airbox_z_below = air_margin
+    if airbox_margin_x is None:
+        airbox_margin_x = air_margin
+    if airbox_margin_y is None:
+        airbox_margin_y = air_margin
+    if airbox_z_above is None:
+        airbox_z_above = air_margin
+    if airbox_z_below is None:
+        airbox_z_below = air_margin
 
     xmin0, ymin0, xmax0, ymax0 = geometry.bbox
     xmin_air = xmin0 - margin_x
@@ -129,46 +137,11 @@ def resolve_dielectric_regions(
     xmax_air = xmax0 + margin_x
     ymax_air = ymax0 + margin_y
 
-    def _contains_air_token(name: str | None) -> bool:
-        if not name:
-            return False
-
-        normalized = name.strip().lower().replace("-", "_")
-        if normalized in {"air", "vacuum"}:
-            return True
-
-        tokens = [tok for tok in normalized.split("_") if tok]
-        return "air" in tokens or "vacuum" in tokens
-
-    def _is_air_or_vacuum(
-        material_name: str,
-        dielectric_name: str | None = None,
-    ) -> bool:
-        mat = stack.materials.get(material_name)
-        if isinstance(mat, dict):
-            mat_type = str(mat.get("type", "")).strip().lower()
-            eps = mat.get("permittivity")
-        else:
-            mat_type = str(getattr(mat, "type", "")).strip().lower()
-            eps = getattr(mat, "permittivity", None)
-
-        if mat_type == "dielectric":
-            try:
-                if eps is not None and abs(float(eps) - 1.0) <= 1e-9:
-                    return True
-            except (TypeError, ValueError):
-                pass
-
-        if _contains_air_token(material_name):
-            return True
-
-        return _contains_air_token(dielectric_name)
-
     z_min_all = math.inf
     z_max_all = -math.inf
 
-    use_airbox = not has_activated_regions and any(
-        m is not None and m > 0.0
+    use_airbox = any(
+        m > 0.0
         for m in (
             airbox_margin_x,
             airbox_margin_y,
@@ -177,24 +150,14 @@ def resolve_dielectric_regions(
         )
     )
 
-    activated_dielectrics = _activated_region_dielectrics(
-        geometry, stack, activated_regions
-    )
-    activated_names = {str(dielectric["name"]) for dielectric in activated_dielectrics}
-    dielectric_specs = [
-        dielectric
-        for dielectric in stack.dielectrics
-        if str(dielectric.get("name")) not in activated_names
-    ]
-    dielectric_specs.extend(activated_dielectrics)
-
     regions: list[DielectricRegion] = []
-    for dielectric in dielectric_specs:
+    for dielectric in stack.dielectrics:
         dielectric_name = str(dielectric.get("name", "dielectric"))
         material = str(dielectric["material"])
-        is_activated_region = bool(dielectric.get("activated_region"))
 
-        is_air_like = _is_air_or_vacuum(material, dielectric_name=dielectric_name)
+        is_air_like = is_air_like_material(
+            stack, material, dielectric_name=dielectric_name
+        )
         if is_air_like and use_airbox:
             continue
 
@@ -206,33 +169,15 @@ def resolve_dielectric_regions(
         z_min_all = min(z_min_all, d_zmin)
         z_max_all = max(z_max_all, d_zmax)
 
-        physical_name = dielectric_name if is_activated_region else material
-        if is_activated_region:
-            xmin = float(dielectric["xmin"])
-            ymin = float(dielectric["ymin"])
-            xmax = float(dielectric["xmax"])
-            ymax = float(dielectric["ymax"])
-        else:
-            xmin = xmin_air if is_air_like else xmin0
-            ymin = ymin_air if is_air_like else ymin0
-            xmax = xmax_air if is_air_like else xmax0
-            ymax = ymax_air if is_air_like else ymax0
-
-        layer = stack.layers.get(dielectric_name)
-        is_bulk_substrate = d_zmin <= 1e-6 or (
-            layer is not None and layer.layer_type == "substrate"
-        )
-        if (
-            (is_bulk_substrate or _detect_shaped_dielectric_layers(geometry, stack))
-            and not is_air_like
-            and not is_activated_region
-        ):
-            xmin, ymin, xmax, ymax = xmin_air, ymin_air, xmax_air, ymax_air
+        xmin = xmin_air if is_air_like else xmin0
+        ymin = ymin_air if is_air_like else ymin0
+        xmax = xmax_air if is_air_like else xmax0
+        ymax = ymax_air if is_air_like else ymax0
 
         regions.append(
             DielectricRegion(
                 name=dielectric_name,
-                material=physical_name,
+                material=material,
                 xmin=xmin,
                 ymin=ymin,
                 xmax=xmax,
@@ -278,11 +223,7 @@ def resolve_dielectric_regions(
 
 
 def extract_geometry(
-    component,
-    stack: LayerStack,
-    *,
-    decimate_tolerance: float | None = None,
-    exclude_gds_layers: set[tuple[int, int]] | None = None,
+    component, stack: LayerStack, *, decimate_tolerance: float | None = None
 ) -> GeometryData:
     """Extract polygon geometry from a gdsfactory component.
 
@@ -292,14 +233,11 @@ def extract_geometry(
         decimate_tolerance: If set, simplify polygons with Douglas-Peucker
             using this relative tolerance (passed to ``decimate()``).
             Typical values: 0.001 (conservative) to 0.01 (aggressive).
-        exclude_gds_layers: Full GDS layer/datatype tuples to skip because
-            another mesh input owns them, such as simulation-only solver sheets.
 
     Returns:
         GeometryData with polygons and bounding boxes
     """
     polygons = []
-    excluded_layers = exclude_gds_layers or set()
     global_bbox = [math.inf, math.inf, -math.inf, -math.inf]
     layer_bboxes = {}
 
@@ -333,7 +271,7 @@ def extract_geometry(
     # Build layer_index -> GDS tuple mapping
     layout = component.kcl.layout
     index_to_gds = {}
-    for layer_index in range(layout.layers()):
+    for layer_index in layout.layer_indexes():
         if layout.is_valid_layer(layer_index):
             info = layout.get_info(layer_index)
             index_to_gds[layer_index] = (info.layer, info.datatype)
@@ -348,8 +286,6 @@ def extract_geometry(
     for layer_index, polys in polygons_by_index.items():
         gds_tuple = index_to_gds.get(layer_index)
         if gds_tuple is None:
-            continue
-        if gds_tuple in excluded_layers:
             continue
 
         layernum = gds_to_layernum.get(gds_tuple)
@@ -590,7 +526,7 @@ def add_metals(
     stack: LayerStack,
     planar_conductors: bool = False,
     merge_via_distance: float = 2.0,
-) -> MetalGeometryResult:
+) -> dict:
     """Add metal, via, and shaped-dielectric geometries to gmsh.
 
     Creates extruded volumes for vias and shells (surfaces) for conductors.
@@ -600,10 +536,7 @@ def add_metals(
     vias, but are not hollowed out — they retain their full volume and
     carry dielectric permittivity in the Palace config.
 
-    If planar_conductors is True, conductors are treated as 2D PEC surfaces.
-    Otherwise conductors are extruded only long enough to recover conformal
-    shell surfaces; the temporary conductor volumes are removed before the
-    boolean pipeline.
+    If planar_conductors is True, conductors are treated as 2D surfaces (PEC).
 
     Args:
         kernel: gmsh OCC kernel
@@ -647,7 +580,6 @@ def add_metals(
         layer_type = layer_info["type"]
         zmin = layer_info["zmin"]
         thickness = layer_info["thickness"]
-        zmax = zmin + thickness
         is_shaped_dielectric = layer_name in shaped_dielectric_names
 
         if layer_type not in ("conductor", "via") and not is_shaped_dielectric:
@@ -655,7 +587,7 @@ def add_metals(
 
         # Snap via z-range so it does not sliver into an adjacent conductor
         if layer_type == "via":
-            zmin, zmax = _snap_via_z_range(stack, layer_name, zmin, zmax)
+            zmin, zmax = _snap_via_z_range(stack, layer_name, zmin, zmin + thickness)
             thickness = zmax - zmin
 
         if layer_name not in metal_tags:
@@ -667,11 +599,6 @@ def add_metals(
 
         if is_shaped_dielectric:
             shaped_dielectric_names.add(layer_name)
-
-        min_volume_thickness = 0.05  # um — thinner volumes can't mesh as 3D
-        is_planar = (
-            planar_conductors or thickness == 0 or thickness < min_volume_thickness
-        )
 
         # Merge nearby via polygons before creating gmsh surfaces
         if layer_type == "via":
@@ -688,6 +615,11 @@ def add_metals(
 
         if not surfaces:
             continue
+
+        min_volume_thickness = 0.05  # um — thinner volumes can't mesh as 3D
+        is_planar = (
+            planar_conductors or thickness == 0 or thickness < min_volume_thickness
+        )
 
         if is_shaped_dielectric:
             # Shaped dielectric: extrude as solid 3D volume (like a via)
@@ -856,7 +788,9 @@ def add_metals(
     # (created for planar-conductor refinement) may be merged away.
     # Refresh the refinement line tags so downstream consumers see only
     # valid curves.
-    for tag_info in metal_tags.values():
+    for layer_name, tag_info in metal_tags.items():
+        if layer_name == "__shaped_dielectrics__":
+            continue
         old_line_tags = tag_info.get("refinement_lines", [])
         if not old_line_tags:
             continue
@@ -952,11 +886,19 @@ def add_metals(
     if _conductor_volumes:
         kernel.synchronize()
 
-    return MetalGeometryResult(
-        metal_tags=metal_tags,
-        shaped_dielectric_names=shaped_dielectric_names,
-        pec_surface_bboxes=_pec_surface_bboxes,
-    )
+    # Store shaped-dielectric layer names for downstream classification.
+    # Uses a reserved key that is skipped by consumers iterating per-layer.
+    # TODO: smuggling a set[str] into metal_tags under a reserved key forces a
+    # type-ignore here. Cleaner to return shaped_dielectric_names separately and
+    # update the consumer in classify_* (see metal_tags.get("__shaped_dielectrics__")).
+    metal_tags["__shaped_dielectrics__"] = shaped_dielectric_names  # ty: ignore[invalid-assignment]
+
+    # Store pre-dedup PEC surface bboxes so the boolean pipeline can re-identify
+    # merged planar-conductor surfaces by their geometry.
+    if _pec_surface_bboxes:
+        metal_tags["__pec_surface_bboxes__"] = _pec_surface_bboxes  # type: ignore[invalid-assignment]
+
+    return metal_tags
 
 
 def add_dielectrics(
@@ -970,7 +912,6 @@ def add_dielectrics(
     airbox_margin_y: float | None = None,
     airbox_z_above: float | None = None,
     airbox_z_below: float | None = None,
-    activated_regions: Sequence[ActivatedRegion] | None = None,
 ) -> dict:
     """Add dielectric volumes to gmsh.
 
@@ -996,14 +937,11 @@ def add_dielectrics(
             Falls back to *air_margin* when None.
         airbox_z_below: Extra -z margin for the enclosing airbox (um).
             Falls back to *air_margin* when None.
-        activated_regions: Stack layers explicitly selected as Palace mesh
-            regions. These use the stack layer name as the physical group name.
 
     Returns:
         Dict with material_name -> list of volume_tags
     """
     dielectric_tags: dict[str, list[int]] = {}
-
     regions = resolve_dielectric_regions(
         geometry,
         stack,
@@ -1014,8 +952,8 @@ def add_dielectrics(
         airbox_margin_y=airbox_margin_y,
         airbox_z_above=airbox_z_above,
         airbox_z_below=airbox_z_below,
-        activated_regions=activated_regions,
     )
+
     for region in regions:
         box_tag = gmsh_utils.create_box(
             kernel,
@@ -1033,163 +971,6 @@ def add_dielectrics(
     return dielectric_tags
 
 
-def _activated_region_dielectrics(
-    geometry: GeometryData,
-    stack: LayerStack,
-    activated_regions: Sequence[ActivatedRegion] | None,
-) -> list[dict]:
-    """Return dielectric specs for activated stack-layer regions."""
-    regions = tuple(activated_regions or ())
-    if not regions:
-        return []
-
-    layer_by_region: dict[str, Any] = {}
-    substrate_layers: list[Any] = []
-    for region in regions:
-        layer = stack.layers.get(region.layer)
-        if layer is None:
-            raise ValueError(
-                f"Activated region layer '{region.layer}' is not present in the stack."
-            )
-        if layer.layer_type in {"conductor", "via"}:
-            raise ValueError(
-                f"Activated region layer '{region.layer}' must be a dielectric "
-                "or substrate stack layer."
-            )
-        if region.role == "substrate" and layer.layer_type != "substrate":
-            raise ValueError(
-                f"Activated substrate layer '{region.layer}' must be a substrate "
-                "stack layer."
-            )
-        if region.role in {"inter_die_vacuum", "outer_vacuum"} and (
-            layer.layer_type != "dielectric"
-        ):
-            raise ValueError(
-                f"Activated vacuum layer '{region.layer}' must be a dielectric "
-                "stack layer."
-            )
-        layer_by_region[region.layer] = layer
-        if region.role == "substrate":
-            substrate_layers.append(layer)
-
-    substrate_zmin = min((layer.zmin for layer in substrate_layers), default=None)
-    substrate_zmax = max((layer.zmax for layer in substrate_layers), default=None)
-    substrate_xy_bounds = [
-        _activated_region_xy_bounds(geometry, region)
-        for region in regions
-        if region.role == "substrate"
-    ]
-    substrate_xy = (
-        (
-            min(bounds[0] for bounds in substrate_xy_bounds),
-            min(bounds[1] for bounds in substrate_xy_bounds),
-            max(bounds[2] for bounds in substrate_xy_bounds),
-            max(bounds[3] for bounds in substrate_xy_bounds),
-        )
-        if substrate_xy_bounds
-        else None
-    )
-
-    specs: list[dict] = []
-    for region in regions:
-        layer = layer_by_region[region.layer]
-        if region.role == "outer_vacuum":
-            if substrate_zmin is None or substrate_zmax is None or substrate_xy is None:
-                raise ValueError(
-                    "Activated outer vacuum requires at least one active substrate "
-                    "region."
-                )
-            (
-                substrate_xmin,
-                substrate_ymin,
-                substrate_xmax,
-                substrate_ymax,
-            ) = substrate_xy
-            xmin = substrate_xmin - region.margin_x
-            ymin = substrate_ymin - region.margin_y
-            xmax = substrate_xmax + region.margin_x
-            ymax = substrate_ymax + region.margin_y
-            zmin = substrate_zmin - region.z_below
-            zmax = substrate_zmax + region.z_above
-        else:
-            xmin, ymin, xmax, ymax = _activated_region_xy_bounds(geometry, region)
-            zmin = layer.zmin
-            zmax = layer.zmax
-        if zmax <= zmin:
-            raise ValueError(
-                f"Activated region layer '{region.layer}' has non-positive z extent."
-            )
-        specs.append(
-            {
-                "name": layer.name,
-                "zmin": zmin,
-                "zmax": zmax,
-                "xmin": xmin,
-                "ymin": ymin,
-                "xmax": xmax,
-                "ymax": ymax,
-                "material": region.material or layer.material,
-                "activated_region": True,
-                "activated_region_role": region.role,
-                "die": region.die,
-                "lower_die": region.lower_die,
-                "upper_die": region.upper_die,
-                "margin_x": region.margin_x,
-                "margin_y": region.margin_y,
-                "z_above": region.z_above,
-                "z_below": region.z_below,
-                "material_override": region.material,
-            }
-        )
-    return specs
-
-
-def _activated_region_xy_bounds(
-    geometry: GeometryData,
-    region: ActivatedRegion,
-) -> tuple[float, float, float, float]:
-    """Return XY bounds expanded by one activated region's margins."""
-    xmin0, ymin0, xmax0, ymax0 = geometry.bbox
-    return (
-        xmin0 - region.margin_x,
-        ymin0 - region.margin_y,
-        xmax0 + region.margin_x,
-        ymax0 + region.margin_y,
-    )
-
-
-def _reject_activated_region_airbox_controls(
-    *,
-    air_margin: float,
-    airbox_margin_x: float | None,
-    airbox_margin_y: float | None,
-    airbox_z_above: float | None,
-    airbox_z_below: float | None,
-) -> None:
-    """Reject legacy airbox controls when explicit regions are active."""
-    if air_margin > 0:
-        raise ValueError(
-            "Explicit activated regions cannot be mixed with airbox controls "
-            "(air_margin > 0)."
-        )
-    provided = [
-        name
-        for name, value in (
-            ("airbox_margin_x", airbox_margin_x),
-            ("airbox_margin_y", airbox_margin_y),
-            ("airbox_z_above", airbox_z_above),
-            ("airbox_z_below", airbox_z_below),
-        )
-        if value is not None
-    ]
-    if provided:
-        names = ", ".join(provided)
-        raise ValueError(
-            "Explicit activated regions cannot be mixed with airbox controls "
-            f"({names})."
-        )
-
-
 def resolve_mesh_domain_bounds(
     geometry: GeometryData,
     stack: LayerStack,
@@ -1201,29 +982,10 @@ def resolve_mesh_domain_bounds(
     airbox_margin_y: float | None = None,
     airbox_z_above: float | None = None,
     airbox_z_below: float | None = None,
-    activated_regions: Sequence[ActivatedRegion] | None = None,
 ) -> tuple[float, float, float, float, float, float]:
     """Resolve outer mesh-domain bounds (including explicit airbox when used)."""
     if margin_y is None:
         margin_y = margin_x
-
-    if activated_regions:
-        _reject_activated_region_airbox_controls(
-            air_margin=air_margin,
-            airbox_margin_x=airbox_margin_x,
-            airbox_margin_y=airbox_margin_y,
-            airbox_z_above=airbox_z_above,
-            airbox_z_below=airbox_z_below,
-        )
-        specs = _activated_region_dielectrics(geometry, stack, activated_regions)
-        return (
-            min(spec["xmin"] for spec in specs),
-            min(spec["ymin"] for spec in specs),
-            min(spec["zmin"] for spec in specs),
-            max(spec["xmax"] for spec in specs),
-            max(spec["ymax"] for spec in specs),
-            max(spec["zmax"] for spec in specs),
-        )
 
     if airbox_margin_x is None:
         airbox_margin_x = air_margin
@@ -1320,9 +1082,11 @@ def add_patterned_dielectrics(
     patterned_tags: dict[str, list[int]] = {}
     curve_layers = set(curve_fit_layers or [])
 
-    # Shaped dielectric layers are already extruded by ``add_metals``.
-    # Re-extruding them here would create overlapping volumes with duplicate
-    # ``Entity`` names, which collide in the boolean/physical-group pipeline.
+    # Shaped dielectric layers are already extruded by ``add_metals`` and
+    # tracked via ``metal_tags["__shaped_dielectrics__"]``. Re-extruding them
+    # here would create overlapping volumes with duplicate ``Entity`` names,
+    # which collide in ``build_entities`` / ``assign_physical_groups`` and
+    # cause the layer to drop out of ``groups["volumes"]``.
     shaped_dielectric_names = _detect_shaped_dielectric_layers(geometry, stack)
 
     polygons_by_layer: dict[int, list[tuple[list[float], list[float], list]]] = {}
@@ -1420,7 +1184,7 @@ def extract_pec_polygons(component, gds_layer: tuple[int, int]) -> list:
 
     layout = component.kcl.layout
     index_to_gds = {}
-    for layer_index in range(layout.layers()):
+    for layer_index in layout.layer_indexes():
         if layout.is_valid_layer(layer_index):
             info = layout.get_info(layer_index)
             index_to_gds[layer_index] = (info.layer, info.datatype)
@@ -1553,8 +1317,6 @@ def build_entities(
     port_info: list,
     pec_block_tags: dict | None = None,
     stack: LayerStack | None = None,
-    activated_regions: Sequence[ActivatedRegion] | None = None,
-    shaped_dielectric_names: set[str] | None = None,
 ) -> list[gmsh_utils.Entity]:
     """Convert geometry tag dicts into Entity objects for the boolean pipeline.
 
@@ -1574,7 +1336,6 @@ def build_entities(
         pec_block_tags: from ``add_pec_blocks()``, optional
         stack: LayerStack for distinguishing via vs conductor vs shaped
             dielectric layers
-        activated_regions: Explicit region roles from the public simulation API.
 
     Returns:
         List of Entity objects ready for ``run_boolean_pipeline()``.
@@ -1584,19 +1345,20 @@ def build_entities(
 
     # Build set of via and shaped-dielectric layer names for quick lookup
     via_layers: set[str] = set()
-    shaped_dielectric_layers = set(shaped_dielectric_names or ())
+    shaped_dielectric_layers: set[str] = set()
     if stack:
         via_layers = {
             n for n, layer in stack.layers.items() if layer.layer_type == "via"
         }
-    outer_vacuum_layers = {
-        region.layer
-        for region in activated_regions or ()
-        if region.role == "outer_vacuum"
-    }
+    _shaped_meta = metal_tags.get("__shaped_dielectrics__")
+    if isinstance(_shaped_meta, set):
+        shaped_dielectric_layers = _shaped_meta
 
     # --- Conductors, vias, and shaped dielectrics ---
     for layer_name, tag_info in metal_tags.items():
+        if layer_name.startswith("__") and layer_name.endswith("__"):
+            continue
+
         is_via = layer_name in via_layers
         is_shaped_dielectric = layer_name in shaped_dielectric_layers
 
@@ -1606,26 +1368,14 @@ def build_entities(
             # are processed first and survive boolean cuts against conductor
             # shell surfaces that sit at the same z-height.
             pec_mesh_order = -1 if is_via else 0
-            surface_tags = tag_info["surfaces_xy"]
-            if len(surface_tags) == 1:
-                entities.append(
-                    Entity(
-                        name=f"{layer_name}_pec",
-                        dim=2,
-                        mesh_order=pec_mesh_order,
-                        tags=surface_tags,
-                    )
+            entities.append(
+                Entity(
+                    name=f"{layer_name}_pec",
+                    dim=2,
+                    mesh_order=pec_mesh_order,
+                    tags=tag_info["surfaces_xy"],
                 )
-            else:
-                for index, surface_tag in enumerate(surface_tags):
-                    entities.append(
-                        Entity(
-                            name=f"{layer_name}_pec_{index}",
-                            dim=2,
-                            mesh_order=pec_mesh_order,
-                            tags=[surface_tag],
-                        )
-                    )
+            )
 
         if tag_info.get("volumes"):
             if is_via:
@@ -1658,39 +1408,35 @@ def build_entities(
                         )
                     )
             else:
-                shell_tags = []
+                # Volumetric conductors: shell surfaces (volume already removed)
+                xy_tags = []
+                z_tags = []
                 for item in tag_info["volumes"]:
-                    if not isinstance(item, tuple):
-                        continue
-                    _volumetag, surface_tags = item
-                    surface_tags = list(surface_tags)
-                    shell_tags.extend(surface_tags)
-                if shell_tags:
-                    xy_tags = []
-                    z_tags = []
-                    for tag in shell_tags:
-                        if gmsh_utils.is_vertical_surface(tag):
-                            z_tags.append(tag)
-                        else:
-                            xy_tags.append(tag)
-                    if xy_tags:
-                        entities.append(
-                            Entity(
-                                name=f"{layer_name}_xy",
-                                dim=2,
-                                mesh_order=0,
-                                tags=xy_tags,
-                            )
+                    if isinstance(item, tuple):
+                        _volumetag, surface_tags = item
+                        for tag in surface_tags:
+                            if gmsh_utils.is_vertical_surface(tag):
+                                z_tags.append(tag)
+                            else:
+                                xy_tags.append(tag)
+                if xy_tags:
+                    entities.append(
+                        Entity(
+                            name=f"{layer_name}_xy",
+                            dim=2,
+                            mesh_order=0,
+                            tags=xy_tags,
                         )
-                    if z_tags:
-                        entities.append(
-                            Entity(
-                                name=f"{layer_name}_z",
-                                dim=2,
-                                mesh_order=0,
-                                tags=z_tags,
-                            )
+                    )
+                if z_tags:
+                    entities.append(
+                        Entity(
+                            name=f"{layer_name}_z",
+                            dim=2,
+                            mesh_order=0,
+                            tags=z_tags,
                         )
+                    )
 
     # --- PEC block surfaces (dim=2, highest priority) ---
     if pec_block_tags:
@@ -1761,7 +1507,7 @@ def build_entities(
         entity_name = "air" if material == "airbox" else str(material)
         if entity_name in patterned_names:
             continue
-        order = 4 if entity_name == "air" or entity_name in outer_vacuum_layers else 3
+        order = 4 if entity_name == "air" else 3
         entities.append(
             Entity(
                 name=entity_name,
@@ -1774,95 +1520,12 @@ def build_entities(
     return entities
 
 
-def _direction_to_list(
-    direction: tuple[float, float, float] | list[float],
-) -> list[float]:
-    """Return a JSON-ready copy of a normalized Palace direction vector."""
-    return [float(component) for component in direction]
-
-
-def _orientation_basis(
-    orientation: float | None,
-) -> tuple[tuple[float, float], tuple[float, float]]:
-    """Return longitudinal and transverse unit vectors from port orientation."""
-    angle = math.radians(float(orientation) if orientation is not None else 0.0)
-    longitudinal = (math.cos(angle), math.sin(angle))
-    transverse = (-math.sin(angle), math.cos(angle))
-    return longitudinal, transverse
-
-
-def _horizontal_port_corners(
-    *,
-    center: tuple[float, float],
-    length: float,
-    width: float,
-    orientation: float | None,
-) -> list[tuple[float, float]]:
-    """Build the XY corners of a generated in-plane port sheet."""
-    longitudinal, transverse = _orientation_basis(orientation)
-    cx, cy = center
-    half_length = length / 2
-    half_width = width / 2
-
-    offsets = (
-        (-half_length, -half_width),
-        (half_length, -half_width),
-        (half_length, half_width),
-        (-half_length, half_width),
-    )
-    return [
-        (
-            cx + longitudinal[0] * lscale + transverse[0] * wscale,
-            cy + longitudinal[1] * lscale + transverse[1] * wscale,
-        )
-        for lscale, wscale in offsets
-    ]
-
-
-def _horizontal_port_bbox(
-    corners: list[tuple[float, float]],
-) -> tuple[float, float, float, float]:
-    """Return the axis-aligned XY bounds of horizontal port corners."""
-    xs = [corner[0] for corner in corners]
-    ys = [corner[1] for corner in corners]
-    return min(xs), min(ys), max(xs), max(ys)
-
-
-def _create_horizontal_port_sheet(
-    kernel,
-    *,
-    center: tuple[float, float],
-    length: float,
-    width: float,
-    orientation: float | None,
-    z: float,
-) -> tuple[int | None, list[tuple[float, float]]]:
-    """Create an in-plane port sheet whose geometry follows port orientation."""
-    corners = _horizontal_port_corners(
-        center=center,
-        length=length,
-        width=width,
-        orientation=orientation,
-    )
-    surfacetag = gmsh_utils.create_polygon_surface(
-        kernel,
-        [corner[0] for corner in corners],
-        [corner[1] for corner in corners],
-        z,
-    )
-    return surfacetag, corners
-
-
 def add_ports(
     kernel,
     ports: list[PalacePort],
     stack: LayerStack,
     domain_bbox: tuple[float, float, float, float] | None = None,
     domain_bounds: tuple[float, float, float, float, float, float] | None = None,
-    simulation_layers: SimulationLayerCatalog | None = None,
-    authored_sheet_polygons: (
-        dict[tuple[int, int], list[AuthoredSheetPolygon]] | None
-    ) = None,
 ) -> tuple[dict, list]:
     """Add port surfaces to gmsh.
 
@@ -1876,10 +1539,6 @@ def add_ports(
         domain_bounds: (xmin, ymin, zmin, xmax, ymax, zmax) of the outer
             simulation domain. When provided, ``max_size=True`` waveports
             are clipped to this exact 3D domain envelope.
-        simulation_layers: PDK-declared simulation-only layer catalog used when
-            a port requests layout-authored sheets.
-        authored_sheet_polygons: Polygons extracted from registered simulation
-            layers, keyed by full GDS layer tuple.
 
     Returns:
         (port_tags dict, port_info list)
@@ -1887,10 +1546,11 @@ def add_ports(
     For single-element ports: port_tags["P{num}"] = [surface_tag]
     For multi-element ports: port_tags["P{num}"] = [surface_tag, surface_tag, ...]
     """
+    from gsim.palace.ports.config import PortGeometry
+
     port_tags = {}  # "P{num}" -> [surface_tag(s)]
     port_info = []
     port_num = 1
-    authored_polygons = authored_sheet_polygons or {}
 
     for port in ports:
         if port.multi_element:
@@ -1902,76 +1562,24 @@ def add_ports(
                 continue
 
             zmin = target_layer.zmin
-            sheet_length = port.length or port.width
-            sheet_layer = None
-            if not port.generate_sheet:
-                if simulation_layers is None:
-                    raise ValueError(
-                        f"CPW port '{port.name}' requested authored sheets; call "
-                        "set_simulation_layers() before meshing."
-                    )
-                if port.sheet_gds_layer is None:
-                    raise ValueError(
-                        f"CPW port '{port.name}' requested authored sheets, but its "
-                        "gdsfactory port layer was not recorded."
-                    )
-                sheet_gds_layer = port.sheet_gds_layer
-                sheet_layer = simulation_layers.for_gds_layer(sheet_gds_layer)
-                if sheet_layer is None:
-                    raise ValueError(
-                        f"CPW port '{port.name}' uses GDS layer "
-                        f"{sheet_gds_layer}, which is not registered as a "
-                        "simulation solver sheet layer."
-                    )
-                zmin = sheet_layer.resolve_z(stack)
+            hw = port.width / 2
+            hl = (port.length or port.width) / 2
+
+            # Determine axis from orientation
+            angle = port.orientation % 360
+            is_y_axis = 45 <= angle < 135 or 225 <= angle < 315
 
             surfaces = []
-            elements = []
-            for (cx, cy), direction in zip(port.centers, port.directions, strict=True):
-                if port.generate_sheet:
-                    surf, corners = _create_horizontal_port_sheet(
-                        kernel,
-                        center=(cx, cy),
-                        length=sheet_length,
-                        width=port.width,
-                        orientation=port.orientation,
-                        z=zmin,
+            for cx, cy in port.centers:
+                if is_y_axis:
+                    surf = gmsh_utils.create_port_rectangle(
+                        kernel, cx - hw, cy - hl, zmin, cx + hw, cy + hl, zmin
                     )
-                    element_metadata: dict[str, object] = {"corners": corners}
                 else:
-                    sheet_gds_layer = port.sheet_gds_layer
-                    if sheet_gds_layer is None:
-                        raise ValueError(
-                            f"CPW port '{port.name}' requested authored sheets, but "
-                            "its gdsfactory port layer was not recorded."
-                        )
-                    polygon = select_authored_sheet_polygon(
-                        authored_polygons,
-                        gds_layer=sheet_gds_layer,
-                        center=(cx, cy),
-                        port_name=port.name,
+                    surf = gmsh_utils.create_port_rectangle(
+                        kernel, cx - hl, cy - hw, zmin, cx + hl, cy + hw, zmin
                     )
-                    surf = create_authored_sheet_surface(kernel, polygon, z=zmin)
-                    element_metadata = {
-                        "bbox": polygon.bbox,
-                        "sheet_source": "layout-authored",
-                        "sheet_layer": sheet_layer.name if sheet_layer else None,
-                        "sheet_gds_layer": list(polygon.gds_layer),
-                    }
-                if surf is None:
-                    continue
-                surface_idx = len(surfaces)
                 surfaces.append(surf)
-                elements.append(
-                    {
-                        "surface_idx": surface_idx,
-                        "direction": _direction_to_list(direction),
-                        **element_metadata,
-                    }
-                )
-
-            if not surfaces:
-                continue
 
             port_tags[f"P{port_num}"] = surfaces
 
@@ -1981,15 +1589,14 @@ def add_ports(
                     "name": port.name,
                     "Z0": port.impedance,
                     "type": "cpw",
-                    "elements": elements,
+                    "elements": [
+                        {"surface_idx": i, "direction": port.directions[i]}
+                        for i in range(len(port.centers))
+                    ],
                     "width": port.width,
-                    "length": sheet_length,
-                    "orientation": port.orientation,
+                    "length": port.length or port.width,
                     "zmin": zmin,
                     "zmax": zmin,
-                    "sheet_source": "generated"
-                    if port.generate_sheet
-                    else "layout-authored",
                 }
             )
 
@@ -2013,9 +1620,7 @@ def add_ports(
                 zmax = from_layer.zmin
 
             # Create vertical port surface
-            angle = port.orientation % 360
-            is_y_axis = 45 <= angle < 135 or 225 <= angle < 315
-            if not is_y_axis:
+            if port.direction in ("x", "-x"):
                 surfacetag = gmsh_utils.create_port_rectangle(
                     kernel, x, y - hw, zmin, x, y + hw, zmax
                 )
@@ -2024,11 +1629,6 @@ def add_ports(
                     kernel, x - hw, y, zmin, x + hw, y, zmax
                 )
 
-            direction = port.direction
-            if direction is None:
-                raise ValueError(
-                    f"Via port '{port.name}' is missing direction metadata"
-                )
             port_tags[f"P{port_num}"] = [surfacetag]
             port_info.append(
                 {
@@ -2036,13 +1636,13 @@ def add_ports(
                     "name": port.name,
                     "Z0": port.impedance,
                     "type": "via",
-                    "direction": _direction_to_list(direction),
+                    "direction": "Z",
                     "length": zmax - zmin,
                     "width": port.width,
-                    "xmin": x if not is_y_axis else x - hw,
-                    "xmax": x if not is_y_axis else x + hw,
-                    "ymin": y - hw if not is_y_axis else y,
-                    "ymax": y + hw if not is_y_axis else y,
+                    "xmin": x - hw if port.direction in ("y", "-y") else x,
+                    "xmax": x + hw if port.direction in ("y", "-y") else x,
+                    "ymin": y - hw if port.direction in ("x", "-x") else y,
+                    "ymax": y + hw if port.direction in ("x", "-x") else y,
                     "zmin": zmin,
                     "zmax": zmax,
                 }
@@ -2062,65 +1662,20 @@ def add_ports(
             zmax = target_layer.zmax
 
             if port.port_type == PortType.LUMPED:
-                length = port.length or port.width
-                width = port.width
-                sheet_layer = None
-                if port.generate_sheet:
-                    surfacetag, corners = _create_horizontal_port_sheet(
-                        kernel,
-                        center=(x, y),
-                        length=length,
-                        width=width,
-                        orientation=port.orientation,
-                        z=zmin,
+                hl = (port.length or port.width) / 2
+                if port.direction in ("x", "-x"):
+                    surfacetag = gmsh_utils.create_port_rectangle(
+                        kernel, x - hl, y - hw, zmin, x + hl, y + hw, zmin
                     )
-                    xmin, ymin, xmax, ymax = _horizontal_port_bbox(corners)
-                    sheet_metadata: dict[str, object] = {
-                        "corners": corners,
-                        "sheet_source": "generated",
-                    }
+                    length = 2 * hl
+                    width = port.width
                 else:
-                    if simulation_layers is None:
-                        raise ValueError(
-                            f"Port '{port.name}' requested an authored sheet; call "
-                            "set_simulation_layers() before meshing."
-                        )
-                    if port.sheet_gds_layer is None:
-                        raise ValueError(
-                            f"Port '{port.name}' requested an authored sheet, but "
-                            "its gdsfactory port layer was not recorded."
-                        )
-                    sheet_gds_layer = port.sheet_gds_layer
-                    sheet_layer = simulation_layers.for_gds_layer(sheet_gds_layer)
-                    if sheet_layer is None:
-                        raise ValueError(
-                            f"Port '{port.name}' uses GDS layer "
-                            f"{sheet_gds_layer}, which is not registered as a "
-                            "simulation solver sheet layer."
-                        )
-                    zmin = sheet_layer.resolve_z(stack)
-                    polygon = select_authored_sheet_polygon(
-                        authored_polygons,
-                        gds_layer=sheet_gds_layer,
-                        center=(x, y),
-                        port_name=port.name,
+                    surfacetag = gmsh_utils.create_port_rectangle(
+                        kernel, x - hw, y - hl, zmin, x + hw, y + hl, zmin
                     )
-                    surfacetag = create_authored_sheet_surface(kernel, polygon, z=zmin)
-                    xmin, ymin, xmax, ymax = polygon.bbox
-                    sheet_metadata = {
-                        "bbox": polygon.bbox,
-                        "sheet_source": "layout-authored",
-                        "sheet_layer": sheet_layer.name,
-                        "sheet_gds_layer": list(polygon.gds_layer),
-                    }
-                if surfacetag is None:
-                    continue
+                    length = port.width
+                    width = 2 * hl
 
-                direction = port.direction
-                if direction is None:
-                    raise ValueError(
-                        f"Lumped port '{port.name}' is missing direction metadata"
-                    )
                 port_tags[f"P{port_num}"] = [surfacetag]
                 port_info.append(
                     {
@@ -2128,17 +1683,15 @@ def add_ports(
                         "name": port.name,
                         "Z0": port.impedance,
                         "type": "lumped",
-                        "direction": _direction_to_list(direction),
+                        "direction": port.direction.upper(),
                         "length": length,
                         "width": width,
-                        "orientation": port.orientation,
-                        "xmin": xmin,
-                        "xmax": xmax,
-                        "ymin": ymin,
-                        "ymax": ymax,
+                        "xmin": x - hl if port.direction in ("x", "-x") else x - hw,
+                        "xmax": x + hl if port.direction in ("x", "-x") else x + hw,
+                        "ymin": y - hw if port.direction in ("x", "-x") else y - hl,
+                        "ymax": y + hw if port.direction in ("x", "-x") else y + hl,
                         "zmin": zmin,
                         "zmax": zmin,
-                        **sheet_metadata,
                     }
                 )
             else:
@@ -2234,7 +1787,6 @@ def add_ports(
 
 __all__ = [
     "GeometryData",
-    "MetalGeometryResult",
     "add_dielectrics",
     "add_metals",
     "add_pec_blocks",

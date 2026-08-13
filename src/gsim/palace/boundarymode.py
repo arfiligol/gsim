@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from pathlib import Path
+from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
-from gsim.palace.base import PalaceSimBase
+from gsim.common import Geometry, LayerStack
+from gsim.palace.base import PalaceSimMixin
 from gsim.palace.models import (
     BoundaryModeConfig,
     CPWPortConfig,
     CrossSectionPlaneConfig,
+    MaterialConfig,
     MeshConfig,
+    NumericalConfig,
     PortConfig,
     TerminalConfig,
     WavePortConfig,
@@ -19,14 +23,23 @@ from gsim.palace.models import (
 from gsim.palace.models.results import ValidationResult
 
 
-class BoundaryModeSim(PalaceSimBase):
+class BoundaryModeSim(PalaceSimMixin, BaseModel):
     """Boundary mode simulation for 2D waveguide cross-section analysis.
 
     This class configures Palace ``BoundaryMode`` simulations used to compute
     propagation constants and mode profiles on a cross-section plane.
     """
 
+    model_config = ConfigDict(
+        validate_assignment=True,
+        arbitrary_types_allowed=True,
+    )
+
     simulation_type: Literal["boundarymode"] = "boundarymode"
+
+    # Composed objects
+    geometry: Geometry | None = None
+    stack: LayerStack | None = None
 
     # Boundary mode config
     boundary_mode: BoundaryModeConfig = Field(default_factory=BoundaryModeConfig)
@@ -42,7 +55,23 @@ class BoundaryModeSim(PalaceSimBase):
 
     # Mesh and solver config
     mesh_config: MeshConfig = Field(default_factory=MeshConfig.default)
+    materials: dict[str, MaterialConfig] = Field(default_factory=dict)
+    numerical: NumericalConfig = Field(default_factory=NumericalConfig)
     absorbing_boundary: bool = False
+
+    # Stack configuration (stored as kwargs until resolved)
+    _stack_kwargs: dict[str, Any] = PrivateAttr(default_factory=dict)
+    _pec_blocks: list = PrivateAttr(default_factory=list)
+    _hints: dict[str, Any] = PrivateAttr(default_factory=dict)
+    _airbox_config: dict[str, float] = PrivateAttr(default_factory=dict)
+
+    # Internal state
+    _output_dir: Path | None = PrivateAttr(default=None)
+    _last_mesh_result: Any = PrivateAttr(default=None)
+    _last_ports: list = PrivateAttr(default_factory=list)
+
+    # Cloud job state
+    _job_id: str | None = PrivateAttr(default=None)
 
     def set_boundary_mode(
         self,

@@ -7,7 +7,12 @@ concurrency:
   cancel-in-progress: true
 jobs:
   claude-review:
-    if: github.event.pull_request.user.login != 'dependabot[bot]'
+    # Skip on PRs from forks: secrets (including ANTHROPIC_API_KEY) are not
+    # exposed to fork workflows, so the action can only fail. Deliberately not
+    # switched to pull_request_target -- that would hand the repo secrets and a
+    # write-scoped token to a run that checks out untrusted PR code.
+    if: >-
+      github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     permissions:
       contents: read

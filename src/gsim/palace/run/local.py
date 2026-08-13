@@ -146,6 +146,7 @@ def write_local_run_metadata(
     *,
     output_dir: Path,
     postpro_dir: Path,
+    mesh_path: Path,
     cmd: list[str],
     elapsed_seconds: float,
     returncode: int,
@@ -204,7 +205,7 @@ def write_local_run_metadata(
         },
         "paths": {
             "config": "config.json",
-            "mesh": "palace.msh",
+            "mesh": relative_to_run_folder(mesh_path, output_dir),
             "postprocessing_output": relative_to_run_folder(
                 postpro_dir,
                 output_dir,
@@ -349,7 +350,7 @@ def run_palace_local(
                 )
             resolved_exe_path = Path(resolved)
         else:
-            resolved_exe_path = exe_path
+            resolved_exe_path = exe_path.resolve()
 
         if executable_mode == "binary":
             if num_processes != 1:
@@ -467,7 +468,7 @@ def run_palace_local(
                 text=True,
                 env=run_env,
             )
-            returncode = result.returncode
+            returncode = getattr(result, "returncode", 0)
             if result.stdout:
                 logger.debug(result.stdout)
             if result.stderr:
@@ -519,6 +520,7 @@ def run_palace_local(
     write_local_run_metadata(
         output_dir=output_path,
         postpro_dir=postpro_dir,
+        mesh_path=mesh_path,
         cmd=cmd,
         elapsed_seconds=elapsed_seconds,
         returncode=0 if returncode is None else returncode,

@@ -730,7 +730,15 @@ def write_palace_slurm_sbatch_handoff(
     run_dir = Path(source)
     if run_dir.suffix:
         raise ValueError("source must be a run directory")
-    run_dir = prepare_palace_run_folder(run_dir).root
+    run_folder = prepare_palace_run_folder(run_dir)
+    run_dir = run_folder.root
+    configured_mesh_path = run_folder.mesh_path
+    configured_mesh = configured_mesh_path.relative_to(run_dir).as_posix()
+    if spec.mesh_path not in {"palace.msh", configured_mesh}:
+        raise ValueError(
+            "PalaceSlurmSbatchSpec.mesh_path conflicts with config Model.Mesh"
+        )
+    spec = replace(spec, mesh_path=configured_mesh)
     _validate_relative_path("script_path", str(script_path))
     output_script_path = run_dir / script_path
     if validate_inputs:
@@ -922,6 +930,7 @@ def write_palace_run_handoff_archive_manifest(
         run_dir,
         include_results=include_results,
         include_hashes=include_hashes,
+        excluded_paths=(output_manifest_path,),
     )
     payload = _archive_manifest_payload(
         source_kind="run",
@@ -1657,74 +1666,58 @@ def _run_archive_manifest_entries_from_folder(
     include_hashes: bool,
     manifest_root: Path | None = None,
     point_slug: str | None = None,
+    excluded_paths: Sequence[Path] = (),
 ) -> list[dict[str, Any]]:
-    """Collect archive-manifest entries directly from a run-folder layout."""
+    """Collect every file the run-handoff archive includes, except exclusions."""
     files: list[dict[str, Any]] = []
     entry_root = root if manifest_root is None else manifest_root
-    _append_manifest_entry(
-        files,
-        entry_root,
-        root / "config.json",
-        role="core_artifact",
-        name="config.json",
-        include_hashes=include_hashes,
-        point_slug=point_slug,
-    )
-    _append_manifest_entry(
-        files,
-        entry_root,
-        root / "palace.msh",
-        role="core_artifact",
-        name="palace.msh",
-        include_hashes=include_hashes,
-        point_slug=point_slug,
-    )
-    if include_results:
-        for path in sorted((root / "results" / "palace").glob("*")):
-            if path.is_file() and not path.name.startswith("."):
-                _append_manifest_entry(
-                    files,
-                    entry_root,
-                    path,
-                    role="result_artifact",
-                    name=path.name,
-                    include_hashes=include_hashes,
-                    point_slug=point_slug,
-                )
-    handoff_path = _existing_handoff_metadata_path(root, "palace_handoff_metadata.json")
-    if handoff_path is not None:
+    excluded = {path.resolve() for path in excluded_paths}
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.resolve() in excluded:
+            continue
+        relative = path.relative_to(root)
+        if not _include_run_handoff_relative_path(
+            relative, include_results=include_results
+        ):
+            continue
         _append_manifest_entry(
             files,
             entry_root,
-            handoff_path,
-            role="handoff_metadata",
-            name=handoff_path.name,
+            path,
+            role=_run_handoff_artifact_role(relative),
+            name=relative.as_posix(),
             include_hashes=include_hashes,
             point_slug=point_slug,
         )
-        handoff = _read_json_mapping(handoff_path)
-        _extend_handoff_reference_entries(
-            files,
-            entry_root,
-            {
-                "present": True,
-                "path": handoff_path,
-                **handoff,
-            },
-            include_hashes=include_hashes,
-            point_slug=point_slug,
-        )
-    runtime_path = root / "metadata" / "palace_run_metadata.json"
-    _append_manifest_entry(
-        files,
-        entry_root,
-        runtime_path,
-        role="runtime_metadata",
-        name=runtime_path.name,
-        include_hashes=include_hashes,
-        point_slug=point_slug,
+    return files
+
+
+def _include_run_handoff_relative_path(
+    relative_path: Path,
+    *,
+    include_results: bool,
+) -> bool:
+    """Return whether a run-relative file belongs in a handoff archive."""
+    parts = relative_path.parts
+    if not parts:
+        return True
+    return include_results or not (
+        parts[0] == "logs" or (len(parts) > 1 and parts[:2] == ("results", "palace"))
     )
-    return _deduplicate_manifest_entries(files)
+
+
+def _run_handoff_artifact_role(relative_path: Path) -> str:
+    """Classify one archived file without deciding archive membership."""
+    parts = relative_path.parts
+    if parts[:2] == ("results", "palace"):
+        return "result_artifact"
+    if parts and parts[0] == "metadata":
+        return "metadata_artifact"
+    if parts and parts[0] == "geometry":
+        return "geometry_artifact"
+    if relative_path.name == "config.json" or relative_path.suffix == ".msh":
+        return "core_artifact"
+    return "handoff_artifact"
 
 
 def _run_archive_manifest_entries(
@@ -1931,19 +1924,15 @@ def _filter_run_handoff_tarinfo(
     include_results: bool,
 ) -> tarfile.TarInfo | None:
     """Exclude result and log members when a compact archive is requested."""
-    if include_results:
-        return info
     parts = Path(info.name).parts
     relative_parts = parts[1:] if parts and parts[0] == archive_root_name else parts
-    if len(relative_parts) > 1 and relative_parts[0] == "logs":
-        return None
-    if (
-        len(relative_parts) > 2
-        and relative_parts[0] == "results"
-        and relative_parts[1] == "palace"
-    ):
-        return None
-    return info
+    return (
+        info
+        if _include_run_handoff_relative_path(
+            Path(*relative_parts), include_results=include_results
+        )
+        else None
+    )
 
 
 def _archive_manifest_payload(
