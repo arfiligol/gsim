@@ -7,14 +7,23 @@ they explicitly request Surface EPR route A/B/C geometry or pass an existing SGB
 XAO plus ``metadata/semantic_geometry`` sidecar directory.
 
 The ownership split is contract-first. SGB owns route topology, physical-group
-plans, XAO export, and semantic sidecars. Today the interface ownership contract
-for Route A/B is encoded in structured final physical-group fields; display
-names are never used to recover conductor ownership or boundary semantics.
-Explicit Route C remains on its pre-existing physical-name parser. gsim owns
-mesh generation from that exported contract, Palace config generation, mesh
-manifests, and downstream result/report semantics. This adapter validates that
-the expected SGB files are present and fails loudly when the optional contract
-is unavailable or incomplete.
+plans, XAO export, and semantic sidecars. Route A/B structured final physical-
+group fields preserve exact surface, interface, face, ownership, adjacency,
+conductor-component, net, and provenance authority; names are display-only.
+Same-net direct metal-metal contacts are hidden topology/provenance that join
+one conductor component, not independent loss surfaces. Route A uses
+zero-thickness face-metal PEC sheets with finite bump shells. Route B mirrors
+HFSS-style PEC assignment to faces of a finite construction metal volume: its
+closed exterior boundary shell is PEC and its interior is excluded from Palace
+solution domains and tetrahedra.
+
+Explicit Route C remains on its pre-existing physical-name parser and is out
+of this active path's scope. Typed physical roles are future-compatible with
+retained conductor material volumes, but this adapter neither activates nor
+implements Route C. gsim owns mesh generation from the exported contract,
+Palace config generation, mesh manifests, and downstream result/report
+semantics. This adapter validates that the expected SGB files are present and
+fails loudly when the optional contract is unavailable or incomplete.
 """
 
 from __future__ import annotations
