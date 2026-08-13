@@ -11,6 +11,7 @@ this module maps their finalized groups into Palace config artifacts.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from copy import deepcopy
 from pathlib import Path
@@ -293,6 +294,7 @@ def generate_palace_config(
     materials_by_lower = {
         str(name).lower().strip(): props for name, props in stack_materials.items()
     }
+    is_electrostatic = simulation_type in ("electrostatic", "electrostatics")
 
     def lookup_material(name: str) -> dict[str, Any]:
         direct = stack_materials.get(name)
@@ -349,7 +351,7 @@ def generate_palace_config(
         elif is_via:
             sigma = mat_props.get("conductivity", 0.0)
             mat_entry["Permittivity"] = 1.0
-            if isinstance(sigma, (int, float)) and sigma > 0:
+            if not is_electrostatic and isinstance(sigma, (int, float)) and sigma > 0:
                 mat_entry["Conductivity"] = sigma
         elif is_shaped_dielectric:
             perm = mat_props.get("permittivity", 1.0)
@@ -375,8 +377,9 @@ def generate_palace_config(
 
             sigma = mat_props.get("conductivity", 0.0)
             lt = mat_props.get("loss_tangent", 0.0)
-            if (isinstance(sigma, (int, float)) and sigma > 0) or isinstance(
-                sigma, list
+            if not is_electrostatic and (
+                (isinstance(sigma, (int, float)) and sigma > 0)
+                or isinstance(sigma, list)
             ):
                 mat_entry["Conductivity"] = sigma
             elif isinstance(lt, list) or (isinstance(lt, (int, float)) and lt > 0):
@@ -463,11 +466,17 @@ def generate_palace_config(
         )
     pec_attrs = sorted(set(pec_attrs))
 
-    is_electrostatic = simulation_type in ("electrostatic", "electrostatics")
     is_magnetostatic = simulation_type == "magnetostatic"
     boundaries: dict[str, object]
 
-    if is_electrostatic and terminals:
+    if (
+        is_electrostatic
+        and terminals
+        and _has_sgb_structured_conductor_surfaces(groups)
+    ):
+        boundaries = _sgb_electrostatic_boundaries(groups, terminals)
+
+    elif is_electrostatic and terminals:
         terminal_layer_names: set[str] = {t.layer for t in terminals}
         via_boundary = groups.get("via_boundary_surfaces", {})
         terminal_entries, assigned_pgs, vias_on_terminal = _selector_entries(
@@ -855,6 +864,131 @@ def _material_resolution_config_row(
     return row
 
 
+def _has_sgb_structured_conductor_surfaces(groups: dict[str, Any]) -> bool:
+    """Return whether groups originate from current structured SGB surfaces."""
+    return any(
+        isinstance(info, Mapping)
+        and info.get("sgb_record") == "final_physical_group"
+        and info.get("source") == "volume_interface"
+        and info.get("solver_use") == "solver_active"
+        and info.get("interface_type") in {"MA", "MS"}
+        for info in groups.get("boundary_surfaces", {}).values()
+    )
+
+
+def _sgb_electrostatic_boundaries(
+    groups: dict[str, Any],
+    terminals: list[Any],
+) -> dict[str, object]:
+    """Assign whole structured SGB conductor components to terminals or ground."""
+    component_attrs: dict[str, set[int]] = {}
+    component_nets: dict[str, set[str | None]] = {}
+    attribute_components: dict[int, str] = {}
+    for info in groups.get("boundary_surfaces", {}).values():
+        if (
+            not isinstance(info, Mapping)
+            or info.get("sgb_record") != "final_physical_group"
+        ):
+            continue
+        if info.get("source") != "volume_interface":
+            continue
+        if info.get("solver_use") != "solver_active":
+            continue
+        if info.get("interface_type") not in {"MA", "MS"}:
+            continue
+        component_id = info.get("conductor_component_id")
+        net_id = info.get("net_id")
+        if not isinstance(component_id, str) or not component_id:
+            raise ValueError(
+                "SGB solver-active conductor surface lacks conductor_component_id."
+            )
+        if net_id is not None and (not isinstance(net_id, str) or not net_id):
+            raise ValueError(
+                f"SGB conductor component {component_id!r} has invalid net_id."
+            )
+        attrs = _physical_group_values(info.get("phys_group"))
+        if not attrs:
+            raise ValueError(
+                f"SGB conductor component {component_id!r} has no attributes."
+            )
+        component_attrs.setdefault(component_id, set()).update(attrs)
+        component_nets.setdefault(component_id, set()).add(net_id)
+        for attr in attrs:
+            previous = attribute_components.setdefault(attr, component_id)
+            if previous != component_id:
+                raise ValueError(
+                    f"SGB attribute {attr} belongs to multiple conductor components."
+                )
+    if not component_attrs:
+        raise ValueError("SGB electrostatic configuration has no conductor components.")
+    component_net: dict[str, str | None] = {}
+    for component_id, nets in component_nets.items():
+        if len(nets) != 1:
+            raise ValueError(
+                "SGB conductor component "
+                f"{component_id!r} has conflicting terminal nets."
+            )
+        component_net[component_id] = next(iter(nets))
+
+    terminal_nets: set[str] = set()
+    terminal_entries: list[dict[str, object]] = []
+    assigned_components: set[str] = set()
+    for index, terminal in enumerate(terminals, start=1):
+        if getattr(terminal, "center", None) is None:
+            raise ValueError(f"SGB terminal {terminal.name!r} needs center.")
+        net_id = _sgb_terminal_net_id(terminal)
+        if net_id in terminal_nets:
+            raise ValueError(f"SGB terminal net {net_id!r} appears more than once.")
+        terminal_nets.add(net_id)
+        matching_components = sorted(
+            component_id
+            for component_id, component_value in component_net.items()
+            if component_value == net_id
+        )
+        if not matching_components:
+            raise ValueError(f"SGB terminal {terminal.name!r} has no exact net match.")
+        if assigned_components.intersection(matching_components):
+            raise ValueError(
+                f"SGB terminal {terminal.name!r} splits a conductor component."
+            )
+        assigned_components.update(matching_components)
+        terminal_entries.append(
+            {
+                "Index": index,
+                "Attributes": sorted(
+                    {
+                        attr
+                        for component_id in matching_components
+                        for attr in component_attrs[component_id]
+                    }
+                ),
+            }
+        )
+
+    boundaries: dict[str, object] = {"Terminal": terminal_entries}
+    ground_attrs = sorted(
+        {
+            attr
+            for component_id, attrs in component_attrs.items()
+            if component_id not in assigned_components
+            for attr in attrs
+        }
+    )
+    if ground_attrs:
+        boundaries["Ground"] = {"Attributes": ground_attrs}
+    return boundaries
+
+
+def _sgb_terminal_net_id(terminal: Any) -> str:
+    """Match the exact terminal net id emitted by the SGB stack lowering."""
+    label = getattr(terminal, "physical_label", None) or terminal.name
+    if not isinstance(label, str) or not label.strip():
+        raise ValueError("SGB terminal needs a non-empty name or physical_label.")
+    return re.sub(r"[^A-Za-z0-9_@]+", "_", f"{terminal.layer}@{label}".strip()).strip(
+        "_"
+    )
+
+
 def _selector_entries(
     *,
     groups: dict[str, Any],
@@ -1023,7 +1157,9 @@ def _c_volume_ids_for_selector(groups: dict[str, Any], selector: Any) -> set[str
         if surf_info.get("metal_body_id") != selector.layer:
             continue
         volume_id = surf_info.get("metal_volume_id")
-        if isinstance(volume_id, str) and _bbox_contains_center(
+        if not isinstance(volume_id, str):
+            continue
+        if _bbox_contains_center(
             surf_info.get("bbox"),
             selector.center,
         ):
@@ -1116,8 +1252,7 @@ def _finite_conductor_split_sources_for_selector(
         if info.get("layer") != selector.layer:
             continue
         if selector.center is not None and not _bbox_contains_center(
-            info.get("bbox"),
-            selector.center,
+            info.get("bbox"), selector.center
         ):
             continue
         source_id = info.get("source_id")

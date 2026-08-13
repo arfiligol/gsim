@@ -579,6 +579,73 @@ def test_write_config_applies_material_overlay_without_mutating_stack(
     assert row["model_source"] == "test PDK"
 
 
+def test_write_config_electrostatic_material_overlay_omits_conductivity(
+    tmp_path: Path,
+) -> None:
+    """Electrostatics serializes dielectric loss, never resolved conductivity."""
+    groups = {
+        "volumes": {"Si": {"phys_group": 1}},
+        "conductor_surfaces": {},
+        "pec_surfaces": {},
+        "port_surfaces": {},
+        "boundary_surfaces": {},
+    }
+    stack = LayerStack(
+        materials={
+            "Si": {
+                "permittivity": 11.9,
+                "conductivity": 2.0,
+                "loss_tangent": 2.6e-7,
+            }
+        }
+    )
+    mesh_result = MeshResult(
+        mesh_path=tmp_path / "palace.msh",
+        groups=groups,
+        output_dir=tmp_path,
+        model_name="palace",
+        fmax=10e9,
+    )
+
+    config_path = write_config(
+        mesh_result=mesh_result,
+        stack=stack,
+        ports=[],
+        simulation_type="electrostatic",
+        absorbing_boundary=False,
+        material_overlay={
+            "materials": {
+                "Si": {
+                    "relative_permittivity": 11.45,
+                    "loss_tangent": 2.6e-7,
+                    "dispersion_models": [
+                        {
+                            "type": "constant",
+                            "permittivity": 11.45,
+                            "validity_frequency": [0, 20e9],
+                            "source": "test PDK",
+                        }
+                    ],
+                }
+            }
+        },
+    )
+
+    material = json.loads(config_path.read_text())["Domains"]["Materials"][0]
+    assert material["Permittivity"] == 11.45
+    assert material["LossTan"] == 2.6e-7
+    assert "Conductivity" not in material
+
+    material_resolution = json.loads(
+        (tmp_path / "metadata" / "palace_material_resolution.json").read_text()
+    )
+    row = material_resolution["materials"][0]
+    assert row["palace_material"] == material
+    assert row["resolved_loss_tangent"] == 2.6e-7
+    assert row["model_type"] == "constant"
+    assert row["model_source"] == "test PDK"
+
+
 def test_write_config_applies_material_overlay_alias_to_generated_air(
     tmp_path: Path,
 ) -> None:

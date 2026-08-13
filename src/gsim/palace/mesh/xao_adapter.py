@@ -7,27 +7,41 @@ they explicitly request Surface EPR route A/B/C geometry or pass an existing SGB
 XAO plus ``metadata/semantic_geometry`` sidecar directory.
 
 The ownership split is contract-first. SGB owns route topology, physical-group
-plans, XAO export, and semantic sidecars. Today the interface ownership contract
-is encoded in final physical group names such as ``MA__...``, ``MS__...``, and
-``SA__...``; this adapter parses that grammar until SGB exports first-class
-interface fields. gsim owns mesh generation from that exported contract, Palace
-config generation, mesh manifests, and downstream result/report semantics. This
-adapter validates that the expected SGB files are present and fails loudly when
-the optional contract is unavailable or incomplete.
+plans, XAO export, and semantic sidecars. Route A/B structured final physical-
+group fields preserve exact surface, interface, face, ownership, adjacency,
+conductor-component, net, and provenance authority; names are display-only.
+Same-net direct metal-metal contacts are hidden topology/provenance that join
+one conductor component, not independent loss surfaces. Route A uses
+zero-thickness face-metal PEC sheets with finite bump shells. Route B mirrors
+HFSS-style PEC assignment to faces of a finite construction metal volume: its
+closed exterior boundary shell is PEC and its interior is excluded from Palace
+solution domains and tetrahedra.
+
+Explicit Route C remains on its pre-existing physical-name parser and is out
+of this active path's scope. Typed physical roles are future-compatible with
+retained conductor material volumes, but this adapter neither activates nor
+implements Route C. gsim owns mesh generation from the exported contract,
+Palace config generation, mesh manifests, and downstream result/report
+semantics. This adapter validates that the expected SGB files are present and
+fails loudly when the optional contract is unavailable or incomplete.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
+from numbers import Real
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import gmsh
 
+from gsim.common.polygon import fuse_polygons
+from gsim.common.polygon_utils import shapely_to_klayout
 from gsim.palace.mesh.config_generator import collect_mesh_stats, generate_palace_config
 from gsim.palace.mesh.generator import MeshResult
 from gsim.palace.mesh.manifest import build_mesh_manifest
@@ -52,8 +66,83 @@ if TYPE_CHECKING:
     )
 
 _SURFACE_EPR_INTERFACE_TYPES = {"MA", "MS", "SA", "MS_MA"}
+_STRUCTURED_INTERFACE_TYPES = {"MA", "MS", "SA", "MS_MA"}
 _FACE_KIND_SEGMENTS = {"TOP": "top", "BOTTOM": "bottom", "SIDEWALL": "sidewall"}
+_STRUCTURED_FACE_KINDS = {
+    **_FACE_KIND_SEGMENTS,
+    "INTERFACE": "interface",
+    "SHEET_CONTACT_CAP": "sheet_contact_cap",
+}
 _SEMANTIC_ID_RE = re.compile(r"[^A-Za-z0-9_@]+")
+_SGB_PART_ROLES = {"face_metal", "contact_pad", "bump_body"}
+_STRUCTURED_SURFACE_FIELDS = frozenset(
+    (
+        "representation",
+        "surface_id",
+        "interface_type",
+        "contact_kind",
+        "face_kind",
+        "owner_semantic_ids",
+        "adjacent_solution_volume_ids",
+        "conductor_component_id",
+        "net_id",
+        "equipotential_id",
+        "source_provenance",
+        "physical_attribute",
+    )
+)
+
+
+def _optional_string(value: Any) -> str | None:
+    """Return a trimmed non-empty string or None."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _is_nonempty_string_sequence(value: Any) -> bool:
+    """Return true when a value is a non-empty list/tuple of strings."""
+    return (
+        isinstance(value, (list, tuple))
+        and bool(value)
+        and all(isinstance(item, str) and item.strip() for item in value)
+    )
+
+
+def _has_structured_record_marker(record: Mapping[str, Any]) -> bool:
+    """Return whether a non-Route-C record claims current SGB structure."""
+    return _optional_string(record.get("route")) != "C" and any(
+        field in record for field in _STRUCTURED_SURFACE_FIELDS
+    )
+
+
+def _structured_record_kind(
+    record: Mapping[str, Any],
+    *,
+    structured_required: bool = False,
+) -> str | None:
+    """Classify a marked SGB record without applying surface rules to volumes."""
+    if not structured_required and not _has_structured_record_marker(record):
+        return None
+    if (
+        int(record.get("dimension", 2) or 2) == 3
+        or record.get("role") == "material_volume"
+    ):
+        return "volume"
+    return "surface"
+
+
+def _has_structured_surface_marker(
+    record: Mapping[str, Any],
+    *,
+    structured_required: bool = False,
+) -> bool:
+    """Return whether a record is a current structured SGB surface."""
+    return (
+        _structured_record_kind(record, structured_required=structured_required)
+        == "surface"
+    )
 
 
 def generate_mesh_from_semantic_geometry_builder(
@@ -134,6 +223,8 @@ def generate_mesh_from_semantic_geometry_builder(
         raise ImportError(msg) from error
 
     _write_component_gds(component, gds_path)
+    if route in {"A", "B"}:
+        _write_sgb_input_gds(component=component, stack=stack, gds_path=gds_path)
     top_cell_name = _component_gds_top_cell_name(component, gds_path)
     stack_mapping, semantic_layer_map, semantic_stack_layer_map = (
         _sgb_stack_mapping_from_gsim_inputs(
@@ -142,10 +233,10 @@ def generate_mesh_from_semantic_geometry_builder(
             gds_path=gds_path,
             activated_regions=activated_regions,
             terminals=terminals,
+            route=route,
         )
     )
     stack_path.write_text(json.dumps(stack_mapping, indent=2) + "\n")
-
     build_input = build_gds_stack_geometry_input(
         gds_file=gds_path,
         stack_file=stack_path,
@@ -282,6 +373,7 @@ def generate_mesh_from_semantic_xao(
             records=records,
             semantic_layer_map=semantic_layer_map or {},
             semantic_stack_layer_map=semantic_stack_layer_map or {},
+            route_context=_sgb_records_route_context(records),
         )
         if not groups["volumes"]:
             raise ValueError(
@@ -356,6 +448,119 @@ def _write_component_gds(component: Any, path: Path) -> None:
         write_gds(str(path))
 
 
+def _write_sgb_input_gds(*, component: Any, stack: LayerStack, gds_path: Path) -> None:
+    """Replace SGB conductor tuples with their evaluated GDS expressions."""
+    try:
+        import gdstk
+    except ImportError as error:
+        raise ImportError(
+            "semantic-geometry-builder requires gdstk for GDS input."
+        ) from error
+
+    expressions: dict[tuple[int, int], Any] = {}
+    for layer_name, layer in sorted(stack.layers.items()):
+        if layer.exclude_from_simulation:
+            continue
+        if layer.layer_type not in {"conductor", "via"}:
+            continue
+        if getattr(layer, "part_role", None) not in _SGB_PART_ROLES:
+            continue
+        expression = getattr(layer, "_source_expression", None)
+        if expression is None:
+            raise ValueError(
+                f"SGB typed layer {layer_name!r} has no authored source expression."
+            )
+        gds_layer = tuple(layer.gds_layer)
+        previous = expressions.get(gds_layer)
+        if previous is not None and previous != expression:
+            raise ValueError(
+                "SGB typed layers target the same GDS tuple with different "
+                f"source expressions: {gds_layer!r}."
+            )
+        expressions[gds_layer] = expression
+
+    library = gdstk.read_gds(str(gds_path))
+    top_cell = _select_component_gds_top_cell(component, library)
+    flattened = top_cell.copy(top_cell.name, deep_copy=True)
+    flattened.flatten()
+    for layer, datatype in expressions:
+        flattened.remove(
+            *[
+                polygon
+                for polygon in flattened.polygons
+                if (int(polygon.layer), int(polygon.datatype)) == (layer, datatype)
+            ]
+        )
+    for (layer, datatype), expression in expressions.items():
+        fused = fuse_polygons(component, expression)
+        for island in _fused_polygon_islands(fused):
+            flattened.add(
+                *_gdstk_polygons_from_island(
+                    island=island,
+                    layer=layer,
+                    datatype=datatype,
+                )
+            )
+    output = gdstk.Library(unit=library.unit, precision=library.precision)
+    output.add(flattened)
+    output.write_gds(str(gds_path))
+
+
+def _select_component_gds_top_cell(component: Any, library: Any) -> Any:
+    """Select one deterministic top cell; SGB input never retains hierarchy."""
+    cells_by_name = {cell.name: cell for cell in library.cells}
+    component_name = str(getattr(component, "name", ""))
+    for candidate in (component_name, component_name.split("$", 1)[0]):
+        if candidate and candidate in cells_by_name:
+            return cells_by_name[candidate]
+    top_cells = sorted(
+        (cell for cell in library.top_level() if not cell.name.startswith("$$$")),
+        key=lambda cell: cell.name,
+    )
+    if len(top_cells) != 1:
+        raise ValueError("SGB GDS export needs exactly one deterministic top cell.")
+    return top_cells[0]
+
+
+def _fused_polygon_islands(geometry: Any) -> tuple[Any, ...]:
+    """Return fused connected Polygon islands in a stable order."""
+    if getattr(geometry, "is_empty", True):
+        return ()
+    if getattr(geometry, "geom_type", None) == "Polygon":
+        islands = (geometry,)
+    elif getattr(geometry, "geom_type", None) == "MultiPolygon":
+        islands = tuple(geometry.geoms)
+    else:
+        raise ValueError(
+            "SGB source expression did not evaluate to polygonal geometry."
+        )
+    return tuple(sorted(islands, key=lambda polygon: (*polygon.bounds, polygon.wkb)))
+
+
+def _gdstk_polygons_from_island(
+    *, island: Any, layer: int, datatype: int
+) -> tuple[Any, ...]:
+    """Convert one fused Shapely island, including holes, to GDS polygons."""
+    import gdstk
+
+    # Validate through the shared KLayout conversion before GDS lowering.
+    if shapely_to_klayout(island) is None:
+        raise ValueError("SGB source expression produced an invalid polygon island.")
+    exterior = list(island.exterior.coords[:-1])
+    holes = [list(hole.coords[:-1]) for hole in island.interiors]
+    if not holes:
+        return (gdstk.Polygon(exterior, layer=layer, datatype=datatype),)
+    return tuple(
+        gdstk.boolean(
+            gdstk.Polygon(exterior, layer=layer, datatype=datatype),
+            [gdstk.Polygon(hole, layer=layer, datatype=datatype) for hole in holes],
+            "not",
+            layer=layer,
+            datatype=datatype,
+        )
+    )
+
+
 def _component_gds_top_cell_name(component: Any, path: Path) -> str | None:
     """Resolve the exported component's top-cell name from its GDS file."""
     try:
@@ -393,6 +598,7 @@ def _sgb_stack_mapping_from_gsim_inputs(
     gds_path: Path,
     activated_regions: Sequence[ActivatedRegion],
     terminals: Sequence[TerminalConfig],
+    route: Literal["A", "B", "C"],
 ) -> tuple[dict[str, Any], dict[str, str], dict[str, str]]:
     """Lower active gsim regions and layers to the SGB stack contract."""
     if not activated_regions:
@@ -412,38 +618,115 @@ def _sgb_stack_mapping_from_gsim_inputs(
     air_semantic_id = "AIR_ABOVE"
     terminals_by_layer: dict[str, list[Any]] = {}
     for terminal in terminals:
-        if terminal.center is not None:
+        if route in {"A", "B"} or terminal.center is not None:
             terminals_by_layer.setdefault(terminal.layer, []).append(terminal)
+
+    if route == "C":
+        return _legacy_sgb_stack_mapping(
+            stack=stack,
+            gds_path=gds_path,
+            solution_regions=solution_regions,
+            solution_stack_layers=solution_stack_layers,
+            host_void_regions=host_void_regions,
+            terminals_by_layer=terminals_by_layer,
+            air_semantic_id=air_semantic_id,
+        )
 
     layer_records: list[dict[str, Any]] = []
     semantic_layer_map: dict[str, str] = {}
+    selector_source_ids: set[str] = set()
     for layer_name, layer in sorted(stack.layers.items()):
+        if layer.exclude_from_simulation:
+            continue
         if layer.layer_type not in {"conductor", "via"}:
             continue
         gds_layer = tuple(layer.gds_layer)
         if gds_layer not in present_layers:
             continue
-        selectors = terminals_by_layer.get(layer_name) or (None,)
-        for selector in selectors:
-            semantic_id = (
-                _semantic_id(f"{layer_name}@{selector.physical_label or selector.name}")
-                if selector is not None
-                else _semantic_id(layer_name)
+        part_role = getattr(layer, "part_role", None)
+        if part_role not in _SGB_PART_ROLES:
+            raise ValueError(
+                "SGB route requires explicit typed part_role for "
+                f"conductor/via layer {layer_name!r}."
             )
-            semantic_layer_map[semantic_id] = layer_name
+        selectors = terminals_by_layer.get(layer_name)
+        selector_points: list[tuple[float, float]] = []
+        if selectors:
+            _validate_sgb_terminal_islands(
+                component=component,
+                layer_name=layer_name,
+                layer=layer,
+                selectors=selectors,
+            )
+            for selector in selectors:
+                if selector.center is None:
+                    raise ValueError(
+                        f"SGB terminal {selector.name!r} on {layer_name!r} "
+                        "needs center."
+                    )
+                selector_id = _selector_source_id(layer_name, selector)
+                if selector_id in selector_source_ids:
+                    raise ValueError(
+                        f"SGB terminal {selector_id!r} appears more than once "
+                        "across the same conductor layer."
+                    )
+                selector_source_ids.add(selector_id)
+                selector_points.append(selector.center)
+                semantic_layer_map[selector_id] = layer_name
+                host_void_semantic_id = _host_void_for_layer(
+                    layer,
+                    host_void_regions,
+                    default=air_semantic_id,
+                )
+                layer_records.append(
+                    _sgb_layer_record(
+                        route=route,
+                        semantic_id=selector_id,
+                        layer_name=layer_name,
+                        layer=layer,
+                        host_void_semantic_id=host_void_semantic_id,
+                        selector=selector,
+                        is_residual=False,
+                    )
+                )
             host_void_semantic_id = _host_void_for_layer(
                 layer,
                 host_void_regions,
                 default=air_semantic_id,
             )
-            record = _sgb_layer_record(
-                semantic_id=semantic_id,
-                layer_name=layer_name,
-                layer=layer,
-                host_void_semantic_id=host_void_semantic_id,
-                selector=selector,
+            residual_id = _semantic_id(layer_name)
+            semantic_layer_map[residual_id] = layer_name
+            layer_records.append(
+                _sgb_layer_record(
+                    route=route,
+                    semantic_id=residual_id,
+                    layer_name=layer_name,
+                    layer=layer,
+                    host_void_semantic_id=host_void_semantic_id,
+                    selector=None,
+                    is_residual=True,
+                    exclude_selector_points_um=selector_points,
+                )
             )
-            layer_records.append(record)
+        else:
+            host_void_semantic_id = _host_void_for_layer(
+                layer,
+                host_void_regions,
+                default=air_semantic_id,
+            )
+            residual_id = _semantic_id(layer_name)
+            semantic_layer_map[residual_id] = layer_name
+            layer_records.append(
+                _sgb_layer_record(
+                    route=route,
+                    semantic_id=residual_id,
+                    layer_name=layer_name,
+                    layer=layer,
+                    host_void_semantic_id=host_void_semantic_id,
+                    selector=None,
+                    is_residual=True,
+                )
+            )
 
     if not layer_records:
         raise ValueError(
@@ -463,6 +746,115 @@ def _sgb_stack_mapping_from_gsim_inputs(
         semantic_layer_map,
         solution_stack_layers | semantic_layer_map,
     )
+
+
+def _legacy_sgb_stack_mapping(
+    *,
+    stack: LayerStack,
+    gds_path: Path,
+    solution_regions: Mapping[str, Any],
+    solution_stack_layers: Mapping[str, str],
+    host_void_regions: Sequence[tuple[str, float, float]],
+    terminals_by_layer: Mapping[str, Sequence[Any]],
+    air_semantic_id: str,
+) -> tuple[dict[str, Any], dict[str, str], dict[str, str]]:
+    """Keep the pre-A/B Route C lowering unchanged."""
+    present_layers = _gds_layers_in_file(gds_path)
+    records: list[dict[str, Any]] = []
+    semantic_layer_map: dict[str, str] = {}
+    for layer_name, layer in sorted(stack.layers.items()):
+        if layer.exclude_from_simulation:
+            continue
+        if layer.layer_type not in {"conductor", "via"}:
+            continue
+        if tuple(layer.gds_layer) not in present_layers:
+            continue
+        selectors = terminals_by_layer.get(layer_name) or (None,)
+        for selector in selectors:
+            semantic_id = (
+                _semantic_id(f"{layer_name}@{selector.physical_label or selector.name}")
+                if selector is not None
+                else _semantic_id(layer_name)
+            )
+            semantic_layer_map[semantic_id] = layer_name
+            records.append(
+                _legacy_sgb_layer_record(
+                    semantic_id=semantic_id,
+                    layer_name=layer_name,
+                    layer=layer,
+                    host_void_semantic_id=_host_void_for_layer(
+                        layer, host_void_regions, default=air_semantic_id
+                    ),
+                    selector=selector,
+                )
+            )
+    if not records:
+        raise ValueError(
+            "No SGB conductor/via layer records matched the component GDS."
+        )
+    return (
+        {
+            "metadata": {
+                "schema": "semantic_geometry_stack_v1",
+                "units": "um",
+                "source": str(gds_path),
+                "adapter": "gsim",
+            },
+            "solution_regions": solution_regions,
+            "layers": records,
+        },
+        semantic_layer_map,
+        dict(solution_stack_layers) | semantic_layer_map,
+    )
+
+
+def _legacy_sgb_layer_record(
+    *,
+    semantic_id: str,
+    layer_name: str,
+    layer: Any,
+    host_void_semantic_id: str,
+    selector: Any | None,
+) -> dict[str, Any]:
+    """Pre-A/B Route C layer mapping."""
+    geometry: dict[str, Any] = {
+        "z_um": float(layer.zmin),
+        "thickness_um": float(layer.thickness),
+        "geometry_source": "gds_polygon",
+    }
+    if selector is not None:
+        geometry["selector_point_um"] = [
+            float(selector.center[0]),
+            float(selector.center[1]),
+        ]
+    is_via = layer.layer_type == "via"
+    return {
+        "layer": int(layer.gds_layer[0]),
+        "datatype": int(layer.gds_layer[1]),
+        "semantic_id": semantic_id,
+        "role": "metal",
+        "material_id": layer.material,
+        "priority": int(getattr(layer, "mesh_order", 0) or 0),
+        "part_role": "bump_body" if is_via else "face_metal",
+        "net_id": semantic_id,
+        "geometry_kind": "layout_extrusion",
+        "host_void_semantic_id": host_void_semantic_id,
+        "geometry": geometry,
+        "route_representations": (
+            {
+                "A": "cutout_boundary_shell",
+                "B": "cutout_boundary_shell",
+                "C": "material_volume",
+            }
+            if is_via
+            else {
+                "A": "surface_sheet",
+                "B": "cutout_boundary_shell",
+                "C": "material_volume",
+            }
+        ),
+        "metadata": {"source_layer_name": layer_name},
+    }
 
 
 def _solution_regions_from_activated(
@@ -648,24 +1040,51 @@ def _solution_region_record(
 
 def _sgb_layer_record(
     *,
+    route: Literal["A", "B"],
     semantic_id: str,
     layer_name: str,
     layer: Any,
     host_void_semantic_id: str,
     selector: Any | None,
+    is_residual: bool,
+    exclude_selector_points_um: Sequence[tuple[float, float]] = (),
 ) -> dict[str, Any]:
-    """Build one SGB layout-extrusion record for a conductor or via layer."""
-    is_via = layer.layer_type == "via"
+    """Build one SGB layout-extrusion record for a conductor or via layer.
+
+    The authored layer net is retained for residual/unselected islands. A
+    terminal selector owns only its selected island, overrides that record's
+    net with the deterministic terminal identity, and clears a layer-default
+    equipotential so it cannot leak from the residual component.
+    """
+    part_role = getattr(layer, "part_role", None)
+    if part_role not in _SGB_PART_ROLES:
+        raise ValueError(f"SGB requires explicit part_role for layer {layer_name!r}.")
+    is_finite_contact = part_role in {"contact_pad", "bump_body"}
+    if route not in {"A", "B"}:
+        raise ValueError("Structured selector lowering is limited to Route A/B.")
     geometry = {
         "z_um": float(layer.zmin),
         "thickness_um": float(layer.thickness),
         "geometry_source": "gds_polygon",
+        # SGB must fuse edge-connected GDS fragments before selector ownership.
+        # This record builder is reached only from the Route A/B lowering path.
+        "route_ab_fused_selector_mode": True,
     }
+    if is_residual:
+        geometry["split_polygons_as_entities"] = True
     if selector is not None:
         geometry["selector_point_um"] = [
             float(selector.center[0]),
             float(selector.center[1]),
         ]
+    if exclude_selector_points_um:
+        geometry["exclude_selector_points_um"] = [
+            [float(point[0]), float(point[1])] for point in exclude_selector_points_um
+        ]
+    semantic_net_id = (
+        _selector_source_id(layer_name, selector) if selector is not None else None
+    )
+    semantic_equipotential_id = None if selector is not None else layer.equipotential_id
     return {
         "layer": int(layer.gds_layer[0]),
         "datatype": int(layer.gds_layer[1]),
@@ -673,8 +1092,10 @@ def _sgb_layer_record(
         "role": "metal",
         "material_id": layer.material,
         "priority": int(getattr(layer, "mesh_order", 0) or 0),
-        "part_role": "bump_body" if is_via else "face_metal",
-        "net_id": semantic_id,
+        "part_role": part_role,
+        "net_id": semantic_net_id if semantic_net_id is not None else layer.net_id,
+        "equipotential_id": semantic_equipotential_id,
+        "attached_face_metal_semantic_id": layer.attached_face_metal_semantic_id,
         "geometry_kind": "layout_extrusion",
         "host_void_semantic_id": host_void_semantic_id,
         "geometry": geometry,
@@ -682,17 +1103,64 @@ def _sgb_layer_record(
             {
                 "A": "cutout_boundary_shell",
                 "B": "cutout_boundary_shell",
-                "C": "material_volume",
             }
-            if is_via
+            if is_finite_contact
             else {
                 "A": "surface_sheet",
                 "B": "cutout_boundary_shell",
-                "C": "material_volume",
             }
         ),
-        "metadata": {"source_layer_name": layer_name},
+        "metadata": {
+            "source_layer_name": layer_name,
+            "semantic_group_id": semantic_id,
+            "equipotential_id": semantic_equipotential_id,
+        },
     }
+
+
+def _selector_source_id(layer_name: str, selector: Any) -> str:
+    """Return the deterministic SGB terminal semantic/net identifier."""
+    label = getattr(selector, "physical_label", None) or getattr(selector, "name", None)
+    if not isinstance(label, str) or not label.strip():
+        raise ValueError(
+            f"SGB terminal on {layer_name!r} needs a name or physical_label."
+        )
+    return _semantic_id(f"{layer_name}@{label}")
+
+
+def _validate_sgb_terminal_islands(
+    *,
+    component: Any,
+    layer_name: str,
+    layer: Any,
+    selectors: Sequence[Any],
+) -> None:
+    """Require every Route A/B terminal point to own one distinct fused island."""
+    from shapely.geometry import Point
+
+    expression = getattr(layer, "_source_expression", None)
+    if expression is None:
+        raise ValueError(f"SGB typed layer {layer_name!r} has no source expression.")
+    islands = _fused_polygon_islands(fuse_polygons(component, expression))
+    selected_islands: set[int] = set()
+    for selector in selectors:
+        if selector.center is None:
+            raise ValueError(f"SGB terminal {selector.name!r} needs center.")
+        point = Point(selector.center)
+        matches = [
+            index for index, island in enumerate(islands) if island.covers(point)
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                f"SGB terminal {selector.name!r} on {layer_name!r} must select "
+                "exactly one fused conductor island."
+            )
+        if matches[0] in selected_islands:
+            raise ValueError(
+                f"SGB terminal {selector.name!r} on {layer_name!r} shares a "
+                "fused conductor island with another terminal."
+            )
+        selected_islands.add(matches[0])
 
 
 def _gds_layers_in_file(path: Path) -> set[tuple[int, int]]:
@@ -750,6 +1218,7 @@ def _groups_from_sgb_records(
     records: Sequence[Any],
     semantic_layer_map: Mapping[str, str],
     semantic_stack_layer_map: Mapping[str, str],
+    route_context: Literal["A", "B", "C"],
 ) -> dict[str, dict[str, Any]]:
     """Translate live SGB physical-group records into gsim mesh groups."""
     groups: dict[str, dict[str, Any]] = {
@@ -762,6 +1231,10 @@ def _groups_from_sgb_records(
     }
     live = _live_physical_groups()
     volume_z_centers = _semantic_volume_z_centers(records=records, live=live)
+    structured_volumes = _structured_solution_volume_records(
+        records=records,
+        structured_required=route_context in {"A", "B"},
+    )
     missing: list[str] = []
     for record in records:
         if not isinstance(record, Mapping):
@@ -777,6 +1250,14 @@ def _groups_from_sgb_records(
                 missing.append(f"{dim}:{name}")
             continue
         phys_group, entity_tags = live[(dim, name)]
+        structured_kind = _structured_record_kind(
+            record,
+            structured_required=route_context in {"A", "B"},
+        )
+        if dim == 3 and structured_kind == "surface":
+            raise ValueError(f"SGB volume {name!r} has surface structured metadata.")
+        if dim == 2 and structured_kind == "volume":
+            raise ValueError(f"SGB surface {name!r} has volume structured metadata.")
         if dim == 3 and record.get("role") == "material_volume":
             groups["volumes"][name] = _volume_group_info(
                 name=name,
@@ -784,6 +1265,7 @@ def _groups_from_sgb_records(
                 entity_tags=entity_tags,
                 record=record,
                 semantic_stack_layer_map=semantic_stack_layer_map,
+                structured_required=route_context in {"A", "B"},
             )
         elif dim == 2:
             _add_surface_group_records(
@@ -793,7 +1275,9 @@ def _groups_from_sgb_records(
                 entity_tags=entity_tags,
                 record=record,
                 semantic_layer_map=semantic_layer_map,
+                structured_volumes=structured_volumes,
                 volume_z_centers=volume_z_centers,
+                structured_required=route_context in {"A", "B"},
             )
     if missing:
         raise ValueError(
@@ -801,6 +1285,23 @@ def _groups_from_sgb_records(
             + ", ".join(sorted(missing))
         )
     return groups
+
+
+def _sgb_records_route_context(records: Sequence[Any]) -> Literal["A", "B", "C"]:
+    """Require one explicit SGB route; only explicit C permits legacy records."""
+    routes: set[str] = set()
+    for record in records:
+        if not isinstance(record, Mapping):
+            raise TypeError("SGB physical group records must be JSON objects.")
+        route = _optional_string(record.get("route"))
+        if route not in {"A", "B", "C"}:
+            raise ValueError(
+                "SGB physical-group records require explicit route A, B, or C."
+            )
+        routes.add(route)
+    if len(routes) != 1:
+        raise ValueError("SGB physical-group sidecar must have one route context.")
+    return cast(Literal["A", "B", "C"], routes.pop())
 
 
 def _setup_xao_refinement(
@@ -899,10 +1400,16 @@ def _volume_group_info(
     entity_tags: tuple[int, ...],
     record: Mapping[str, Any],
     semantic_stack_layer_map: Mapping[str, str],
+    structured_required: bool,
 ) -> dict[str, Any]:
     """Build gsim volume-group metadata from one SGB physical-group record."""
+    if (
+        _structured_record_kind(record, structured_required=structured_required)
+        == "volume"
+    ):
+        _validate_structured_volume_record(name, record)
     stack_layer = semantic_stack_layer_map.get(name, name)
-    return {
+    info = {
         "phys_group": phys_group,
         "tags": list(entity_tags),
         "dim": 3,
@@ -913,6 +1420,56 @@ def _volume_group_info(
         "sgb_route": record.get("route"),
         "sgb_metadata": dict(record.get("metadata", {})),
     }
+    if (
+        _structured_record_kind(record, structured_required=structured_required)
+        == "volume"
+    ):
+        info.update(
+            {
+                "sgb_record": "final_physical_group",
+                "representation": record["representation"],
+                "source_provenance": record["source_provenance"],
+                "physical_attribute": record["physical_attribute"],
+                "interface_type": record.get("interface_type"),
+                "face_kind": record.get("face_kind"),
+                "contact_kind": record.get("contact_kind"),
+                "conductor_component_id": record.get("conductor_component_id"),
+                "net_id": record.get("net_id"),
+                "equipotential_id": record.get("equipotential_id"),
+                "owner_semantic_ids": tuple(record.get("owner_semantic_ids", ())),
+                "adjacent_solution_volume_ids": tuple(
+                    record.get("adjacent_solution_volume_ids", ())
+                ),
+            }
+        )
+    return info
+
+
+def _structured_solution_volume_records(
+    *,
+    records: Sequence[Any],
+    structured_required: bool,
+) -> dict[str, Mapping[str, Any]]:
+    """Index current structured solution volumes by their exact sidecar ID."""
+    volumes: dict[str, Mapping[str, Any]] = {}
+    for record in records:
+        if not isinstance(record, Mapping):
+            raise TypeError("SGB physical group records must be JSON objects.")
+        if (
+            int(record.get("dimension", 0) or 0) != 3
+            or record.get("role") != "material_volume"
+            or _structured_record_kind(record, structured_required=structured_required)
+            != "volume"
+        ):
+            continue
+        name = _optional_string(record.get("physical_name"))
+        if name is None:
+            raise ValueError("Structured SGB solution volume has empty physical_name.")
+        _validate_structured_volume_record(name, record)
+        if name in volumes:
+            raise ValueError(f"Duplicate structured SGB solution volume {name!r}.")
+        volumes[name] = record
+    return volumes
 
 
 def _add_surface_group_records(
@@ -923,7 +1480,9 @@ def _add_surface_group_records(
     entity_tags: tuple[int, ...],
     record: Mapping[str, Any],
     semantic_layer_map: Mapping[str, str],
+    structured_volumes: Mapping[str, Mapping[str, Any]],
     volume_z_centers: Mapping[str, float],
+    structured_required: bool,
 ) -> None:
     """Classify one SGB surface record into gsim boundary and PEC groups."""
     metadata = record.get("metadata")
@@ -937,8 +1496,12 @@ def _add_surface_group_records(
         else ()
     )
     if str(record.get("role")) == "domain_boundary":
+        if _has_structured_surface_marker(
+            record, structured_required=structured_required
+        ):
+            _validate_structured_domain_boundary_record(name, record)
         bbox = _entities_bbox(2, entity_tags)
-        groups["boundary_surfaces"][name] = {
+        info = {
             "phys_group": phys_group,
             "tags": list(entity_tags),
             "dim": 2,
@@ -954,22 +1517,112 @@ def _add_surface_group_records(
             "bbox": bbox,
             "centroid": _bbox_centroid(bbox),
         }
+        if _has_structured_surface_marker(
+            record, structured_required=structured_required
+        ):
+            info.update(
+                {
+                    "sgb_record": "final_physical_group",
+                    "surface_id": record["surface_id"],
+                    "representation": record["representation"],
+                    "source_provenance": record["source_provenance"],
+                    "physical_attribute": record["physical_attribute"],
+                    "owner_semantic_ids": tuple(record["owner_semantic_ids"]),
+                    "adjacent_solution_volume_ids": tuple(
+                        record["adjacent_solution_volume_ids"]
+                    ),
+                    "interface_type": record["interface_type"],
+                    "face_kind": record["face_kind"],
+                    "contact_kind": record["contact_kind"],
+                }
+            )
+        groups["boundary_surfaces"][name] = info
         return
 
     parsed = _parse_surface_physical_name(
         name,
+        record=record,
         source_record_ids=source_record_ids,
         volume_z_centers=volume_z_centers,
+        structured_required=structured_required,
     )
     if parsed is None:
+        if record.get("solver_use") == "solver_active":
+            raise ValueError(
+                "SGB XAO is missing or invalid structured surface metadata "
+                f"for {name!r}."
+            )
         return
-    interface_type, source_id, face_kind, alias_name = parsed
-    owner_semantic_ids = (
-        tuple(_semantic_source_parts(name.split("__")[1:]))
-        if interface_type == "SA"
-        else ()
+    structured = _has_structured_surface_marker(
+        record,
+        structured_required=structured_required,
     )
-    layer = semantic_layer_map.get(source_id, source_id)
+    if structured and parsed[0] == "MS_MA":
+        parsed_records = _structured_ms_ma_surface_records(
+            name=name,
+            record=record,
+            volume_z_centers=volume_z_centers,
+            structured_volumes=structured_volumes,
+            sheet_z_center=_surface_z_center(entity_tags),
+        )
+    elif structured and parsed[0] == "SA":
+        parsed_records = (
+            _structured_sa_surface_record(
+                name=name,
+                record=record,
+                volume_z_centers=volume_z_centers,
+                structured_volumes=structured_volumes,
+            ),
+        )
+    else:
+        parsed_records = (parsed,)
+    for interface_type, source_id, face_kind, alias_name in parsed_records:
+        _add_parsed_surface_group_record(
+            groups=groups,
+            name=name,
+            phys_group=phys_group,
+            entity_tags=entity_tags,
+            record=record,
+            semantic_layer_map=semantic_layer_map,
+            structured=structured,
+            interface_type=interface_type,
+            source_id=source_id,
+            face_kind=face_kind,
+            alias_name=alias_name,
+            source_record_ids=source_record_ids,
+        )
+
+
+def _add_parsed_surface_group_record(
+    *,
+    groups: dict[str, dict[str, Any]],
+    name: str,
+    phys_group: int,
+    entity_tags: tuple[int, ...],
+    record: Mapping[str, Any],
+    semantic_layer_map: Mapping[str, str],
+    structured: bool,
+    interface_type: str,
+    source_id: str,
+    face_kind: str | None,
+    alias_name: str,
+    source_record_ids: tuple[str, ...],
+) -> None:
+    """Store one logical interface record for an SGB surface physical group."""
+    owner_semantic_ids = (
+        tuple(record.get("owner_semantic_ids", ()))
+        if structured
+        else (
+            tuple(_semantic_source_parts(name.split("__")[1:]))
+            if interface_type == "SA"
+            else ()
+        )
+    )
+    layer = (
+        semantic_layer_map.get(source_id, source_id)
+        if interface_type in {"MA", "MS"} and source_id
+        else None
+    )
     bbox = _entities_bbox(2, entity_tags)
     info = {
         "phys_group": phys_group,
@@ -979,23 +1632,45 @@ def _add_surface_group_records(
         "surface_epr": True,
         "interface_id": alias_name,
         "interface_type": interface_type,
+        "sgb_record": "final_physical_group",
+        "conductor_component_id": _optional_string(
+            record.get("conductor_component_id")
+        ),
+        "net_id": _optional_string(record.get("net_id")),
+        "equipotential_id": _optional_string(record.get("equipotential_id")),
+        "physical_attribute": record.get("physical_attribute"),
         "source_id": source_id,
-        "metal_body_id": layer if interface_type in {"MA", "MS"} else None,
-        "metal_volume_id": source_id if interface_type in {"MA", "MS"} else None,
-        "layer": layer if interface_type in {"MA", "MS"} else None,
         "face_kind": face_kind,
+        "contact_kind": _optional_string(record.get("contact_kind")),
         "representation": str(record.get("route", "")).upper(),
+        "sgb_representation": record.get("representation"),
         "geometry_kind": "sgb_occ",
         "physical_group_attribute": phys_group,
         "sgb_physical_name": name,
         "sgb_role": record.get("role"),
         "sgb_metadata": dict(record.get("metadata", {})),
         "source_record_ids": source_record_ids,
-        "surface_id": source_record_ids[0] if len(source_record_ids) == 1 else None,
+        "surface_id": _optional_string(record.get("surface_id"))
+        or (source_record_ids[0] if len(source_record_ids) == 1 else None),
         "owner_semantic_ids": owner_semantic_ids,
+        "adjacent_solution_volume_ids": tuple(
+            record.get("adjacent_solution_volume_ids", ())
+        )
+        if structured
+        else (),
+        "source_provenance": record.get("source_provenance"),
+        "solver_use": record.get("solver_use"),
         "bbox": bbox,
         "centroid": _bbox_centroid(bbox),
     }
+    if interface_type in {"MA", "MS"}:
+        info.update(
+            {
+                "metal_body_id": layer,
+                "metal_volume_id": source_id,
+                "layer": layer,
+            }
+        )
     groups["boundary_surfaces"][alias_name] = info
     route = str(record.get("route", "")).upper()
     if interface_type in {"MA", "MS"} and route in {"A", "B"}:
@@ -1015,19 +1690,174 @@ def _add_surface_group_records(
         )
 
 
+def _structured_ms_ma_surface_records(
+    *,
+    name: str,
+    record: Mapping[str, Any],
+    volume_z_centers: Mapping[str, float],
+    structured_volumes: Mapping[str, Mapping[str, Any]],
+    sheet_z_center: float | None,
+) -> tuple[tuple[str, str, str, str], tuple[str, str, str, str]]:
+    """Split one structured zero-thickness PEC sheet into MS and MA logic."""
+    substrate_id, other_id = _structured_dielectric_vacuum_adjacency(
+        surface_type="MS_MA",
+        name=name,
+        record=record,
+        structured_volumes=structured_volumes,
+    )
+    substrate_center = volume_z_centers.get(substrate_id)
+    other_center = volume_z_centers.get(other_id)
+    if (
+        sheet_z_center is None
+        or substrate_center is None
+        or other_center is None
+        or not all(
+            math.isfinite(value)
+            for value in (sheet_z_center, substrate_center, other_center)
+        )
+    ):
+        raise ValueError(
+            f"SGB MS_MA surface {name!r} needs finite adjacent-volume topology."
+        )
+    if (
+        substrate_center in (other_center, sheet_z_center)
+        or other_center == sheet_z_center
+        or (substrate_center - sheet_z_center) * (other_center - sheet_z_center) >= 0
+    ):
+        raise ValueError(
+            f"SGB MS_MA surface {name!r} has ambiguous adjacent-volume topology."
+        )
+    ms_face = "bottom" if substrate_center < other_center else "top"
+    ma_face = "top" if ms_face == "bottom" else "bottom"
+    source_id = _structured_conductor_source_layer(name, record)
+    surface_id = str(record["surface_id"])
+    return (
+        ("MS", source_id, ms_face, f"{surface_id}__MS__{ms_face.upper()}"),
+        ("MA", source_id, ma_face, f"{surface_id}__MA__{ma_face.upper()}"),
+    )
+
+
+def _structured_sa_surface_record(
+    *,
+    name: str,
+    record: Mapping[str, Any],
+    volume_z_centers: Mapping[str, float],
+    structured_volumes: Mapping[str, Mapping[str, Any]],
+) -> tuple[str, str, str, str]:
+    """Classify one structured SA face from exact solution-volume topology."""
+    substrate_id, vacuum_id = _structured_dielectric_vacuum_adjacency(
+        surface_type="SA",
+        name=name,
+        record=record,
+        structured_volumes=structured_volumes,
+    )
+    substrate_center = volume_z_centers.get(substrate_id)
+    vacuum_center = volume_z_centers.get(vacuum_id)
+    if (
+        substrate_center is None
+        or vacuum_center is None
+        or not all(math.isfinite(value) for value in (substrate_center, vacuum_center))
+    ):
+        raise ValueError(
+            f"SGB SA surface {name!r} needs finite adjacent-volume topology."
+        )
+    if substrate_center == vacuum_center:
+        raise ValueError(
+            f"SGB SA surface {name!r} has ambiguous adjacent-volume topology."
+        )
+    face_kind = "top" if vacuum_center > substrate_center else "bottom"
+    surface_id = str(record["surface_id"])
+    return ("SA", surface_id, face_kind, surface_id)
+
+
+def _structured_dielectric_vacuum_adjacency(
+    *,
+    surface_type: str,
+    name: str,
+    record: Mapping[str, Any],
+    structured_volumes: Mapping[str, Mapping[str, Any]],
+) -> tuple[str, str]:
+    """Resolve exact dielectric and vacuum volume IDs for one structured face."""
+    adjacent_ids = tuple(record["adjacent_solution_volume_ids"])
+    if len(adjacent_ids) != 2 or len(set(adjacent_ids)) != 2:
+        raise ValueError(
+            f"SGB {surface_type} surface {name!r} needs exactly two distinct "
+            "solution volumes."
+        )
+    material_kinds = {
+        volume_id: _structured_solution_volume_material_kind(
+            surface_type=surface_type,
+            surface_name=name,
+            volume_id=volume_id,
+            structured_volumes=structured_volumes,
+        )
+        for volume_id in adjacent_ids
+    }
+    dielectric_ids = [
+        volume_id for volume_id, kind in material_kinds.items() if kind == "dielectric"
+    ]
+    vacuum_ids = [
+        volume_id for volume_id, kind in material_kinds.items() if kind == "vacuum"
+    ]
+    if len(dielectric_ids) != 1 or len(vacuum_ids) != 1:
+        raise ValueError(
+            f"SGB {surface_type} surface {name!r} needs one dielectric and one "
+            "vacuum volume."
+        )
+    return dielectric_ids[0], vacuum_ids[0]
+
+
+def _structured_solution_volume_material_kind(
+    *,
+    surface_type: str,
+    surface_name: str,
+    volume_id: str,
+    structured_volumes: Mapping[str, Mapping[str, Any]],
+) -> Literal["dielectric", "vacuum"]:
+    """Classify a structured solution volume from its typed material identity."""
+    volume = structured_volumes.get(volume_id)
+    if volume is None:
+        raise ValueError(
+            f"SGB {surface_type} surface {surface_name!r} lacks structured volume "
+            f"{volume_id!r}."
+        )
+    material_ids = volume["physical_attribute"].get("material_ids")
+    if not _is_nonempty_string_sequence(material_ids):
+        raise ValueError(
+            f"SGB {surface_type} volume {volume_id!r} needs "
+            "physical_attribute.material_ids."
+        )
+    if len(material_ids) != 1:
+        raise ValueError(
+            f"SGB {surface_type} volume {volume_id!r} needs one exact material "
+            "identity."
+        )
+    return "vacuum" if material_ids[0].casefold() in {"air", "vacuum"} else "dielectric"
+
+
+def _surface_z_center(entity_tags: Sequence[int]) -> float | None:
+    """Return the plane coordinate of one planar physical sheet."""
+    bbox = _entities_bbox(2, entity_tags)
+    if len(bbox) != 6 or bbox[5] - bbox[2] >= gmsh_utils.PLANAR_ORIENTATION_TOLERANCE:
+        return None
+    return 0.5 * (bbox[2] + bbox[5])
+
+
 def _parse_surface_physical_name(
     name: str,
     *,
+    record: Mapping[str, Any],
     source_record_ids: tuple[str, ...] = (),
     volume_z_centers: Mapping[str, float] | None = None,
+    structured_required: bool = False,
 ) -> tuple[str, str, str | None, str] | None:
-    """Parse the current SGB interface physical-name grammar.
+    """Parse SGB surface records by authoritative fields, with legacy fallback."""
+    if _has_structured_surface_marker(
+        record,
+        structured_required=structured_required,
+    ):
+        return _structured_surface_record(name, record)
 
-    SGB does not yet export explicit ``interface_type``, ``source_id``, and
-    ``face_kind`` fields on final physical group records. Until that sidecar
-    grows those fields, names beginning with ``MA__``, ``MS__``, ``SA__``, or
-    ``MS_MA__`` are the reviewed SGB-to-gsim interface contract.
-    """
     parts = name.split("__")
     if len(parts) < 3 or parts[0] not in _SURFACE_EPR_INTERFACE_TYPES:
         return None
@@ -1058,6 +1888,152 @@ def _parse_surface_physical_name(
         source_parts = _semantic_source_parts(parts[1:])
         source_id = "__".join(source_parts)
     return (interface_type, source_id, face_kind, name)
+
+
+def _structured_surface_record(
+    name: str,
+    record: Mapping[str, Any],
+) -> tuple[str, str, str, str]:
+    """Validate and classify a current SGB surface record without name inference."""
+    required_strings = (
+        "surface_id",
+        "interface_type",
+        "face_kind",
+        "representation",
+    )
+    missing = [
+        field
+        for field in required_strings
+        if _optional_string(record.get(field)) is None
+    ]
+    missing.extend(
+        field
+        for field in (
+            "contact_kind",
+            "conductor_component_id",
+            "net_id",
+            "equipotential_id",
+        )
+        if field not in record
+    )
+    if missing:
+        raise ValueError(
+            f"SGB surface {name!r} misses structured fields: {', '.join(missing)}."
+        )
+    interface_type = str(record["interface_type"]).upper()
+    if interface_type not in _STRUCTURED_INTERFACE_TYPES:
+        raise ValueError(
+            f"SGB surface {name!r} has unsupported interface_type {interface_type!r}."
+        )
+    face_kind = _STRUCTURED_FACE_KINDS.get(str(record["face_kind"]).upper())
+    if face_kind is None:
+        raise ValueError(
+            f"SGB surface {name!r} has invalid face_kind {record['face_kind']!r}."
+        )
+    representation = _optional_string(record.get("representation"))
+    route = _optional_string(record.get("route"))
+    if representation is None or route not in {"A", "B"}:
+        raise ValueError(f"SGB surface {name!r} lacks a Route A/B representation.")
+    if not _is_nonempty_string_sequence(record.get("owner_semantic_ids")):
+        raise ValueError(f"SGB surface {name!r} needs exact owner_semantic_ids.")
+    if not _is_nonempty_string_sequence(record.get("adjacent_solution_volume_ids")):
+        raise ValueError(
+            f"SGB surface {name!r} needs exact adjacent_solution_volume_ids."
+        )
+    for field in ("source_provenance", "physical_attribute"):
+        if not isinstance(record.get(field), Mapping):
+            raise TypeError(f"SGB surface {name!r} needs mapping {field}.")
+    component_id = _optional_string(record.get("conductor_component_id"))
+    net_id = _optional_string(record.get("net_id"))
+    if interface_type == "SA":
+        if component_id is not None or net_id is not None:
+            raise ValueError(
+                f"SGB SA surface {name!r} must not carry conductor/net identity."
+            )
+        source_id = str(record["surface_id"])
+    else:
+        if component_id is None:
+            raise ValueError(f"SGB surface {name!r} needs conductor_component_id.")
+        source_id = _structured_conductor_source_layer(name, record)
+    return (interface_type, source_id, face_kind, str(record["surface_id"]))
+
+
+def _structured_conductor_source_layer(name: str, record: Mapping[str, Any]) -> str:
+    """Read the exact SGB-emitted stack source for one exposed conductor face."""
+    provenance = record.get("source_provenance")
+    if not isinstance(provenance, Mapping):
+        raise TypeError(f"SGB surface {name!r} needs mapping source_provenance.")
+    direct = _optional_string(provenance.get("conductor_source_layer_name"))
+    if direct is not None:
+        return direct
+    sources = provenance.get("sources")
+    if not isinstance(sources, (list, tuple)) or not sources:
+        raise ValueError(
+            f"SGB surface {name!r} needs exact conductor source-layer provenance."
+        )
+    source_layers: set[str] = set()
+    for source in sources:
+        if not isinstance(source, Mapping):
+            raise TypeError(f"SGB surface {name!r} has invalid provenance source.")
+        source_layer = _optional_string(source.get("conductor_source_layer_name"))
+        if source_layer is None:
+            raise ValueError(f"SGB surface {name!r} lacks conductor_source_layer_name.")
+        source_layers.add(source_layer)
+    if len(source_layers) != 1:
+        raise ValueError(f"SGB surface {name!r} has ambiguous source-layer provenance.")
+    return source_layers.pop()
+
+
+def _validate_structured_domain_boundary_record(
+    name: str,
+    record: Mapping[str, Any],
+) -> None:
+    """Validate current SGB domain-boundary identity without name inference."""
+    required = (
+        "surface_id",
+        "representation",
+        "interface_type",
+        "contact_kind",
+        "face_kind",
+        "owner_semantic_ids",
+        "adjacent_solution_volume_ids",
+        "conductor_component_id",
+        "net_id",
+        "equipotential_id",
+    )
+    missing = [field for field in required if field not in record]
+    if missing:
+        raise ValueError(
+            f"SGB domain boundary {name!r} misses fields: {', '.join(missing)}."
+        )
+    if not _optional_string(record.get("surface_id")):
+        raise ValueError(f"SGB domain boundary {name!r} has empty surface_id.")
+    if not _optional_string(record.get("representation")):
+        raise ValueError(f"SGB domain boundary {name!r} has empty representation.")
+    if not _is_nonempty_string_sequence(record.get("owner_semantic_ids")):
+        raise ValueError(f"SGB domain boundary {name!r} needs owner_semantic_ids.")
+    if not _is_nonempty_string_sequence(record.get("adjacent_solution_volume_ids")):
+        raise ValueError(
+            f"SGB domain boundary {name!r} needs adjacent_solution_volume_ids."
+        )
+    for field in ("source_provenance", "physical_attribute"):
+        if not isinstance(record.get(field), Mapping):
+            raise TypeError(f"SGB domain boundary {name!r} needs mapping {field}.")
+
+
+def _validate_structured_volume_record(
+    name: str,
+    record: Mapping[str, Any],
+) -> None:
+    """Validate and preserve current SGB volume identity and provenance."""
+    for field in ("representation", "source_provenance", "physical_attribute"):
+        if field not in record:
+            raise ValueError(f"SGB volume {name!r} misses {field}.")
+    if not _optional_string(record.get("representation")):
+        raise ValueError(f"SGB volume {name!r} has empty representation.")
+    for field in ("source_provenance", "physical_attribute"):
+        if not isinstance(record.get(field), Mapping):
+            raise TypeError(f"SGB volume {name!r} needs mapping {field}.")
 
 
 def _semantic_volume_z_centers(
@@ -1120,7 +2096,27 @@ def _semantic_source_parts(parts: Sequence[str]) -> Sequence[str]:
 
 def _entities_bbox(dim: int, entity_tags: Sequence[int]) -> list[float]:
     """Return the enclosing Gmsh bounding box for entities of one dimension."""
-    bboxes = [gmsh.model.getBoundingBox(dim, tag) for tag in entity_tags]
+    bboxes: list[tuple[float, float, float, float, float, float]] = []
+    for tag in entity_tags:
+        raw_bbox = gmsh.model.getBoundingBox(dim, tag)
+        if (
+            not isinstance(raw_bbox, Sequence)
+            or isinstance(raw_bbox, (str, bytes))
+            or len(raw_bbox) != 6
+            or not all(
+                isinstance(value, Real) and not isinstance(value, bool)
+                for value in raw_bbox
+            )
+        ):
+            raise ValueError(
+                f"Gmsh bounding box for dimension {dim} entity {tag} is malformed."
+            )
+        bbox = tuple(float(value) for value in raw_bbox)
+        if not all(math.isfinite(value) for value in bbox):
+            raise ValueError(
+                f"Gmsh bounding box for dimension {dim} entity {tag} is non-finite."
+            )
+        bboxes.append(cast(tuple[float, float, float, float, float, float], bbox))
     if not bboxes:
         return []
     return [

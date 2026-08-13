@@ -5,6 +5,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
+
 from gsim.common.stack import (
     MATERIALS_DB,
     Layer,
@@ -132,6 +134,38 @@ class TestLayer:
         assert d["thickness"] == 0.5
         assert d["material"] == "aluminum"
         assert d["type"] == "conductor"
+
+    def test_layer_serializes_authored_sgb_role_identity(self):
+        """Typed Route A/B metadata stays explicit in the public stack form."""
+        layer = Layer(
+            name="M1",
+            gds_layer=(8, 1),
+            zmin=0.0,
+            zmax=0.2,
+            thickness=0.2,
+            material="aluminum",
+            layer_type="conductor",
+            part_role="contact_pad",
+            attached_face_metal_semantic_id="M1_FACE",
+            net_id="M1@signal",
+            equipotential_id="EQ_SIGNAL",
+            exclude_from_simulation=True,
+        )
+
+        assert layer.to_dict() == {
+            "gds_layer": [8, 1],
+            "zmin": 0.0,
+            "zmax": 0.2,
+            "thickness": 0.2,
+            "material": "aluminum",
+            "type": "conductor",
+            "mesh_resolution": "medium",
+            "part_role": "contact_pad",
+            "attached_face_metal_semantic_id": "M1_FACE",
+            "net_id": "M1@signal",
+            "equipotential_id": "EQ_SIGNAL",
+            "exclude_from_simulation": True,
+        }
 
 
 class TestLayerStack:
@@ -314,6 +348,96 @@ class TestExtractor:
         assert "sio2" in stack.materials
         assert "sin" in stack.materials
         assert "passive" not in stack.materials
+
+    def test_extract_layer_stack_reads_only_authored_sgb_info(self):
+        """PDK info is the sole source for typed Route A/B metadata."""
+        level = self._mk_level(
+            (40, 1),
+            0.0,
+            0.2,
+            "aluminum",
+            info={
+                "part_role": "contact_pad",
+                "attached_face_metal_semantic_id": "M1_FACE",
+                "net_id": "M1@signal",
+                "equipotential_id": "EQ_SIGNAL",
+            },
+        )
+        stack = extract_layer_stack(
+            cast(Any, SimpleNamespace(layers={"UBM": level})),
+            pdk_name="test",
+            include_substrate=False,
+        )
+
+        layer = stack.layers["UBM"]
+        assert layer.part_role == "contact_pad"
+        assert layer.attached_face_metal_semantic_id == "M1_FACE"
+        assert layer.net_id == "M1@signal"
+        assert layer.equipotential_id == "EQ_SIGNAL"
+        assert layer._source_expression == (40, 1)
+
+    @pytest.mark.parametrize(
+        ("info", "expected"),
+        [
+            ({}, False),
+            ({"exclude_from_simulation": False}, False),
+            ({"exclude_from_simulation": True}, True),
+        ],
+    )
+    def test_extract_layer_stack_reads_authored_simulation_exclusion(
+        self, info, expected
+    ):
+        """The exact PDK flag remains a bool on the extracted layer."""
+        level = self._mk_level(
+            (40, 1),
+            0.0,
+            0.2,
+            "aluminum",
+            info=info,
+        )
+
+        stack = extract_layer_stack(
+            cast(Any, SimpleNamespace(layers={"UBM": level})),
+            pdk_name="test",
+            include_substrate=False,
+        )
+
+        assert stack.layers["UBM"].exclude_from_simulation is expected
+
+    @pytest.mark.parametrize("invalid", ["true", 1, 0, None])
+    def test_extract_layer_stack_rejects_non_bool_simulation_exclusion(self, invalid):
+        """The exact PDK exclusion key rejects truthy or nullable values."""
+        level = self._mk_level(
+            (40, 1),
+            0.0,
+            0.2,
+            "aluminum",
+            info={"exclude_from_simulation": invalid},
+        )
+
+        with pytest.raises(ValueError, match="invalid exclude_from_simulation"):
+            extract_layer_stack(
+                cast(Any, SimpleNamespace(layers={"UBM": level})),
+                pdk_name="test",
+                include_substrate=False,
+            )
+
+    def test_extract_layer_stack_rejects_invalid_explicit_sgb_role(self):
+        """Route A/B roles fail closed rather than being inferred."""
+        level = self._mk_level(
+            (40, 1),
+            0.0,
+            0.2,
+            "aluminum",
+            info={"part_role": "metal"},
+        )
+
+        with pytest.raises(ValueError, match="invalid part_role"):
+            extract_layer_stack(
+                cast(Any, SimpleNamespace(layers={"UBM": level})),
+                pdk_name="test",
+                include_substrate=False,
+            )
 
 
 class TestValidation:
