@@ -1362,7 +1362,9 @@ def test_route_ab_evaluated_gds_replaces_raw_target_with_fused_islands(
         component=SimpleNamespace(name="TOP"), stack=stack, gds_path=gds_path
     )
 
-    flattened = gdstk.read_gds(gds_path).cells[0]
+    flattened = next(
+        cell for cell in gdstk.read_gds(gds_path).cells if isinstance(cell, gdstk.Cell)
+    )
     target = [
         polygon
         for polygon in flattened.polygons
@@ -1414,13 +1416,16 @@ def test_route_ab_evaluated_gds_preserves_hole_island_layer_and_datatype(
     xao_adapter._write_sgb_input_gds(
         component=SimpleNamespace(name="TOP"), stack=stack, gds_path=gds_path
     )
-    polygons = gdstk.read_gds(gds_path).cells[0].polygons
+    cell = next(
+        cell for cell in gdstk.read_gds(gds_path).cells if isinstance(cell, gdstk.Cell)
+    )
+    polygons = cell.polygons
 
     assert polygons
     assert {(polygon.layer, polygon.datatype) for polygon in polygons} == {(40, 1)}
     assert sum(polygon.area() for polygon in polygons) == pytest.approx(12.0)
-    assert [polygon.points.tolist() for polygon in polygons] == [
-        polygon.points.tolist()
+    assert [tuple(map(tuple, polygon.points)) for polygon in polygons] == [
+        tuple(map(tuple, polygon.points))
         for polygon in xao_adapter._gdstk_polygons_from_island(
             island=fused_island, layer=40, datatype=1
         )

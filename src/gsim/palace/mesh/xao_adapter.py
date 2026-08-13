@@ -1698,9 +1698,14 @@ def _structured_ms_ma_surface_records(
     )
     substrate_center = volume_z_centers.get(substrate_id)
     other_center = volume_z_centers.get(other_id)
-    if not all(
-        value is not None and math.isfinite(value)
-        for value in (sheet_z_center, substrate_center, other_center)
+    if (
+        sheet_z_center is None
+        or substrate_center is None
+        or other_center is None
+        or not all(
+            math.isfinite(value)
+            for value in (sheet_z_center, substrate_center, other_center)
+        )
     ):
         raise ValueError(
             f"SGB MS_MA surface {name!r} needs finite adjacent-volume topology."
@@ -1739,9 +1744,10 @@ def _structured_sa_surface_record(
     )
     substrate_center = volume_z_centers.get(substrate_id)
     vacuum_center = volume_z_centers.get(vacuum_id)
-    if not all(
-        value is not None and math.isfinite(value)
-        for value in (substrate_center, vacuum_center)
+    if (
+        substrate_center is None
+        or vacuum_center is None
+        or not all(math.isfinite(value) for value in (substrate_center, vacuum_center))
     ):
         raise ValueError(
             f"SGB SA surface {name!r} needs finite adjacent-volume topology."
