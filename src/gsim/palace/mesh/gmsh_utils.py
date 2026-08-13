@@ -12,6 +12,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 _CORNER_TURN_THRESHOLD_DEG = 45.0
+PLANAR_ORIENTATION_TOLERANCE = 1e-6
 INTERFACE_DELIMITER = "___"
 _LEGACY_INTERFACE_DELIMITER = "__"
 _EXTERIOR_SUFFIXES = (
@@ -674,13 +675,13 @@ def create_port_rectangle(
     dx = xmax - xmin
     dz = zmax - zmin
 
-    if dz < 1e-6:
+    if dz < PLANAR_ORIENTATION_TOLERANCE:
         # Horizontal port (in xy plane)
         pt1 = kernel.addPoint(xmin, ymin, zmin, meshseed, -1)
         pt2 = kernel.addPoint(xmin, ymax, zmin, meshseed, -1)
         pt3 = kernel.addPoint(xmax, ymax, zmin, meshseed, -1)
         pt4 = kernel.addPoint(xmax, ymin, zmin, meshseed, -1)
-    elif dx < 1e-6:
+    elif dx < PLANAR_ORIENTATION_TOLERANCE:
         # Vertical port in yz plane
         pt1 = kernel.addPoint(xmin, ymin, zmin, meshseed, -1)
         pt2 = kernel.addPoint(xmin, ymax, zmin, meshseed, -1)

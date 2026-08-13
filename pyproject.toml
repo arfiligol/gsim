@@ -332,4 +332,4 @@ unresolved-import = "ignore"
 include = ["src"]
 
 [tool.uv.sources]
-semantic-geometry-builder = { git = "https://github.com/OrPenStrike/semantic-geometry-builder", rev = "616cfbd4b44e6fcc54295a9addb5f355163397a5" }
+semantic-geometry-builder = { git = "https://github.com/OrPenStrike/semantic-geometry-builder", rev = "538d014ac1a3afce532c665c1e300e775b7f09fe" }

@@ -2120,7 +2120,11 @@ class PalaceSimBase(BaseModel):
                 if (
                     str(representation).upper() == "A"
                     and assignment["interface_type"] == "MA"
+                    and not any(surface.interface_type == "MA" for surface in surfaces)
                 ):
+                    # Legacy Route-A catalogs expose only the MS half of an
+                    # MS_MA sheet. Current structured A/B records provide an
+                    # explicit MA child and must retain its opposite face.
                     selected_surfaces = tuple(
                         replace(surface, interface_type="MA", face_kind=face_kind)
                         for surface in surfaces

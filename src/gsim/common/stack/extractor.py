@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import yaml
 from gdsfactory.technology import LayerStack as GfLayerStack
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from gsim.common.stack._layer_utils import classify_layer_type, get_gds_layer_tuple
 from gsim.common.stack.materials import (
@@ -24,7 +24,21 @@ logger = logging.getLogger(__name__)
 
 
 class Layer(BaseModel):
-    """Layer information for Palace simulation."""
+    """Layer information for Palace simulation.
+
+    For structured SGB Route A/B lowering, ``part_role``, ``net_id``, and
+    ``equipotential_id`` are authored ``LayerLevel.info`` authority. ``net_id``
+    is the default identity for an unselected layer or its residual connected
+    islands; a terminal selector overrides only its selected island with the
+    deterministic ``{layer}@{label}`` identity and clears that selected
+    record's inherited layer-default ``equipotential_id``. ``equipotential_id``
+    is otherwise the authored component identity propagated alongside the
+    layer record. A contact pad
+    additionally declares its authored ``attached_face_metal_semantic_id``.
+    ``exclude_from_simulation`` is an authored boolean that omits the layer
+    from SGB simulation lowering.
+    No role, net, equipotential, or attachment is inferred from names.
+    """
 
     model_config = ConfigDict(validate_assignment=True)
 
@@ -37,6 +51,12 @@ class Layer(BaseModel):
     layer_type: Literal["conductor", "via", "dielectric", "substrate"]
     sidewall_angle: float = 0.0  # degrees
     mesh_resolution: str | float = "medium"
+    part_role: Literal["face_metal", "contact_pad", "bump_body"] | None = None
+    attached_face_metal_semantic_id: str | None = None
+    net_id: str | None = None
+    equipotential_id: str | None = None
+    exclude_from_simulation: bool = False
+    _source_expression: Any | None = PrivateAttr(default=None)
 
     def get_mesh_size(self, base_size: float = 1.0) -> float:
         """Get mesh size in um for this layer.
@@ -70,6 +90,16 @@ class Layer(BaseModel):
         }
         if self.sidewall_angle != 0.0:
             d["sidewall_angle"] = self.sidewall_angle
+        if self.part_role is not None:
+            d["part_role"] = self.part_role
+        if self.attached_face_metal_semantic_id is not None:
+            d["attached_face_metal_semantic_id"] = self.attached_face_metal_semantic_id
+        if self.net_id is not None:
+            d["net_id"] = self.net_id
+        if self.equipotential_id is not None:
+            d["equipotential_id"] = self.equipotential_id
+        if self.exclude_from_simulation:
+            d["exclude_from_simulation"] = True
         return d
 
 
@@ -398,6 +428,62 @@ def extract_layer_stack(
         info = getattr(layer_level, "info", None) or {}
         layer_type = info.get("layer_type") or classify_layer_type(layer_name, material)
         sidewall_angle = getattr(layer_level, "sidewall_angle", 0.0) or 0.0
+        part_role = info.get("part_role")
+        if part_role is not None:
+            if not isinstance(part_role, str):
+                raise ValueError(
+                    f"Layer {layer_name!r} provides invalid part_role {part_role!r}. "
+                    "Expected face_metal, contact_pad, or bump_body."
+                )
+            part_role = part_role.strip().lower()
+            if part_role not in {"face_metal", "contact_pad", "bump_body"}:
+                raise ValueError(
+                    f"Layer {layer_name!r} provides invalid part_role {part_role!r}. "
+                    "Expected face_metal, contact_pad, or bump_body."
+                )
+
+        attached_face_metal_semantic_id = info.get("attached_face_metal_semantic_id")
+        if attached_face_metal_semantic_id is None:
+            attached_face_metal_semantic_id = None
+        elif isinstance(attached_face_metal_semantic_id, str):
+            attached_face_metal_semantic_id = (
+                attached_face_metal_semantic_id.strip() or None
+            )
+        else:
+            raise ValueError(
+                f"Layer {layer_name!r} provides invalid "
+                "attached_face_metal_semantic_id."
+            )
+        if (
+            "attached_face_metal_semantic_id" in info
+            and not attached_face_metal_semantic_id
+        ):
+            raise ValueError(
+                f"Layer {layer_name!r} provides an empty "
+                "attached_face_metal_semantic_id."
+            )
+
+        raw_net_id = info.get("net_id")
+        if raw_net_id is None:
+            net_id = None
+        elif isinstance(raw_net_id, str) and raw_net_id.strip():
+            net_id = raw_net_id.strip()
+        else:
+            raise ValueError(f"Layer {layer_name!r} provides invalid net_id.")
+
+        raw_equipotential_id = info.get("equipotential_id")
+        if raw_equipotential_id is None:
+            equipotential_id = None
+        elif isinstance(raw_equipotential_id, str) and raw_equipotential_id.strip():
+            equipotential_id = raw_equipotential_id.strip()
+        else:
+            raise ValueError(f"Layer {layer_name!r} provides invalid equipotential_id.")
+
+        raw_exclude_from_simulation = info.get("exclude_from_simulation", False)
+        if type(raw_exclude_from_simulation) is not bool:
+            raise ValueError(
+                f"Layer {layer_name!r} provides invalid exclude_from_simulation."
+            )
 
         if layer_type == "substrate" and not include_substrate:
             continue
@@ -411,7 +497,13 @@ def extract_layer_stack(
             material=material,
             layer_type=layer_type,
             sidewall_angle=float(sidewall_angle),
+            part_role=part_role,
+            attached_face_metal_semantic_id=attached_face_metal_semantic_id,
+            net_id=net_id,
+            equipotential_id=equipotential_id,
+            exclude_from_simulation=raw_exclude_from_simulation,
         )
+        layer._source_expression = layer_level.layer  # noqa: SLF001
 
         stack.layers[layer_name] = layer
         materials_used.add(material)
