@@ -9,14 +9,17 @@ from __future__ import annotations
 import logging
 import math
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
-from gsim.palace.base import PalaceSimBase
+from gsim.common import Geometry, LayerStack
+from gsim.palace.base import PalaceSimMixin
 from gsim.palace.models import (
     CPWPortConfig,
     EigenmodeConfig,
+    MaterialConfig,
+    NumericalConfig,
     PortConfig,
     WavePortConfig,
 )
@@ -24,7 +27,7 @@ from gsim.palace.models import (
 logger = logging.getLogger(__name__)
 
 
-class EigenmodeSim(PalaceSimBase):
+class EigenmodeSim(PalaceSimMixin, BaseModel):
     """Eigenmode simulation for finding resonant frequencies.
 
     This class configures and runs eigenmode simulations to find
@@ -54,11 +57,18 @@ class EigenmodeSim(PalaceSimBase):
         numerical: Numerical solver configuration
     """
 
+    model_config = ConfigDict(
+        validate_assignment=True,
+        arbitrary_types_allowed=True,
+    )
     simulation_type: Literal["eigenmode"] = "eigenmode"
 
     driven: None = None
     terminals: None = None
     wave_ports: list[WavePortConfig] = Field(default_factory=list)
+    # Composed objects (from common)
+    geometry: Geometry | None = None
+    stack: LayerStack | None = None
     absorbing_boundary: bool = False
 
     # Port configurations (eigenmode can have ports for Q-factor calculation)
@@ -68,6 +78,18 @@ class EigenmodeSim(PalaceSimBase):
     # Eigenmode simulation config
     eigenmode: EigenmodeConfig = Field(default_factory=EigenmodeConfig)
 
+    # Material overrides and numerical config
+    materials: dict[str, MaterialConfig] = Field(default_factory=dict)
+    numerical: NumericalConfig = Field(default_factory=NumericalConfig)
+
+    # Stack configuration (stored as kwargs until resolved)
+    _stack_kwargs: dict[str, Any] = PrivateAttr(default_factory=dict)
+    _airbox_config: dict[str, float] = PrivateAttr(default_factory=dict)
+    _pec_blocks: list = PrivateAttr(default_factory=list)
+    _hints: dict[str, Any] = PrivateAttr(default_factory=dict)
+
+    # Internal state
+    _output_dir: Path | None = PrivateAttr(default=None)
     _configured_ports: bool = PrivateAttr(default=False)
 
     # -------------------------------------------------------------------------
@@ -80,22 +102,19 @@ class EigenmodeSim(PalaceSimBase):
         *,
         verbose: Literal["quiet", "status", "full"] = "status",
         wait: bool = True,
-        prepare_run_folder: bool = True,
+        check_cache: bool = False,
     ) -> dict[str, Path] | str:
         """Run the eigenmode sim on GDSFactory+ cloud.
 
-        Thin wrapper over :meth:`PalaceSimBase.run` that narrows the
+        Thin wrapper over :meth:`PalaceSimMixin.run` that narrows the
         return type: an eigenmode run returns a ``dict[str, Path]`` of
         output files keyed by name (e.g. ``"eig.csv"``), or the
         ``job_id`` string when ``wait=False``.
         """
-        from gsim.palace.results.driven import SParams
+        from gsim.palace.results import SParams
 
         result = super().run(
-            parent_dir,
-            verbose=verbose,
-            wait=wait,
-            prepare_run_folder=prepare_run_folder,
+            parent_dir, verbose=verbose, wait=wait, check_cache=check_cache
         )
         if isinstance(result, SParams):
             msg = (

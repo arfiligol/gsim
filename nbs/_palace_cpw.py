@@ -108,8 +108,13 @@ sim_lumped.set_output_dir("./palace-sim-cpw")
 sim_lumped.set_geometry(c)
 
 # Configure layer stack from active PDK
-stack = get_stack(air_above=100.0, air_below=100.0)  # auto-detects active PDK
+stack = get_stack()  # auto-detects active PDK
 sim_lumped.set_stack(stack)
+
+# Surround the design with air. Without this the absorbing boundary sits
+# directly on the passivation, microns above the metal, and adds large
+# spurious loss and reflection.
+sim_lumped.set_airbox(margin_x=50, margin_y=50, z_above=100, z_below=100)
 
 # Configure left CPW port (single port at signal center)
 sim_lumped.add_cpw_port(
@@ -154,6 +159,7 @@ sim_waveport.set_geometry(c)
 
 # Reuse the same stack from active PDK
 sim_waveport.set_stack(stack)
+sim_waveport.set_airbox(margin_x=50, margin_y=50, z_above=100, z_below=100)
 
 # Configure left CPW port (single port at signal center)
 sim_waveport.add_wave_port("o1", layer="topmetal2", max_size=True, mode=1, excited=True)
@@ -220,7 +226,7 @@ results_waveport = sim_waveport.run()
 # %%
 import matplotlib.pyplot as plt
 
-from gsim.palace.results.driven import load_sparams
+from gsim.palace import load_sparams
 
 sp_lumped = load_sparams(results_lumped.files)
 sp_waveport = load_sparams(results_waveport.files)

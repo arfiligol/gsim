@@ -50,6 +50,7 @@ pip-log.txt
 .DS_Store
 
 # folders
+.kilo/
 .cursor/
 .eggs/
 .hypothesis/
@@ -68,6 +69,7 @@ dist/
 docs/_build/
 docs/nbs/
 docs/site/
+docs/CHANGELOG.md
 downloads/
 eggs/
 env.bak/

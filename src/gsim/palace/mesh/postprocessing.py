@@ -298,6 +298,7 @@ def build_postprocessing_config_from_manifest(
                 surface_entry["TwoSided"] = spec.two_sided
             if spec.center is not None:
                 surface_entry["Center"] = list(spec.center)
+
             boundaries["SurfaceFlux"].append(surface_entry)
             index_entries.append(
                 _index_entry(
@@ -586,6 +587,7 @@ def build_terminal_index_map_from_manifest(
         for entry in manifest.entries
         if entry.role
         in {
+            "boundary_surface",
             "conductor_surface",
             "pec_surface",
             "via_boundary_surface",
@@ -598,6 +600,7 @@ def build_terminal_index_map_from_manifest(
         index = terminal_entry.get("Index")
         if not isinstance(index, int):
             continue
+
         terminal_name = (
             terminal_names[index - 1]
             if 0 <= index - 1 < len(terminal_names)
@@ -981,6 +984,8 @@ def _dielectric_interface_index_extra(
         extra["preset_name"] = spec.preset_name
     if spec.preset_source is not None:
         extra["preset_source"] = spec.preset_source
+    if spec.material_name is not None:
+        extra["material_name"] = spec.material_name
     return extra
 
 

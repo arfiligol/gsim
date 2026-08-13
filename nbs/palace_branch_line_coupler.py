@@ -233,8 +233,13 @@ sim.set_output_dir("./palace-sim-branch-coupler")
 sim.set_geometry(c)
 
 # Configure layer stack from active PDK
-stack = get_stack(air_above=300.0)  # auto-detects active PDK
+stack = get_stack()  # auto-detects active PDK
 sim.set_stack(stack)
+
+# Surround the design with air. Without this the absorbing boundary sits
+# directly on the passivation, microns above the metal, and adds large
+# spurious loss and reflection.
+sim.set_airbox(margin_x=50, margin_y=50, z_above=100, z_below=100)
 
 # Configure via ports (Metal3 ground plane to TopMetal2 signal)
 for port in c.ports:
@@ -253,23 +258,6 @@ sim.mesh(preset="default")
 # %% papermill={"duration": 1.02794, "end_time": "2026-04-04T06:14:42.007639", "exception": false, "start_time": "2026-04-04T06:14:40.979699", "status": "completed"}
 # Static PNG
 sim.plot_mesh(show_groups=["metal", "P"])
-
-# %% [markdown]
-# ### Generate handoff package
-#
-# This writes the canonical Palace run folder and packages it as a `.tar.gz`
-# archive that can be transferred to an HPC system before solver execution.
-
-# %%
-from pathlib import Path
-
-run_dir = sim.output_dir
-assert run_dir is not None
-HANDOFF_PACKAGE_DIR = Path()
-handoff_archive = HANDOFF_PACKAGE_DIR / f"{run_dir.name}-palace.tar.gz"
-
-handoff_bundle = sim.generate_handoff_package(archive_path=handoff_archive)
-handoff_archive
 
 # %% [markdown] papermill={"duration": 0.002874, "end_time": "2026-04-04T06:14:42.013971", "exception": false, "start_time": "2026-04-04T06:14:42.011097", "status": "completed"}
 # ### Run simulation on GDSFactory+ Cloud

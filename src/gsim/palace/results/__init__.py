@@ -1,46 +1,26 @@
-"""Semantic Palace result objects and problem-type report models.
+"""Official Palace result utilities plus typed SCQ result/report objects.
 
-This package is the semantic result layer. It owns two reviewable levels:
-
-* Typed Data objects, such as ``SParams``, ``Eigenmodes``,
-  ``TerminalMatrix``, EPR participation tables, and loss tables. Each Typed
-  Data object owns its own notebook-facing ``visualize()`` behavior.
-* Problem Type Reports, such as ``DrivenReport``, ``EigenmodeReport``, and
-  ``ElectrostaticReport``. Reports aggregate Typed Data and expose
-  ``show_all_results()``; they do not create new visualization semantics.
-  Simulation benchmark metadata is displayed explicitly through
-  ``show_simulation_benchmark()`` because it answers run-cost questions rather
-  than problem-physics questions.
-
-This package does not discover folders, parse raw Palace artifact sets, or
-decide source/missing-artifact audit policy. That adapter work lives in
-``gsim.palace.resolve``. It also does not define plotting primitives; generic
-table and plot helpers live in ``gsim.palace.display`` and are selected by the
-Typed Data objects.
-
-Typed Data public API requirement:
-
-* ``visualize()`` is the common notebook/report entry point and must return a
-  named mapping of tables, figures, or scalar display values.
-* ``tables()`` is optional and should exist only when the object has a useful
-  default table.
-* ``figures()`` is optional and should exist only when the object has a useful
-  default figure.
-* Do not add empty ``tables()`` or ``figures()`` hooks for structural symmetry;
-  absence is the signal that the view is not part of that Typed Data contract.
-
-Review path:
-``Run Stage handle / completed run folder -> resolve -> results typed data ->
-results report -> display primitives``.
+The upstream 0.2 public result API remains in :mod:`legacy`; the typed
+Resolve/report layer is additive and lives in explicit submodules.
 """
 
 from __future__ import annotations
 
 from gsim.palace.results.benchmarks import SimulationBenchmark
-from gsim.palace.results.driven import SParam, SParams
 from gsim.palace.results.eigenmode import EigenmodeConvergence, Eigenmodes
 from gsim.palace.results.electrostatic import TerminalMatrix, TerminalMatrixConvergence
 from gsim.palace.results.indexed import IndexedCsv, IndexedCsvColumn
+from gsim.palace.results.legacy import (
+    ModeMetrics,
+    PalaceTextResults,
+    SParam,
+    SParams,
+    _resolve_source,
+    get_port_map,
+    load_fields,
+    load_sparams,
+    load_text_results,
+)
 from gsim.palace.results.loss import (
     DOMAIN_LOSS_COLUMNS,
     LOSS_BUDGET_COLUMNS,
@@ -78,6 +58,8 @@ __all__ = [
     "IndexedCsv",
     "IndexedCsvColumn",
     "LossBudget",
+    "ModeMetrics",
+    "PalaceTextResults",
     "PortEpr",
     "PostprocessingTable",
     "ReportLoss",
@@ -88,4 +70,9 @@ __all__ = [
     "SurfaceQ",
     "TerminalMatrix",
     "TerminalMatrixConvergence",
+    "_resolve_source",
+    "get_port_map",
+    "load_fields",
+    "load_sparams",
+    "load_text_results",
 ]

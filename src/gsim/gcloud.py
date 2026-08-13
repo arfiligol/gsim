@@ -18,8 +18,9 @@ Usage:
     # Multi-job polling:
     results = gcloud.wait_for_results(id1, id2, id3)
 
-    # Select a solver with job_type:
-    result = gcloud.run_simulation("./sim", job_type="palace")
+    # Or use solver-specific wrappers:
+    from gsim import palace as pa
+    result = pa.run_simulation("./sim")
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from gdsfactoryplus import sim
 
@@ -43,6 +44,24 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
+
+
+def _status_value(status: Any) -> str:
+    """Return a status string for SDK 1.x enums and SDK 2.x strings."""
+    return str(getattr(status, "value", status))
+
+
+def _get_job_logs_callable() -> Callable[..., dict[str, Any]] | None:
+    """Return the SDK log fetcher across the 1.x module and 2.x package layouts."""
+    get_logs = getattr(sim, "_get_job_logs", None)
+    if get_logs is not None:
+        return cast("Callable[..., dict[str, Any]]", get_logs)
+
+    sim_web = getattr(sim, "web", None)
+    return cast(
+        "Callable[..., dict[str, Any]] | None",
+        getattr(sim_web, "_get_job_logs", None),
+    )
 
 
 def _is_transient_error(exc: Exception) -> bool:
@@ -70,6 +89,8 @@ def _is_forbidden_error(exc: Exception) -> bool:
 __all__ = [
     "CloudSimulationNotEnabledError",
     "RunResult",
+    "check_cache",
+    "check_cache_for_dir",
     "get_status",
     "print_job_summary",
     "register_result_parser",
@@ -172,7 +193,7 @@ def _handle_failed_job(job, output_dir: Path, verbose: bool) -> None:
     """
     error_parts = [
         f"Simulation failed with exit code {job.exit_code}",
-        f"Status: {job.status.value}",
+        f"Status: {_status_value(job.status)}",
     ]
 
     if job.status_reason:
@@ -215,6 +236,78 @@ def _get_job_definition(job_type: str):
         valid = [e.name for e in sim.JobDefinition]
         raise ValueError(f"Unknown job type '{job_type}'. Valid types: {valid}")
     return getattr(sim.JobDefinition, job_type_upper)
+
+
+# ---------------------------------------------------------------------------
+# Result cache
+# ---------------------------------------------------------------------------
+
+
+def _sdk_accepts(func: Any, param: str) -> bool:
+    """Return True if *func* accepts a keyword argument named *param*.
+
+    Used to stay compatible with SDK versions released before the caching
+    parameters existed.
+    """
+    import inspect
+
+    try:
+        return param in inspect.signature(func).parameters
+    except (TypeError, ValueError):  # pragma: no cover - builtins / C funcs
+        return False
+
+
+def check_cache(job_type: str, input_hash: str) -> str | None:
+    """Look up a previously completed job with identical inputs.
+
+    Never raises: a cache lookup is an optimization, so an unsupported SDK,
+    a transient network error, or a server error all degrade to a miss and
+    the caller submits the job normally.
+
+    Args:
+        job_type: Solver name, e.g. ``"meep"`` or ``"palace"``.
+        input_hash: Value from :func:`gsim.hashing.compute_input_hash`.
+
+    Returns:
+        ``job_id`` of the cached job, or ``None`` on a miss.
+    """
+    sdk_check = getattr(sim, "check_cache", None)
+    if sdk_check is None:
+        logger.debug(
+            "Installed gdsfactoryplus has no check_cache(); skipping cache lookup"
+        )
+        return None
+
+    try:
+        result = sdk_check(
+            job_definition=_get_job_definition(job_type),
+            input_hash=input_hash,
+        )
+    except Exception as exc:
+        logger.debug("Cache lookup failed (%s); submitting normally", exc)
+        return None
+
+    if not getattr(result, "cached", False):
+        return None
+    return getattr(result, "job_id", None)
+
+
+def check_cache_for_dir(input_dir: str | Path, job_type: str) -> tuple[str, str | None]:
+    """Hash a prepared input directory and look it up in the cloud cache.
+
+    Args:
+        input_dir: Directory holding the files that would be uploaded.
+        job_type: Solver name, e.g. ``"meep"`` or ``"palace"``.
+
+    Returns:
+        ``(input_hash, job_id)`` where ``job_id`` is ``None`` on a cache
+        miss. The hash is returned either way so the caller can pass it to
+        :func:`upload` and populate the cache for the next run.
+    """
+    from gsim.hashing import compute_input_hash
+
+    input_hash = compute_input_hash(input_dir, job_type)
+    return input_hash, check_cache(job_type, input_hash)
 
 
 def _download_job(job, parent_dir: str | Path | None, verbose: bool) -> RunResult:
@@ -311,16 +404,12 @@ def _job_status_value(job) -> str | None:
 
 def _optional_str(value: Any) -> str | None:
     """Convert an optional value to text."""
-    if value is None:
-        return None
-    return str(value)
+    return None if value is None else str(value)
 
 
 def _datetime_iso(value: Any) -> str | None:
     """Return an ISO timestamp for a datetime value."""
-    if isinstance(value, datetime):
-        return value.isoformat(timespec="seconds")
-    return None
+    return value.isoformat(timespec="seconds") if isinstance(value, datetime) else None
 
 
 def _job_elapsed_seconds(job) -> float | None:
@@ -366,6 +455,7 @@ def upload(
     job_type: str,
     *,
     verbose: bool = True,
+    input_hash: str | None = None,
 ) -> str:
     """Upload simulation files to the cloud. Does NOT start execution.
 
@@ -373,6 +463,10 @@ def upload(
         config_dir: Directory containing simulation config files.
         job_type: Simulation type (e.g. ``"palace"``, ``"meep"``).
         verbose: Print progress messages.
+        input_hash: Optional cache key from
+            :func:`gsim.hashing.compute_input_hash`. Recorded server-side so
+            a later identical run can be served from cache. Ignored by SDK
+            versions that predate the caching API.
 
     Returns:
         ``job_id`` string that can be passed to :func:`start`,
@@ -385,7 +479,10 @@ def upload(
     if verbose:
         print("Uploading simulation... ", end="", flush=True)  # noqa: T201
 
-    pre_job = upload_simulation_dir(config_dir, job_type)
+    # Only forward input_hash when set, keeping the call shape unchanged for
+    # callers that don't use caching.
+    extra = {"input_hash": input_hash} if input_hash is not None else {}
+    pre_job = upload_simulation_dir(config_dir, job_type, **extra)
 
     if verbose:
         print(f"done (job_id: {pre_job.job_id})")  # noqa: T201
@@ -425,12 +522,12 @@ def get_status(job_id: str) -> str:
         ``"running"``, ``"completed"``, ``"failed"``.
     """
     job = sim.get_job(job_id)
-    return job.status.value
+    return _status_value(job.status)
 
 
 def _fetch_logs(job_id: str, cursor: str | None) -> tuple[list[str], str | None]:
     """Fetch a page of log messages. Returns (messages, next_cursor)."""
-    _get_logs = getattr(sim, "_get_job_logs", None)
+    _get_logs = _get_job_logs_callable()
     if _get_logs is None:
         return [], cursor
     _logs_unavailable = getattr(sim, "LogsNotAvailableError", Exception)
@@ -504,11 +601,11 @@ def wait_for_results(
     if not job_ids:
         raise ValueError("At least one job_id is required")
 
-    if verbose == "full" and not hasattr(sim, "_get_job_logs"):
+    if verbose == "full" and _get_job_logs_callable() is None:
         import warnings
 
         warnings.warn(
-            "Log streaming requires gdsfactoryplus >= 1.6.4. "
+            "Log streaming is not supported by this gdsfactoryplus SDK. "
             "Falling back to verbose='status'.",
             stacklevel=2,
         )
@@ -519,11 +616,14 @@ def wait_for_results(
     now = time.monotonic()
     start_times: dict[str, float] = dict.fromkeys(job_ids, now)
     end_times: dict[str, float] = {}
-    terminal = {sim.SimStatus.COMPLETED, sim.SimStatus.FAILED}
+    terminal = {
+        _status_value(sim.SimStatus.COMPLETED),
+        _status_value(sim.SimStatus.FAILED),
+    }
 
     # Freeze timer for any jobs already finished
     for jid, job in jobs.items():
-        if job.status in terminal:
+        if _status_value(job.status) in terminal:
             end_times[jid] = now
 
     # Track how many lines we printed last time (for overwriting multi-job)
@@ -533,7 +633,7 @@ def wait_for_results(
     log_cursors: dict[str, str | None] = dict.fromkeys(job_ids, None)
 
     # Poll until all jobs reach a terminal state
-    while not all(j.status in terminal for j in jobs.values()):
+    while not all(_status_value(j.status) in terminal for j in jobs.values()):
         if verbose == "status":
             prev_lines = _print_status_table(
                 jobs, start_times, prev_lines, end_times=end_times
@@ -542,7 +642,7 @@ def wait_for_results(
         time.sleep(poll_interval)
 
         for jid, job in jobs.items():
-            if job.status not in terminal:
+            if _status_value(job.status) not in terminal:
                 try:
                     jobs[jid] = sim.get_job(jid)
                 except Exception as exc:
@@ -551,10 +651,12 @@ def wait_for_results(
                         continue
                     raise
                 # Stream logs when running
-                if verbose == "full" and jobs[jid].status == sim.SimStatus.RUNNING:
+                if verbose == "full" and _status_value(
+                    jobs[jid].status
+                ) == _status_value(sim.SimStatus.RUNNING):
                     log_cursors[jid] = _fetch_and_print_logs(jid, log_cursors[jid])
                 # Freeze timer when job reaches terminal state
-                if jobs[jid].status in terminal:
+                if _status_value(jobs[jid].status) in terminal:
                     end_times[jid] = time.monotonic()
 
     # Final log fetch — drain all remaining pages
@@ -649,7 +751,7 @@ def _print_status_table(
 
     if n == 1:
         jid, job = next(iter(jobs.items()))
-        msg = f"  {job.job_name or jid}  {job.status.value}  {_elapsed(jid)}"
+        msg = f"  {job.job_name or jid}  {_status_value(job.status)}  {_elapsed(jid)}"
         if mode == "tty":
             sys.stdout.write(f"\r{msg:<60s}")
             if final:
@@ -663,7 +765,8 @@ def _print_status_table(
     print(f"Waiting for {n} jobs...")  # noqa: T201
     lines_printed += 1
     for jid, job in jobs.items():
-        line = f"  {job.job_name or jid:<30s} {job.status.value:<12s} {_elapsed(jid)}"
+        status = _status_value(job.status)
+        line = f"  {job.job_name or jid:<30s} {status:<12s} {_elapsed(jid)}"
         print(line)  # noqa: T201
         lines_printed += 1
 
@@ -680,12 +783,19 @@ class CloudSimulationNotEnabledError(Exception):
     """Raised when the user's account does not have cloud simulation enabled."""
 
 
-def upload_simulation_dir(input_dir: str | Path, job_type: str):
+def upload_simulation_dir(
+    input_dir: str | Path,
+    job_type: str,
+    *,
+    input_hash: str | None = None,
+):
     """Upload a simulation directory for cloud execution.
 
     Args:
         input_dir: Directory containing simulation files
         job_type: Simulation type (e.g., "palace")
+        input_hash: Optional cache key recorded with the job. Silently
+            dropped when the installed SDK does not support it.
 
     Returns:
         PreJob object from gdsfactoryplus
@@ -695,8 +805,19 @@ def upload_simulation_dir(input_dir: str | Path, job_type: str):
     """
     input_dir = Path(input_dir)
     job_definition = _get_job_definition(job_type)
+    kwargs: dict[str, Any] = {}
+    if input_hash is not None:
+        if _sdk_accepts(sim.upload_simulation, "input_hash"):
+            kwargs["input_hash"] = input_hash
+        else:
+            logger.debug(
+                "Installed gdsfactoryplus does not accept input_hash; "
+                "uploading without a cache key"
+            )
     try:
-        return sim.upload_simulation(path=input_dir, job_definition=job_definition)
+        return sim.upload_simulation(
+            path=input_dir, job_definition=job_definition, **kwargs
+        )
     except Exception as exc:
         if _is_forbidden_error(exc):
             raise CloudSimulationNotEnabledError(
@@ -791,7 +912,8 @@ def run_simulation(
 
         now = datetime.now(finished_job.created_at.tzinfo).strftime("%H:%M:%S")
         print(  # noqa: T201
-            f"Created: {created} | Now: {now} | Status: {finished_job.status.value}"
+            f"Created: {created} | Now: {now} | "
+            f"Status: {_status_value(finished_job.status)}"
         )
 
     # Check status
@@ -801,12 +923,6 @@ def run_simulation(
     # Download directly into sim_dir (SDK creates results/ subdirectory)
     raw_results = sim.download_results(finished_job, output_dir=sim_dir)
     files = _flatten_results(raw_results)
-    metadata_path = _write_cloud_run_metadata(
-        finished_job,
-        sim_dir=sim_dir,
-        files=files,
-    )
-    files[metadata_path.name] = metadata_path
 
     if verbose and files:
         print(f"Downloaded {len(files)} files to {sim_dir}")  # noqa: T201
@@ -832,7 +948,9 @@ def print_job_summary(job) -> None:
     files = list(job.download_urls.keys()) if job.download_urls else []
 
     print(f"{'Job:':<12} {job.job_name}")  # noqa: T201
-    print(f"{'Status:':<12} {job.status.value} (exit {job.exit_code})")  # noqa: T201
+    print(  # noqa: T201
+        f"{'Status:':<12} {_status_value(job.status)} (exit {job.exit_code})"
+    )
     print(f"{'Duration:':<12} {duration}")  # noqa: T201
     mem_gb = job.requested_memory_mb // 1024
     print(f"{'Resources:':<12} {job.requested_cpu} CPU / {mem_gb} GB")  # noqa: T201

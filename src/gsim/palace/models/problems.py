@@ -141,6 +141,8 @@ class DrivenConfig(BaseModel):
 
     def to_palace_config(self) -> dict:
         """Convert to Palace JSON config format."""
+        freq_step = (self.fmax - self.fmin) / max(1, self.num_points - 1) / 1e9
+
         if self.fmax == self.fmin:
             freq_step = 1.0
         else:
@@ -274,29 +276,60 @@ class EigenmodeConfig(BaseModel):
 
 
 class BoundaryModeConfig(BaseModel):
-    """Configuration for 2D boundary-mode waveguide extraction."""
+    """Configuration for 2D boundary mode (waveguide cross-section) simulation.
+
+    Attributes:
+        freq: Operating frequency in Hz.
+        num_modes: Number of propagation modes to compute.
+        save: Number of modes to save as ParaView fields (0 = disabled).
+        target: Target effective index for shift-and-invert (0 = auto).
+        tolerance: Relative convergence tolerance for the eigensolver.
+        max_size: Maximum eigensolver subspace size (0 = default).
+        solver_type: Palace eigensolver type.
+    """
 
     model_config = ConfigDict(validate_assignment=True)
 
     freq: float = Field(default=5e9, gt=0, description="Operating frequency in Hz")
     num_modes: int = Field(default=1, ge=1, description="Number of modes to compute")
-    save: int = Field(default=0, ge=0, description="Number of modes to save")
-    target: float = Field(default=0.0, description="Target effective index")
-    tolerance: float = Field(default=1e-6, gt=0, description="Relative tolerance")
-    max_size: int = Field(default=0, ge=0, description="Maximum eigensolver size")
-    solver_type: str = Field(default="Default", description="Palace solver type")
+    save: int = Field(
+        default=0,
+        ge=0,
+        description="Number of modes to save as ParaView fields",
+    )
+    target: float = Field(
+        default=0.0,
+        description="Target effective index (0 = automatic shift)",
+    )
+    tolerance: float = Field(
+        default=1e-6,
+        gt=0,
+        description="Relative convergence tolerance",
+    )
+    max_size: int = Field(
+        default=0,
+        ge=0,
+        description="Maximum eigensolver subspace size (0 = default)",
+    )
+    solver_type: str = Field(
+        default="Default",
+        description="Palace eigensolver type for BoundaryMode",
+    )
 
-    def to_palace_config(self) -> dict[str, object]:
-        """Convert to the Palace BoundaryMode mapping."""
+    def to_palace_config(self) -> dict:
+        """Convert to Palace JSON config format."""
         config: dict[str, object] = {
             "Freq": self.freq / 1e9,
             "N": self.num_modes,
             "Save": self.save,
-            "Target": self.target,
             "Tol": self.tolerance,
             "Type": self.solver_type,
         }
-        if self.max_size > 0:
+        if self.target > 0:  # Palace requires Target > 0 when present; 0 means auto
+            config["Target"] = self.target
+        if (
+            self.max_size > 0
+        ):  # Even when the default is zero, passing it explicitly makes Palace fail
             config["MaxSize"] = self.max_size
         return config
 
@@ -311,6 +344,21 @@ class ElectrostaticConfig(BaseModel):
     model_config = ConfigDict(validate_assignment=True)
 
     save_fields: int = Field(default=0, ge=0, description="Number of fields to save")
+    unassigned_conductor_policy: Literal["ground", "error"] = "ground"
+    exterior_boundary_policy: Literal["none", "ground"] = "none"
+
+    @model_validator(mode="after")
+    def _validate_boundary_policies(self) -> Self:
+        """Keep explicit exterior ground separate from legacy residual ground."""
+        if (
+            self.exterior_boundary_policy == "ground"
+            and self.unassigned_conductor_policy != "error"
+        ):
+            raise ValueError(
+                "exterior_boundary_policy='ground' requires "
+                "unassigned_conductor_policy='error'."
+            )
+        return self
 
     def to_palace_config(self) -> dict:
         """Convert to Palace JSON config format."""

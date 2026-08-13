@@ -3,7 +3,7 @@
 This module is a narrow handoff point between the standalone
 ``semantic_geometry_builder`` package and gsim's Palace mesh/config pipeline.
 SGB is not the native gsim geometry path: callers enter this adapter only when
-they explicitly request Surface EPR route A/B/C geometry or pass an existing SGB
+they explicitly request Surface EPR route A/B geometry or pass an existing SGB
 XAO plus ``metadata/semantic_geometry`` sidecar directory.
 
 The ownership split is contract-first. SGB owns route topology, physical-group
@@ -17,10 +17,9 @@ HFSS-style PEC assignment to faces of a finite construction metal volume: its
 closed exterior boundary shell is PEC and its interior is excluded from Palace
 solution domains and tetrahedra.
 
-Explicit Route C remains on its pre-existing physical-name parser and is out
-of this active path's scope. Typed physical roles are future-compatible with
-retained conductor material volumes, but this adapter neither activates nor
-implements Route C. gsim owns mesh generation from the exported contract,
+This adapter is Route A/B only. Native upstream meshing remains the authority
+outside this explicit optional handoff. gsim owns mesh generation from the
+exported contract,
 Palace config generation, mesh manifests, and downstream result/report
 semantics. This adapter validates that the expected SGB files are present and
 fails loudly when the optional contract is unavailable or incomplete.
@@ -45,6 +44,7 @@ from gsim.common.polygon_utils import shapely_to_klayout
 from gsim.palace.mesh.config_generator import collect_mesh_stats, generate_palace_config
 from gsim.palace.mesh.generator import MeshResult
 from gsim.palace.mesh.manifest import build_mesh_manifest
+from gsim.palace.mesh.postprocessing import build_terminal_index_map_from_manifest
 from gsim.palace.models.versions import DEFAULT_PALACE_CONFIG_VERSION
 from gsim.palace.run_folder import prepare_palace_run_folder
 
@@ -111,10 +111,8 @@ def _is_nonempty_string_sequence(value: Any) -> bool:
 
 
 def _has_structured_record_marker(record: Mapping[str, Any]) -> bool:
-    """Return whether a non-Route-C record claims current SGB structure."""
-    return _optional_string(record.get("route")) != "C" and any(
-        field in record for field in _STRUCTURED_SURFACE_FIELDS
-    )
+    """Return whether a record claims the required SGB structure."""
+    return any(field in record for field in _STRUCTURED_SURFACE_FIELDS)
 
 
 def _structured_record_kind(
@@ -151,7 +149,7 @@ def generate_mesh_from_semantic_geometry_builder(
     stack: LayerStack,
     ports: Sequence[PalacePort] = (),
     output_dir: str | Path,
-    route: Literal["A", "B", "C"],
+    route: Literal["A", "B"],
     activated_regions: Sequence[ActivatedRegion],
     terminals: Sequence[TerminalConfig] = (),
     model_name: str = "palace",
@@ -167,11 +165,9 @@ def generate_mesh_from_semantic_geometry_builder(
     driven_config: DrivenConfig | None = None,
     eigenmode_config: EigenmodeConfig | None = None,
     numerical_config: NumericalConfig | None = None,
-    refinement_config: Mapping[str, Any] | None = None,
     palace_version: PalaceConfigVersion = DEFAULT_PALACE_CONFIG_VERSION,
     validate_schema: bool = True,
     absorbing_boundary: bool = True,
-    problem_output_formats: Mapping[str, Any] | None = None,
     electrostatic_config: ElectrostaticConfig | None = None,
     magnetostatic_config: MagnetostaticConfig | None = None,
     current_sources: Sequence[CurrentSourceConfig] = (),
@@ -186,7 +182,7 @@ def generate_mesh_from_semantic_geometry_builder(
 ) -> MeshResult:
     """Build optional SGB route geometry, then mesh the exported XAO.
 
-    This entrypoint is used only for explicit Surface EPR route A/B/C requests.
+    This entrypoint is used only for explicit Surface EPR route A/B requests.
     It lowers the gsim component/stack inputs into SGB's reviewed GDS plus stack
     JSON contract, asks SGB to write the route XAO and semantic sidecars, and
     then hands those artifacts back to gsim for mesh/config generation. Missing
@@ -200,8 +196,6 @@ def generate_mesh_from_semantic_geometry_builder(
         route = "A"
     elif normalized_route == "B":
         route = "B"
-    elif normalized_route == "C":
-        route = "C"
     else:
         raise ValueError(f"Unsupported SGB Surface EPR route: {normalized_route!r}.")
     run_folder = prepare_palace_run_folder(output_dir)
@@ -217,7 +211,7 @@ def generate_mesh_from_semantic_geometry_builder(
         )
     except ImportError as error:
         msg = (
-            "Surface EPR A/B/C route meshing requires the "
+            "Surface EPR A/B route meshing requires the "
             "semantic-geometry-builder package installed with gsim."
         )
         raise ImportError(msg) from error
@@ -264,11 +258,9 @@ def generate_mesh_from_semantic_geometry_builder(
         driven_config=driven_config,
         eigenmode_config=eigenmode_config,
         numerical_config=numerical_config,
-        refinement_config=refinement_config,
         palace_version=palace_version,
         validate_schema=validate_schema,
         absorbing_boundary=absorbing_boundary,
-        problem_output_formats=problem_output_formats,
         electrostatic_config=electrostatic_config,
         terminals=terminals,
         magnetostatic_config=magnetostatic_config,
@@ -306,11 +298,9 @@ def generate_mesh_from_semantic_xao(
     driven_config: DrivenConfig | None = None,
     eigenmode_config: EigenmodeConfig | None = None,
     numerical_config: NumericalConfig | None = None,
-    refinement_config: Mapping[str, Any] | None = None,
     palace_version: PalaceConfigVersion = DEFAULT_PALACE_CONFIG_VERSION,
     validate_schema: bool = True,
     absorbing_boundary: bool = True,
-    problem_output_formats: Mapping[str, Any] | None = None,
     electrostatic_config: ElectrostaticConfig | None = None,
     terminals: Sequence[TerminalConfig] = (),
     magnetostatic_config: MagnetostaticConfig | None = None,
@@ -369,11 +359,11 @@ def generate_mesh_from_semantic_xao(
         gmsh.option.setNumber("General.Terminal", 1 if show_gui else 0)
         gmsh.option.setNumber("Mesh.MeshSizeMin", refined_mesh_size)
         gmsh.option.setNumber("Mesh.MeshSizeMax", max_mesh_size)
+        _sgb_records_route_context(records)
         groups = _groups_from_sgb_records(
             records=records,
             semantic_layer_map=semantic_layer_map or {},
             semantic_stack_layer_map=semantic_stack_layer_map or {},
-            route_context=_sgb_records_route_context(records),
         )
         if not groups["volumes"]:
             raise ValueError(
@@ -405,11 +395,9 @@ def generate_mesh_from_semantic_xao(
                 driven_config=driven_config,
                 eigenmode_config=eigenmode_config,
                 numerical_config=numerical_config,
-                refinement_config=refinement_config,
                 palace_version=palace_version,
                 validate_schema=validate_schema,
                 absorbing_boundary=absorbing_boundary,
-                problem_output_formats=problem_output_formats,
                 electrostatic_config=electrostatic_config,
                 terminals=list(terminals),
                 magnetostatic_config=magnetostatic_config,
@@ -419,6 +407,16 @@ def generate_mesh_from_semantic_xao(
                 material_overlay=material_overlay,
             )
         manifest = build_mesh_manifest(groups)
+        manifest.write_json(run_folder.mesh_manifest_path)
+        if terminals:
+            config = json.loads(config_path.read_text()) if config_path else {}
+            terminal_entries = config.get("Boundaries", {}).get("Terminal", [])
+            index_map = build_terminal_index_map_from_manifest(
+                manifest,
+                terminal_entries,
+                terminal_names=tuple(terminal.name for terminal in terminals),
+            )
+            index_map.write_json(run_folder.index_map_path)
     finally:
         gmsh.clear()
         gmsh.finalize()
@@ -598,7 +596,7 @@ def _sgb_stack_mapping_from_gsim_inputs(
     gds_path: Path,
     activated_regions: Sequence[ActivatedRegion],
     terminals: Sequence[TerminalConfig],
-    route: Literal["A", "B", "C"],
+    route: Literal["A", "B"],
 ) -> tuple[dict[str, Any], dict[str, str], dict[str, str]]:
     """Lower active gsim regions and layers to the SGB stack contract."""
     if not activated_regions:
@@ -618,19 +616,10 @@ def _sgb_stack_mapping_from_gsim_inputs(
     air_semantic_id = "AIR_ABOVE"
     terminals_by_layer: dict[str, list[Any]] = {}
     for terminal in terminals:
-        if route in {"A", "B"} or terminal.center is not None:
+        if terminal.net_id is None:
+            if terminal.layer is None:
+                raise ValueError("SGB selector terminal requires a layer.")
             terminals_by_layer.setdefault(terminal.layer, []).append(terminal)
-
-    if route == "C":
-        return _legacy_sgb_stack_mapping(
-            stack=stack,
-            gds_path=gds_path,
-            solution_regions=solution_regions,
-            solution_stack_layers=solution_stack_layers,
-            host_void_regions=host_void_regions,
-            terminals_by_layer=terminals_by_layer,
-            air_semantic_id=air_semantic_id,
-        )
 
     layer_records: list[dict[str, Any]] = []
     semantic_layer_map: dict[str, str] = {}
@@ -746,115 +735,6 @@ def _sgb_stack_mapping_from_gsim_inputs(
         semantic_layer_map,
         solution_stack_layers | semantic_layer_map,
     )
-
-
-def _legacy_sgb_stack_mapping(
-    *,
-    stack: LayerStack,
-    gds_path: Path,
-    solution_regions: Mapping[str, Any],
-    solution_stack_layers: Mapping[str, str],
-    host_void_regions: Sequence[tuple[str, float, float]],
-    terminals_by_layer: Mapping[str, Sequence[Any]],
-    air_semantic_id: str,
-) -> tuple[dict[str, Any], dict[str, str], dict[str, str]]:
-    """Keep the pre-A/B Route C lowering unchanged."""
-    present_layers = _gds_layers_in_file(gds_path)
-    records: list[dict[str, Any]] = []
-    semantic_layer_map: dict[str, str] = {}
-    for layer_name, layer in sorted(stack.layers.items()):
-        if layer.exclude_from_simulation:
-            continue
-        if layer.layer_type not in {"conductor", "via"}:
-            continue
-        if tuple(layer.gds_layer) not in present_layers:
-            continue
-        selectors = terminals_by_layer.get(layer_name) or (None,)
-        for selector in selectors:
-            semantic_id = (
-                _semantic_id(f"{layer_name}@{selector.physical_label or selector.name}")
-                if selector is not None
-                else _semantic_id(layer_name)
-            )
-            semantic_layer_map[semantic_id] = layer_name
-            records.append(
-                _legacy_sgb_layer_record(
-                    semantic_id=semantic_id,
-                    layer_name=layer_name,
-                    layer=layer,
-                    host_void_semantic_id=_host_void_for_layer(
-                        layer, host_void_regions, default=air_semantic_id
-                    ),
-                    selector=selector,
-                )
-            )
-    if not records:
-        raise ValueError(
-            "No SGB conductor/via layer records matched the component GDS."
-        )
-    return (
-        {
-            "metadata": {
-                "schema": "semantic_geometry_stack_v1",
-                "units": "um",
-                "source": str(gds_path),
-                "adapter": "gsim",
-            },
-            "solution_regions": solution_regions,
-            "layers": records,
-        },
-        semantic_layer_map,
-        dict(solution_stack_layers) | semantic_layer_map,
-    )
-
-
-def _legacy_sgb_layer_record(
-    *,
-    semantic_id: str,
-    layer_name: str,
-    layer: Any,
-    host_void_semantic_id: str,
-    selector: Any | None,
-) -> dict[str, Any]:
-    """Pre-A/B Route C layer mapping."""
-    geometry: dict[str, Any] = {
-        "z_um": float(layer.zmin),
-        "thickness_um": float(layer.thickness),
-        "geometry_source": "gds_polygon",
-    }
-    if selector is not None:
-        geometry["selector_point_um"] = [
-            float(selector.center[0]),
-            float(selector.center[1]),
-        ]
-    is_via = layer.layer_type == "via"
-    return {
-        "layer": int(layer.gds_layer[0]),
-        "datatype": int(layer.gds_layer[1]),
-        "semantic_id": semantic_id,
-        "role": "metal",
-        "material_id": layer.material,
-        "priority": int(getattr(layer, "mesh_order", 0) or 0),
-        "part_role": "bump_body" if is_via else "face_metal",
-        "net_id": semantic_id,
-        "geometry_kind": "layout_extrusion",
-        "host_void_semantic_id": host_void_semantic_id,
-        "geometry": geometry,
-        "route_representations": (
-            {
-                "A": "cutout_boundary_shell",
-                "B": "cutout_boundary_shell",
-                "C": "material_volume",
-            }
-            if is_via
-            else {
-                "A": "surface_sheet",
-                "B": "cutout_boundary_shell",
-                "C": "material_volume",
-            }
-        ),
-        "metadata": {"source_layer_name": layer_name},
-    }
 
 
 def _solution_regions_from_activated(
@@ -1218,7 +1098,6 @@ def _groups_from_sgb_records(
     records: Sequence[Any],
     semantic_layer_map: Mapping[str, str],
     semantic_stack_layer_map: Mapping[str, str],
-    route_context: Literal["A", "B", "C"],
 ) -> dict[str, dict[str, Any]]:
     """Translate live SGB physical-group records into gsim mesh groups."""
     groups: dict[str, dict[str, Any]] = {
@@ -1233,7 +1112,7 @@ def _groups_from_sgb_records(
     volume_z_centers = _semantic_volume_z_centers(records=records, live=live)
     structured_volumes = _structured_solution_volume_records(
         records=records,
-        structured_required=route_context in {"A", "B"},
+        structured_required=True,
     )
     missing: list[str] = []
     for record in records:
@@ -1252,7 +1131,7 @@ def _groups_from_sgb_records(
         phys_group, entity_tags = live[(dim, name)]
         structured_kind = _structured_record_kind(
             record,
-            structured_required=route_context in {"A", "B"},
+            structured_required=True,
         )
         if dim == 3 and structured_kind == "surface":
             raise ValueError(f"SGB volume {name!r} has surface structured metadata.")
@@ -1265,7 +1144,7 @@ def _groups_from_sgb_records(
                 entity_tags=entity_tags,
                 record=record,
                 semantic_stack_layer_map=semantic_stack_layer_map,
-                structured_required=route_context in {"A", "B"},
+                structured_required=True,
             )
         elif dim == 2:
             _add_surface_group_records(
@@ -1277,7 +1156,7 @@ def _groups_from_sgb_records(
                 semantic_layer_map=semantic_layer_map,
                 structured_volumes=structured_volumes,
                 volume_z_centers=volume_z_centers,
-                structured_required=route_context in {"A", "B"},
+                structured_required=True,
             )
     if missing:
         raise ValueError(
@@ -1287,21 +1166,21 @@ def _groups_from_sgb_records(
     return groups
 
 
-def _sgb_records_route_context(records: Sequence[Any]) -> Literal["A", "B", "C"]:
-    """Require one explicit SGB route; only explicit C permits legacy records."""
+def _sgb_records_route_context(records: Sequence[Any]) -> Literal["A", "B"]:
+    """Require one explicit structured SGB Route A/B context."""
     routes: set[str] = set()
     for record in records:
         if not isinstance(record, Mapping):
             raise TypeError("SGB physical group records must be JSON objects.")
         route = _optional_string(record.get("route"))
-        if route not in {"A", "B", "C"}:
+        if route not in {"A", "B"}:
             raise ValueError(
-                "SGB physical-group records require explicit route A, B, or C."
+                "SGB physical-group records require explicit route A or B."
             )
         routes.add(route)
     if len(routes) != 1:
         raise ValueError("SGB physical-group sidecar must have one route context.")
-    return cast(Literal["A", "B", "C"], routes.pop())
+    return cast(Literal["A", "B"], routes.pop())
 
 
 def _setup_xao_refinement(
@@ -1523,6 +1402,7 @@ def _add_surface_group_records(
             info.update(
                 {
                     "sgb_record": "final_physical_group",
+                    "solver_use": record["solver_use"],
                     "surface_id": record["surface_id"],
                     "representation": record["representation"],
                     "source_provenance": record["source_provenance"],
@@ -1633,6 +1513,7 @@ def _add_parsed_surface_group_record(
         "interface_id": alias_name,
         "interface_type": interface_type,
         "sgb_record": "final_physical_group",
+        "solver_use": record.get("solver_use"),
         "conductor_component_id": _optional_string(
             record.get("conductor_component_id")
         ),
@@ -1659,7 +1540,6 @@ def _add_parsed_surface_group_record(
         if structured
         else (),
         "source_provenance": record.get("source_provenance"),
-        "solver_use": record.get("solver_use"),
         "bbox": bbox,
         "centroid": _bbox_centroid(bbox),
     }

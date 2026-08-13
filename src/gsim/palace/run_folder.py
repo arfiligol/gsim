@@ -13,8 +13,9 @@ optional review snapshot such as ``design.gds``.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 
 @dataclass(frozen=True)
@@ -37,8 +38,44 @@ class PalaceRunFolder:
 
     @property
     def mesh_path(self) -> Path:
-        """Return the Palace mesh path."""
-        return self.root / "palace.msh"
+        """Return the validated mesh path selected by the Palace config."""
+        if not self.config_path.exists():
+            return self.root / "palace.msh"
+        try:
+            config = json.loads(self.config_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Palace config must be valid JSON: {self.config_path}"
+            ) from exc
+        if not isinstance(config, dict):
+            raise TypeError(f"Palace config must be an object: {self.config_path}")
+        model = config.get("Model")
+        if model is None:
+            return self.root / "palace.msh"
+        if not isinstance(model, dict):
+            raise TypeError(f"Palace Model must be an object: {self.config_path}")
+        if "Mesh" not in model:
+            return self.root / "palace.msh"
+        mesh = model["Mesh"]
+        if not isinstance(mesh, str) or not mesh.strip():
+            raise ValueError("Palace Model.Mesh must be a nonempty relative path")
+        relative = Path(mesh)
+        windows_relative = PureWindowsPath(mesh)
+        if (
+            relative.is_absolute()
+            or windows_relative.anchor
+            or ".." in relative.parts
+            or ".." in windows_relative.parts
+        ):
+            raise ValueError("Palace Model.Mesh must stay within the run folder")
+        path = self.root / relative
+        try:
+            path.resolve().relative_to(self.root.resolve())
+        except ValueError as exc:
+            raise ValueError(
+                "Palace Model.Mesh must stay within the run folder"
+            ) from exc
+        return path
 
     @property
     def sbatch_path(self) -> Path:

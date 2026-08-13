@@ -7,29 +7,32 @@ simulations to extract S-parameters.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
-from gsim.palace.base import PalaceSimBase
+from gsim.common import Geometry, LayerStack
+from gsim.palace.base import PalaceSimMixin
 from gsim.palace.models import (
     CPWPortConfig,
     DrivenConfig,
+    MaterialConfig,
     MeshConfig,
+    NumericalConfig,
     PortConfig,
     WavePortConfig,
 )
 
 if TYPE_CHECKING:
-    from gsim.palace.results.driven import SParams
+    from gsim.palace.results import SParams
 
 
-class DrivenSim(PalaceSimBase):
+class DrivenSim(PalaceSimMixin, BaseModel):
     """Frequency-domain driven simulation for S-parameter extraction.
 
     This class configures and runs driven simulations that sweep through
-    frequencies to compute S-parameters. Shared lifecycle behavior comes from
-    ``PalaceSimBase``; geometry and stack remain composed objects.
+    frequencies to compute S-parameters. Uses composition (no inheritance)
+    with shared Geometry and Stack components from gsim.common.
 
     Example:
         >>> from gsim.palace import DrivenSim
@@ -57,7 +60,15 @@ class DrivenSim(PalaceSimBase):
         numerical: Numerical solver configuration
     """
 
+    model_config = ConfigDict(
+        validate_assignment=True,
+        arbitrary_types_allowed=True,
+    )
     simulation_type: Literal["driven"] = "driven"
+
+    # Composed objects (from common)
+    geometry: Geometry | None = None
+    stack: LayerStack | None = None
 
     # Port configurations
     ports: list[PortConfig] = Field(default_factory=list)
@@ -73,7 +84,24 @@ class DrivenSim(PalaceSimBase):
     # Mesh config
     mesh_config: MeshConfig = Field(default_factory=MeshConfig.default)
 
+    # Material overrides and numerical config
+    materials: dict[str, MaterialConfig] = Field(default_factory=dict)
+    numerical: NumericalConfig = Field(default_factory=NumericalConfig)
+
+    # Stack configuration (stored as kwargs until resolved)
+    _stack_kwargs: dict[str, Any] = PrivateAttr(default_factory=dict)
+    _airbox_config: dict[str, float] = PrivateAttr(default_factory=dict)
+    _pec_blocks: list = PrivateAttr(default_factory=list)
+    _hints: dict[str, Any] = PrivateAttr(default_factory=dict)
+
+    # Internal state
+    _output_dir: Path | None = PrivateAttr(default=None)
     _configured_ports: bool = PrivateAttr(default=False)
+    _last_mesh_result: Any = PrivateAttr(default=None)
+    _last_ports: list = PrivateAttr(default_factory=list)
+
+    # Cloud job state (set by upload/run)
+    _job_id: str | None = PrivateAttr(default=None)
 
     # -------------------------------------------------------------------------
     # Cloud run (narrowed return type)
@@ -85,11 +113,11 @@ class DrivenSim(PalaceSimBase):
         *,
         verbose: Literal["quiet", "status", "full"] = "status",
         wait: bool = True,
-        prepare_run_folder: bool = True,
+        check_cache: bool = False,
     ) -> SParams | str:
         """Run the driven sim on GDSFactory+ cloud.
 
-        Thin wrapper over :meth:`PalaceSimBase.run` that narrows the
+        Thin wrapper over :meth:`PalaceSimMixin.run` that narrows the
         return type: the palace result parser always turns a completed
         driven run (which has ``port-S.csv``) into an
         :class:`~gsim.palace.results.SParams` object.
@@ -98,13 +126,10 @@ class DrivenSim(PalaceSimBase):
             :class:`SParams` when ``wait=True`` (the default), or the
             ``job_id`` string when ``wait=False``.
         """
-        from gsim.palace.results.driven import SParams as _SParams
+        from gsim.palace.results import SParams as _SParams
 
         result = super().run(
-            parent_dir,
-            verbose=verbose,
-            wait=wait,
-            prepare_run_folder=prepare_run_folder,
+            parent_dir, verbose=verbose, wait=wait, check_cache=check_cache
         )
         if isinstance(result, (_SParams, str)):
             return result

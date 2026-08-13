@@ -1,9 +1,6 @@
 groups:
   boundary_surfaces:
   - absorbing
-  - air___sin
-  - air___sio2
-  - sin___sio2
   conductor_surfaces:
   - metal3_xy
   - metal3_z

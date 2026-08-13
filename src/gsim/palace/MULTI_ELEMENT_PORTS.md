@@ -26,14 +26,11 @@ Palace supports this via multi-element ports:
   "Index": 1,
   "R": 56.02,
   "Elements": [
-    {"Attributes": [gap1_surface], "Direction": [0.0, -1.0, 0.0]},
-    {"Attributes": [gap2_surface], "Direction": [0.0, 1.0, 0.0]}
+    {"Attributes": [gap1_surface], "Direction": "+Y"},
+    {"Attributes": [gap2_surface], "Direction": "-Y"}
   ]
 }
 ```
-
-`gsim` emits normalized Cartesian vectors for `Direction`. The two CPW element directions are opposite transverse
-vectors derived from the GDSFactory port orientation.
 
 ## Reference
 
@@ -45,58 +42,46 @@ vectors derived from the GDSFactory port orientation.
 ### API Usage
 
 ```python
-from gsim.palace import DrivenSim
+from gplugins.palace_api import configure_cpw_port, extract_cpw_ports
 
-sim = DrivenSim()
-sim.set_geometry(c)
-sim.set_stack()
-sim.add_cpw_port(
-    "o1",
-    layer="topmetal2",
-    s_width=10.0,
-    gap_width=6.0,
+# Configure two ports as a CPW pair
+configure_cpw_port(
+    port_upper=c.ports['gap_upper'],  # gap between signal and upper ground
+    port_lower=c.ports['gap_lower'],  # gap between signal and lower ground
+    layer='topmetal2',
     length=5.0,
     impedance=50.0,
 )
-```
 
-If the two gap sheets are already drawn on a PDK-declared simulation layer, register that catalog and disable generated
-sheets:
+# Extract CPW ports
+cpw_ports = extract_cpw_ports(c, stack)
 
-```python
-sim.set_simulation_layers(
-    {"top_sim_boundary": {"gds_layer": (202, 1), "stack_layer": "top_sim_boundary"}}
-)
-sim.add_cpw_port(
-    "o1",
-    layer="topmetal2",
-    s_width=10.0,
-    gap_width=6.0,
-    length=5.0,
-    generate_sheet=False,
+# Generate mesh with CPW ports
+result = generate_mesh(
+    component=c,
+    stack=stack,
+    ports=[],           # regular ports
+    cpw_ports=cpw_ports, # CPW ports
+    output_dir="./sim",
 )
 ```
-
-The GDSFactory port named `"o1"` remains the signal-center anchor. Its layer must be the registered simulation layer,
-and mesh generation selects exactly one authored polygon at each computed gap center.
 
 ### How It Works
 
-1. `add_cpw_port()` selects one GDSFactory port at the signal center
+1. `configure_cpw_port()` links two gdsfactory ports as CPW elements
 
-   - Stores `palace_type='cpw'` in port info during mesh preparation
-   - Computes the two gap centers from signal width, gap width, and port orientation
+   - Stores `palace_type='cpw_element'` in port.info
+   - Assigns `cpw_group` ID to link the pair
+   - Auto-detects +/- directions based on Y positions
 
-1. `extract_ports()` lowers the configured port into an internal `models.PalacePort`
+1. `extract_cpw_ports()` groups CPW elements into `CPWPort` objects
 
-   - Each `models.PalacePort` has two gap centers
-   - Element `Direction` values are opposite normalized transverse vectors
+   - Each CPWPort has `upper_center` and `lower_center`
+   - `get_element_directions()` returns `("+Y", "-Y")` or similar
 
 1. Mesh generator creates separate surfaces for each element
 
    - Physical groups: `P1_E0`, `P1_E1` for port 1 elements
-   - Generated rectangles are rotated from the GDSFactory port orientation, or layout-authored polygons are selected
-     from registered simulation layers
 
 1. Config generator outputs multi-element format:
 
@@ -106,15 +91,13 @@ and mesh generation selects exactly one authored polygon at each computed gap ce
   "R": 50.0,
   "Excitation": 1,
   "Elements": [
-    {"Attributes": [phys_group_E0], "Direction": [0.0, -1.0, 0.0]},
-    {"Attributes": [phys_group_E1], "Direction": [0.0, 1.0, 0.0]}
+    {"Attributes": [phys_group_E0], "Direction": "-Y"},
+    {"Attributes": [phys_group_E1], "Direction": "+Y"}
   ]
 }
 ```
 
 ## Files
 
-- `models/ports.py` - `PalacePort`, `PortType`, and `PortGeometry` contracts
-- `ports/lowering.py` - `configure_cpw_port()` and `extract_ports()`
-- `mesh/geometry.py` - `add_ports()` handles rotated CPW element surfaces
-- `mesh/config_generator.py` - emits the Palace `Elements` array with vector directions
+- `ports/config.py` - `CPWPort` class, `configure_cpw_port()`, `extract_cpw_ports()`
+- `mesh/generator.py` - `_add_ports()` handles CPW surfaces, `_generate_palace_config()` outputs Elements array

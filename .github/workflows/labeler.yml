@@ -1,11 +1,16 @@
 name: PR Labeler
 on:
-  pull_request:
+  # pull_request_target so the job still gets a write-scoped token on PRs from
+  # forks (a plain pull_request token is read-only there, and addLabels 403s).
+  # Safe here: nothing from the PR is checked out or executed, the title is
+  # only regex-tested, and the job stays read-only towards code.
+  pull_request_target:
     types: [opened, edited]
 jobs:
   label:
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       pull-requests: write
     steps:
     - uses: actions/github-script@v7

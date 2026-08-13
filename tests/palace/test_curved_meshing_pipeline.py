@@ -4,12 +4,20 @@ from __future__ import annotations
 
 import builtins
 import json
+from copy import deepcopy
 from types import SimpleNamespace
+
+import pytest
 
 from gsim.common import Layer, LayerStack
 from gsim.palace.mesh import generator as mesh_generator
 from gsim.palace.mesh.config_generator import generate_palace_config
-from gsim.palace.mesh.geometry import MetalGeometryResult
+from gsim.palace.mesh.manifest import MeshManifest, MeshPhysicalGroup
+from gsim.palace.mesh.postprocessing import (
+    DielectricInterfaceSpec,
+    build_postprocessing_config_from_manifest,
+)
+from gsim.palace.models.problems import DrivenConfig
 
 
 class _FakeOption:
@@ -92,15 +100,7 @@ def test_generate_mesh_forwards_curve_fit_and_decimation(monkeypatch, tmp_path) 
         return SimpleNamespace(polygons=[object()], bbox=(0.0, 0.0, 10.0, 10.0))
 
     monkeypatch.setattr(mesh_generator, "extract_geometry", _fake_extract_geometry)
-    monkeypatch.setattr(
-        mesh_generator,
-        "add_metals",
-        lambda *_args, **_kwargs: MetalGeometryResult(
-            metal_tags={},
-            shaped_dielectric_names=set(),
-            pec_surface_bboxes={},
-        ),
-    )
+    monkeypatch.setattr(mesh_generator, "add_metals", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
         mesh_generator,
         "add_ports",
@@ -144,11 +144,8 @@ def test_generate_mesh_forwards_curve_fit_and_decimation(monkeypatch, tmp_path) 
         patterned_dielectric_tags,
         port_tags,
         port_info,
-        *,
         pec_block_tags,
         stack,
-        activated_regions,
-        shaped_dielectric_names,
     ):
         captured["build_entities_args"] = {
             "dielectric_tags": dielectric_tags,
@@ -158,8 +155,6 @@ def test_generate_mesh_forwards_curve_fit_and_decimation(monkeypatch, tmp_path) 
             "pec_block_tags": pec_block_tags,
             "stack": stack,
             "metal_tags": metal_tags,
-            "activated_regions": activated_regions,
-            "shaped_dielectric_names": shaped_dielectric_names,
         }
         return []
 
@@ -179,17 +174,10 @@ def test_generate_mesh_forwards_curve_fit_and_decimation(monkeypatch, tmp_path) 
         _entities,
         _pg_map,
         _stack,
-        *,
-        activated_regions,
         pec_block_tags=None,
-        shaped_dielectric_names,
-        pec_surface_bboxes,
     ):
         captured["all_dielectric_tags"] = all_dielectric_tags
-        captured["assign_activated_regions"] = activated_regions
         captured["assign_pec_block_tags"] = pec_block_tags
-        captured["assign_shaped_dielectric_names"] = shaped_dielectric_names
-        captured["assign_pec_surface_bboxes"] = pec_surface_bboxes
         return {
             "volumes": {},
             "conductor_surfaces": {},
@@ -294,3 +282,302 @@ def test_generate_palace_config_shaped_dielectric_layer_material(tmp_path) -> No
     assert core_mat is not None
     assert core_mat["Permittivity"] == 12.1
     assert core_mat["LossTan"] == 0.002
+
+
+@pytest.mark.parametrize("palace_version", ["0.16.0", "0.16.1"])
+def test_surface_epr_material_name_resolves_before_config_serialization(
+    tmp_path, palace_version
+) -> None:
+    """Surface-EPR material tokens resolve into schema-valid Palace rows."""
+    stack = LayerStack()
+    stack.layers["SUB"] = Layer(
+        name="SUB",
+        gds_layer=(1, 0),
+        zmin=0.0,
+        zmax=1.0,
+        thickness=1.0,
+        material="silicon",
+        layer_type="dielectric",
+    )
+    stack.materials = {
+        "silicon": {"permittivity": 11.45, "loss_tangent": 2.6e-7},
+        "interface_oxide": {"permittivity": 3.9, "loss_tangent": 0.001},
+    }
+    groups = {
+        "volumes": {"SUB": {"phys_group": 1}},
+        "conductor_surfaces": {},
+        "pec_surfaces": {},
+        "port_surfaces": {},
+        "boundary_surfaces": {},
+    }
+    manifest = MeshManifest(
+        entries=(
+            MeshPhysicalGroup(
+                name="SA",
+                role="boundary_surface",
+                attributes=(2,),
+                interface_of=("SUB", "AIR"),
+            ),
+        )
+    )
+    postprocessing = build_postprocessing_config_from_manifest(
+        manifest,
+        energy_roles=(),
+        dielectric_interfaces=(
+            DielectricInterfaceSpec(
+                interface_type="SA",
+                thickness=1e-3,
+                material_name="interface_oxide",
+                role="boundary_surface",
+                entry_names=("SA",),
+                preset_name="public-oxide",
+                preset_source="public-fixture",
+            ),
+        ),
+    )
+    output_path = tmp_path / palace_version
+    output_path.mkdir()
+
+    config_path = generate_palace_config(
+        groups=groups,
+        ports=[],
+        port_info=[],
+        stack=stack,
+        output_path=output_path,
+        model_name="palace",
+        fmax=10e9,
+        simulation_type="driven",
+        driven_config=DrivenConfig(fmin=1e9, fmax=10e9, num_points=2),
+        absorbing_boundary=False,
+        boundary_postprocessing_config=postprocessing.boundaries,
+        palace_version=palace_version,
+        validate_schema=True,
+    )
+
+    config = json.loads(config_path.read_text())
+    interface = config["Boundaries"]["Postprocessing"]["Dielectric"][0]
+    assert interface == {
+        "Index": 1,
+        "Attributes": [2],
+        "Type": "SA",
+        "Thickness": 1e-3,
+        "LossTan": 0.001,
+        "Permittivity": 3.9,
+    }
+    assert postprocessing.index_map.entries[0].extra == {
+        "Type": "SA",
+        "preset_name": "public-oxide",
+        "preset_source": "public-fixture",
+        "material_name": "interface_oxide",
+    }
+    resolution = json.loads(
+        (output_path / "metadata" / "palace_material_resolution.json").read_text()
+    )
+    assert resolution["interfaces"][0]["interface_material_name"] == "interface_oxide"
+    assert resolution["interfaces"][0]["palace_interface"] == interface
+
+    def _keys(value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                yield key
+                yield from _keys(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from _keys(child)
+
+    assert not any(key.startswith("_") for key in _keys(config))
+
+
+def test_surface_epr_material_name_and_private_config_keys_fail_closed(
+    tmp_path,
+) -> None:
+    """Unknown material tokens and unconsumed private keys cannot serialize."""
+    stack = LayerStack()
+    stack.materials = {}
+    groups = {
+        "volumes": {},
+        "conductor_surfaces": {},
+        "pec_surfaces": {},
+        "port_surfaces": {},
+        "boundary_surfaces": {},
+    }
+    dielectric = {
+        "Dielectric": [
+            {
+                "Index": 1,
+                "Attributes": [2],
+                "Type": "SA",
+                "Thickness": 1e-3,
+                "LossTan": 0.0,
+                "_MaterialName": "unknown-material",
+            }
+        ]
+    }
+    with pytest.raises(ValueError, match="Permittivity"):
+        generate_palace_config(
+            groups=groups,
+            ports=[],
+            port_info=[],
+            stack=stack,
+            output_path=tmp_path,
+            model_name="palace",
+            fmax=10e9,
+            simulation_type="driven",
+            absorbing_boundary=False,
+            boundary_postprocessing_config=dielectric,
+        )
+    with pytest.raises(ValueError, match="Internal Palace configuration key"):
+        generate_palace_config(
+            groups=groups,
+            ports=[],
+            port_info=[],
+            stack=stack,
+            output_path=tmp_path,
+            model_name="palace",
+            fmax=10e9,
+            simulation_type="driven",
+            absorbing_boundary=False,
+            hints={"Solver": {"_injected": True}},
+        )
+    with pytest.raises(ValueError, match="Internal Palace configuration key"):
+        generate_palace_config(
+            groups=groups,
+            ports=[],
+            port_info=[],
+            stack=stack,
+            output_path=tmp_path,
+            model_name="palace",
+            fmax=10e9,
+            simulation_type="driven",
+            absorbing_boundary=False,
+            hints={"Solver": {"nested": ({"_injected": True},)}},
+        )
+
+
+def test_surface_epr_material_fragment_is_reusable_without_mutation(tmp_path) -> None:
+    """Material-backed postprocessing fragments resolve afresh on each write."""
+    stack = LayerStack()
+    stack.materials = {"interface_oxide": {"permittivity": 3.0}}
+    groups = {
+        "volumes": {},
+        "conductor_surfaces": {},
+        "pec_surfaces": {},
+        "port_surfaces": {},
+        "boundary_surfaces": {},
+    }
+    fragment = {
+        "Dielectric": [
+            {
+                "Index": 1,
+                "Attributes": [2],
+                "Type": "SA",
+                "Thickness": 1e-3,
+                "LossTan": 0.0,
+                "_MaterialName": "interface_oxide",
+            }
+        ]
+    }
+    original_fragment = deepcopy(fragment)
+    first_output = tmp_path / "first"
+    second_output = tmp_path / "second"
+    first_output.mkdir()
+    second_output.mkdir()
+
+    first = generate_palace_config(
+        groups=groups,
+        ports=[],
+        port_info=[],
+        stack=stack,
+        output_path=first_output,
+        model_name="palace",
+        fmax=10e9,
+        simulation_type="driven",
+        absorbing_boundary=False,
+        boundary_postprocessing_config=fragment,
+        material_overlay={
+            "materials": {
+                "interface_oxide": {"permittivity": 3.1, "loss_tangent": 0.01}
+            }
+        },
+    )
+    second = generate_palace_config(
+        groups=groups,
+        ports=[],
+        port_info=[],
+        stack=stack,
+        output_path=second_output,
+        model_name="palace",
+        fmax=20e9,
+        simulation_type="driven",
+        absorbing_boundary=False,
+        boundary_postprocessing_config=fragment,
+        material_overlay={
+            "materials": {
+                "interface_oxide": {"permittivity": 4.2, "loss_tangent": 0.02}
+            }
+        },
+    )
+
+    assert fragment == original_fragment
+    first_interface = json.loads(first.read_text())["Boundaries"]["Postprocessing"][
+        "Dielectric"
+    ][0]
+    second_interface = json.loads(second.read_text())["Boundaries"]["Postprocessing"][
+        "Dielectric"
+    ][0]
+    assert first_interface["Permittivity"] == 3.1
+    assert second_interface["Permittivity"] == 4.2
+    for output_path in (first_output, second_output):
+        resolution = json.loads(
+            (output_path / "metadata" / "palace_material_resolution.json").read_text()
+        )
+        assert resolution["interfaces"][0]["interface_material_name"] == (
+            "interface_oxide"
+        )
+
+
+@pytest.mark.parametrize("palace_version", ["0.16.0", "0.16.1"])
+def test_schema_valid_native_hints_keep_solver_and_output_owners(
+    tmp_path, palace_version
+) -> None:
+    """Native hints tune permitted solver/output leaves for both schemas."""
+    stack = LayerStack()
+    stack.layers["SUB"] = Layer(
+        name="SUB",
+        gds_layer=(1, 0),
+        zmin=0.0,
+        zmax=1.0,
+        thickness=1.0,
+        material="silicon",
+        layer_type="dielectric",
+    )
+    stack.materials = {"silicon": {"permittivity": 11.45, "loss_tangent": 0.0}}
+    config_path = generate_palace_config(
+        groups={
+            "volumes": {"SUB": {"phys_group": 1}},
+            "conductor_surfaces": {},
+            "pec_surfaces": {},
+            "port_surfaces": {},
+            "boundary_surfaces": {},
+        },
+        ports=[],
+        port_info=[],
+        stack=stack,
+        output_path=tmp_path,
+        model_name="palace",
+        fmax=10e9,
+        simulation_type="driven",
+        driven_config=DrivenConfig(fmin=1e9, fmax=10e9, num_points=2),
+        absorbing_boundary=False,
+        hints={
+            "Model": {"Refinement": {"MaxIts": 3}},
+            "Solver": {"Linear": {"EstimatorMG": True}},
+            "Problem": {"OutputFormats": {"Paraview": True}},
+        },
+        palace_version=palace_version,
+        validate_schema=True,
+    )
+    config = json.loads(config_path.read_text())
+    assert config["Model"]["Refinement"]["MaxIts"] == 3
+    assert config["Solver"]["Linear"]["EstimatorMG"] is True
+    assert config["Problem"]["OutputFormats"] == {"Paraview": True}

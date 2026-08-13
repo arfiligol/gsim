@@ -8,19 +8,13 @@ dev:
   uvx pre-commit install
   git config diff.ipynb.textconv "jupyter nbconvert --to script --stdout"
 
-# Version bumping
-[linux,macos]
-bver:
-    curl -LsSf https://github.com/flaport/bver/releases/latest/download/install.sh | sh
-
-# Version bumping
-[windows]
-bver:
-    powershell -ExecutionPolicy ByPass -c "irm https://github.com/flaport/bver/releases/latest/download/install.ps1 | iex"
+# Install the release versioning tool.
+tbump:
+    uv tool install tbump
 
 # bump version
-bump version="patch":
-    bver bump "{{ version }}"
+bump version:
+    tbump "{{ version }}"
 
 uv:
   curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -37,11 +31,15 @@ test:
 cov:
   uv run pytest --cov=gsim --cov-report=term-missing:skip-covered --cov-report=xml
 
-docs:
-  uv run mkdocs build
+# Copy the root CHANGELOG into docs/ so zensical can build it (docs_dir is docs/)
+sync-changelog:
+  cp CHANGELOG.md docs/CHANGELOG.md
 
-serve:
-  uv run mkdocs serve -a localhost:8080
+docs: sync-changelog
+  uv run zensical build -f docs/zensical.toml
+
+serve: sync-changelog
+  uv run zensical serve -f docs/zensical.toml -a localhost:8080
 
 # Run a notebook normally (interactive plots): just nbrun nbs/foo.ipynb
 nbrun +notebooks: ipykernel
@@ -81,7 +79,7 @@ tree:
   @tree -a -I .git --gitignore
 
 clean: nbclean-all
-  rm -rf site
+  rm -rf site docs/site
   rm -rf .venv
   rm -f uv.lock
   rm -rf docs/nbs/*

@@ -7,10 +7,12 @@ build_config -> write_config, stopping before cloud submission.
 from __future__ import annotations
 
 import json
+import time
 
 import gdsfactory as gf
 import pytest
 
+from gsim.hashing import compute_dir_digest
 from gsim.meep import Simulation
 
 # ---------------------------------------------------------------------------
@@ -39,7 +41,7 @@ def configured_sim(straight_component):
     sim.num_freqs = 11
     sim.monitors = ["o2"]
     sim.domain.pml = 1.0
-    sim.domain.margin = 0.5
+    sim.domain(margin_x=0.5, margin_y=0.5)
     sim.solver.resolution = 16
     sim.solver.stop_when_energy_decayed(dt=20, decay_by=0.01)
     return sim
@@ -145,7 +147,10 @@ class TestBuildConfig:
     def test_domain_config(self, configured_sim):
         result = configured_sim.build_config()
         assert result.config.domain.dpml == 1.0
-        assert result.config.domain.margin_xy == 0.5
+        assert result.config.domain.margin_x_low == 0.5
+        assert result.config.domain.margin_x_high == 0.5
+        assert result.config.domain.margin_y_low == 0.5
+        assert result.config.domain.margin_y_high == 0.5
 
     def test_extended_component_differs(self, configured_sim):
         """Ports should be extended into PML, making the component longer."""
@@ -175,6 +180,14 @@ class TestWriteConfig:
         assert (output_dir / "layout.gds").exists()
         assert (output_dir / "sim_config.json").exists()
         assert (output_dir / "run_meep.py").exists()
+
+    def test_output_is_byte_reproducible(self, configured_sim, tmp_path):
+        """Identical simulations produce the same cloud-cache input bytes."""
+        first = configured_sim.write_config(tmp_path / "first")
+        time.sleep(1.1)  # GDS timestamps have one-second resolution.
+        second = configured_sim.write_config(tmp_path / "second")
+
+        assert compute_dir_digest(first) == compute_dir_digest(second)
 
     def test_config_json_valid(self, configured_sim, tmp_path):
         output_dir = configured_sim.write_config(tmp_path / "sim_output")

@@ -1,31 +1,16 @@
-"""Palace mesh generation orchestration.
-
-This module composes component geometry, stack layers, declared ports,
-simulation-layer catalogs, and mesh settings into a Gmsh mesh and optional
-Palace config artifacts. It sequences geometry creation, authored sheet
-selection, physical group assignment, manifest writing, and config generation.
-
-PDK catalog construction and port declaration happen before mesh generation.
-Resolve/report loading and typed result visualization happen after solver
-outputs exist. The runtime path is ``PalaceSimBase.mesh()`` through mesh
-geometry, sheets, and groups, then optional ``config.json`` and mesh manifest
-sidecars.
-"""
+"""Mesh generator for Palace EM simulation."""
 
 from __future__ import annotations
 
 import contextlib
 import logging
 import math
-from collections.abc import Mapping
 from dataclasses import dataclass, field
 from numbers import Integral
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import gmsh
-
-from gsim.palace.models.versions import DEFAULT_PALACE_CONFIG_VERSION
 
 from . import gmsh_utils
 from .config_generator import (
@@ -35,7 +20,6 @@ from .config_generator import (
 )
 from .geometry import (
     GeometryData,
-    _reject_activated_region_airbox_controls,
     add_dielectrics,
     add_metals,
     add_patterned_dielectrics,
@@ -47,29 +31,148 @@ from .geometry import (
     resolve_mesh_domain_bounds,
 )
 from .groups import assign_physical_groups
-from .manifest import MeshManifest, build_mesh_manifest
-from .sheets import extract_authored_sheet_polygons
 
 if TYPE_CHECKING:
     from gsim.common.stack import LayerStack
+    from gsim.palace.mesh.manifest import MeshManifest
     from gsim.palace.models import (
-        ActivatedRegion,
         BoundaryModeConfig,
         CrossSectionPlaneConfig,
-        CurrentSourceConfig,
         DrivenConfig,
         EigenmodeConfig,
-        ElectrostaticConfig,
         MagnetostaticConfig,
         NumericalConfig,
-        PalaceConfigVersion,
-        PalacePort,
-        SimulationLayerCatalog,
-        TerminalConfig,
     )
     from gsim.palace.models.pec import PECBlockConfig
+    from gsim.palace.ports.config import PalacePort
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Helpers for domain-boundary filtering
+# ---------------------------------------------------------------------------
+
+
+def _collect_pec_surface_lines(groups: dict) -> list[int]:
+    """Collect boundary curves from PEC surfaces for mesh refinement.
+
+    When planar conductors are embedded in dielectric volumes, the boolean
+    pipeline may merge the conductor's boundary curves into the volume edges.
+    This helper queries the live gmsh model for the boundary curves of each
+    PEC surface and returns those that are valid dim-1 entities.
+
+    Requires an active gmsh session.  Silently returns an empty list when
+    gmsh has not been initialized (e.g. during unit tests with mocked geometry).
+    """
+    if not gmsh.isInitialized():
+        return []
+    lines: list[int] = []
+    for surface_info in groups.get("pec_surfaces", {}).values():
+        for stag in surface_info.get("tags", []):
+            try:
+                boundary = gmsh.model.getBoundary(
+                    [(2, stag)], combined=False, oriented=False, recursive=False
+                )
+                for bdim, btag in boundary:
+                    if bdim == 1:
+                        try:
+                            gmsh.model.getBoundingBox(1, btag)
+                            lines.append(btag)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+    return lines
+
+
+def _get_domain_bbox(tol: float = 1e-3) -> tuple[float, float, float, float]:
+    """Return the simulation domain XY bounding box from gmsh.
+
+    Uses the overall bounding box of all entities; any volume that spans
+    the full domain (airbox, vacuum, substrate) determines the extents.
+
+    If gmsh has not been initialized (e.g. unit tests), falls back to a
+    zero-sized box without emitting gmsh error noise.
+    """
+    if not gmsh.isInitialized():
+        return (0.0, 0.0, 0.0, 0.0)
+    try:
+        xmin, ymin, _zmin, xmax, ymax, _zmax = gmsh.model.getBoundingBox(-1, -1)
+    except Exception:
+        return (0.0, 0.0, 0.0, 0.0)
+    return (xmin - tol, ymin - tol, xmax + tol, ymax + tol)
+
+
+def _line_on_domain_boundary(
+    line_tag: int,
+    domain_bbox: tuple[float, float, float, float],
+    tol: float = 1.0,
+) -> bool:
+    """Return True when a curve lies on the XY domain boundary.
+
+    A curve is considered a domain-boundary edge when both of its
+    endpoints sit on the same domain wall (x=xmin, x=xmax, y=ymin,
+    or y=ymax).  This filters out large planar ground-plane sheets whose
+    outer perimeter is just the simulation box outline.
+
+    Silently returns False when gmsh has not been initialized (e.g.
+    during unit tests with mocked geometry).
+    """
+    if not gmsh.isInitialized():
+        return False
+    try:
+        tmin, tmax = gmsh.model.getParametrizationBounds(1, line_tag)
+        p1 = gmsh.model.getValue(1, line_tag, tmin)
+        p2 = gmsh.model.getValue(1, line_tag, tmax)
+    except Exception:
+        return False
+
+    # Guard against empty coordinates (e.g. unit-test stubs)
+    if len(p1) < 2 or len(p2) < 2:
+        return False
+
+    xmin, ymin, xmax, ymax = domain_bbox
+    x1, y1 = p1[0], p1[1]
+    x2, y2 = p2[0], p2[1]
+
+    on_xmin = abs(x1 - xmin) < tol and abs(x2 - xmin) < tol
+    on_xmax = abs(x1 - xmax) < tol and abs(x2 - xmax) < tol
+    on_ymin = abs(y1 - ymin) < tol and abs(y2 - ymin) < tol
+    on_ymax = abs(y1 - ymax) < tol and abs(y2 - ymax) < tol
+
+    return on_xmin or on_xmax or on_ymin or on_ymax
+
+
+@dataclass
+class MeshResult:
+    """Result from mesh generation."""
+
+    mesh_path: Path
+    config_path: Path | None = None
+    port_info: list = field(default_factory=list)
+    mesh_stats: dict = field(default_factory=dict)
+    # Data needed for deferred config generation
+    groups: dict = field(default_factory=dict)
+    output_dir: Path | None = None
+    model_name: str = "palace"
+    fmax: float = 100e9
+    periodic_axis: str | None = None
+    manifest: MeshManifest | None = None
+
+    def __post_init__(self) -> None:
+        """Create native manifest provenance once without replacing SGB's manifest."""
+        if not self.groups or self.manifest is not None:
+            return
+        from gsim.palace.mesh.manifest import build_mesh_manifest
+
+        self.manifest = build_mesh_manifest(self.groups)
+        if self.output_dir is not None:
+            from gsim.palace.run_folder import prepare_palace_run_folder
+
+            self.manifest.write_json(
+                prepare_palace_run_folder(self.output_dir).mesh_manifest_path
+            )
 
 
 def _extract_native_boundarymode_rectangles(
@@ -457,110 +560,6 @@ def _generate_native_boundarymode_groups(
     return groups
 
 
-# ---------------------------------------------------------------------------
-# Helpers for domain-boundary filtering
-# ---------------------------------------------------------------------------
-
-
-def _collect_pec_surface_lines(groups: dict) -> list[int]:
-    """Collect boundary curves from PEC surfaces for mesh refinement.
-
-    When planar conductors are embedded in dielectric volumes, the boolean
-    pipeline may merge the conductor's boundary curves into the volume edges.
-    This helper queries the live gmsh model for the boundary curves of each
-    PEC surface and returns those that are valid dim-1 entities.
-    """
-    lines: list[int] = []
-    for surface_info in groups.get("pec_surfaces", {}).values():
-        for stag in surface_info.get("tags", []):
-            try:
-                boundary = gmsh.model.getBoundary(
-                    [(2, stag)], combined=False, oriented=False, recursive=False
-                )
-                for bdim, btag in boundary:
-                    if bdim == 1:
-                        try:
-                            gmsh.model.getBoundingBox(1, btag)
-                            lines.append(btag)
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-    return lines
-
-
-def _get_domain_bbox(tol: float = 1e-3) -> tuple[float, float, float, float]:
-    """Return the simulation domain XY bounding box from gmsh.
-
-    Uses the overall bounding box of all entities; any volume that spans
-    the full domain (airbox, vacuum, substrate) determines the extents.
-
-    If gmsh is empty (e.g. unit tests), falls back to a zero-sized box.
-    """
-    try:
-        xmin, ymin, _zmin, xmax, ymax, _zmax = gmsh.model.getBoundingBox(-1, -1)
-    except Exception:
-        return (0.0, 0.0, 0.0, 0.0)
-    return (xmin - tol, ymin - tol, xmax + tol, ymax + tol)
-
-
-def _line_on_domain_boundary(
-    line_tag: int,
-    domain_bbox: tuple[float, float, float, float],
-    tol: float = 1.0,
-) -> bool:
-    """Return True when a curve lies on the XY domain boundary.
-
-    A curve is considered a domain-boundary edge when both of its
-    endpoints sit on the same domain wall (x=xmin, x=xmax, y=ymin,
-    or y=ymax).  This filters out large planar ground-plane sheets whose
-    outer perimeter is just the simulation box outline.
-    """
-    try:
-        tmin, tmax = gmsh.model.getParametrizationBounds(1, line_tag)
-        p1 = gmsh.model.getValue(1, line_tag, tmin)
-        p2 = gmsh.model.getValue(1, line_tag, tmax)
-    except Exception:
-        return False
-
-    # Guard against empty coordinates (e.g. unit-test stubs)
-    if len(p1) < 2 or len(p2) < 2:
-        return False
-
-    xmin, ymin, xmax, ymax = domain_bbox
-    x1, y1 = p1[0], p1[1]
-    x2, y2 = p2[0], p2[1]
-
-    on_xmin = abs(x1 - xmin) < tol and abs(x2 - xmin) < tol
-    on_xmax = abs(x1 - xmax) < tol and abs(x2 - xmax) < tol
-    on_ymin = abs(y1 - ymin) < tol and abs(y2 - ymin) < tol
-    on_ymax = abs(y1 - ymax) < tol and abs(y2 - ymax) < tol
-
-    return on_xmin or on_xmax or on_ymin or on_ymax
-
-
-@dataclass
-class MeshResult:
-    """Result from mesh generation."""
-
-    mesh_path: Path
-    config_path: Path | None = None
-    port_info: list = field(default_factory=list)
-    mesh_stats: dict = field(default_factory=dict)
-    # Data needed for deferred config generation
-    groups: dict = field(default_factory=dict)
-    output_dir: Path | None = None
-    model_name: str = "palace"
-    fmax: float = 100e9
-    periodic_axis: str | None = None
-    manifest: MeshManifest = field(default_factory=MeshManifest)
-
-    def __post_init__(self) -> None:
-        """Derive a manifest from mesh groups when one was not supplied."""
-        if self.groups and not self.manifest.entries:
-            self.manifest = build_mesh_manifest(self.groups)
-
-
 def _setup_mesh_fields(
     kernel,
     groups: dict,
@@ -719,7 +718,7 @@ def _setup_mesh_fields(
                     continue
 
                 # Skip exterior/domain-boundary surfaces — these are surfaces
-                # that only belong to one volume (labelled "...___None" in the
+                # that only belong to one volume (labelled "...__None" in the
                 # boolean pipeline). Refining their edges would force fine mesh
                 # at the simulation domain boundary, wasting elements where no
                 # internal field concentration exists.
@@ -727,7 +726,7 @@ def _setup_mesh_fields(
                 is_exterior = False
                 for pg_tag in pg_tags:
                     name = gmsh.model.getPhysicalName(dim, pg_tag)
-                    if name and gmsh_utils.is_exterior_physical_name(name):
+                    if name and "__None" in name:
                         is_exterior = True
                         break
                 if is_exterior:
@@ -820,15 +819,9 @@ def generate_mesh(
     simulation_type: str = "driven",
     driven_config: DrivenConfig | None = None,
     eigenmode_config: EigenmodeConfig | None = None,
-    electrostatic_config: ElectrostaticConfig | None = None,
-    magnetostatic_config: MagnetostaticConfig | None = None,
     numerical_config: NumericalConfig | None = None,
-    refinement_config: Mapping[str, Any] | None = None,
-    problem_output_formats: Mapping[str, Any] | None = None,
-    palace_version: PalaceConfigVersion = DEFAULT_PALACE_CONFIG_VERSION,
-    validate_schema: bool = True,
-    terminals: list[TerminalConfig] | None = None,
-    current_sources: list[CurrentSourceConfig] | None = None,
+    boundary_mode_config: BoundaryModeConfig | None = None,
+    cross_section: CrossSectionPlaneConfig | None = None,
     write_config: bool = True,
     planar_conductors: bool = False,
     pec_blocks: list[PECBlockConfig] | None = None,
@@ -845,12 +838,14 @@ def generate_mesh(
     high_order_optimize: bool = True,
     verbosity: int = 3,
     decimate_tolerance: float | None = None,
-    material_overlay: Any | None = None,
-    simulation_layers: SimulationLayerCatalog | None = None,
-    activated_regions: tuple[ActivatedRegion, ...] = (),
-    surface_epr_representation: Literal["A", "B", "C"] | None = None,
-    boundary_mode_config: BoundaryModeConfig | None = None,
-    cross_section: CrossSectionPlaneConfig | None = None,
+    palace_version: str = "0.16.0",
+    validate_schema: bool | None = None,
+    surface_epr_representation: Literal["A", "B"] | None = None,
+    activated_regions: list | tuple = (),
+    terminals: list | tuple = (),
+    electrostatic_config=None,
+    magnetostatic_config: MagnetostaticConfig | None = None,
+    current_sources: list[Any] | None = None,
 ) -> MeshResult:
     """Generate mesh for Palace EM simulation.
 
@@ -875,10 +870,8 @@ def generate_mesh(
         driven_config: Optional DrivenConfig for frequency sweep settings
         eigenmode_config: Optional EigenmodeConfig for eigenmode problems
         numerical_config: Optional NumericalConfig for solver settings
-        refinement_config: Optional Model.Refinement fragment
-        problem_output_formats: Optional Problem.OutputFormats fragment
-        palace_version: Target Palace configuration schema version
-        validate_schema: Validate generated config against the target schema
+        boundary_mode_config: Optional BoundaryModeConfig for 2D mode problems
+        cross_section: Explicit x/y cross-section plane for native BoundaryMode
         write_config: Whether to write config.json (default True)
         pec_blocks: PEC configuration
         planar_conductors: If True, treat conductors as 2D PEC surfaces
@@ -897,33 +890,11 @@ def generate_mesh(
         decimate_tolerance: Relative tolerance for polygon decimation
             (None = no decimation; typical 0.001-0.01)
         verbosity: Sets gmsh verbosity level
-        material_overlay: Optional PDK material overlay path, raw overlay
-            mapping, or loaded overlay mapping used only for config material
-            resolution when ``write_config=True``.
-        simulation_layers: PDK-declared simulation-only layers. These layers
-            are excluded from material extraction and are used only when ports
-            request layout-authored solver sheets.
-        activated_regions: Stack layers explicitly selected as Palace mesh
-            regions by the public simulation API.
-        surface_epr_representation: Optional Surface EPR route geometry
-            contract. The native gsim path is used when this is unset. Routes
-            A/B/C explicitly delegate topology construction to Semantic
-            Geometry Builder, then mesh its XAO and semantic sidecar output
-            through this Palace mesh pipeline.
 
     Returns:
         MeshResult with paths and metadata
     """
-    if activated_regions:
-        _reject_activated_region_airbox_controls(
-            air_margin=air_margin,
-            airbox_margin_x=airbox_margin_x,
-            airbox_margin_y=airbox_margin_y,
-            airbox_z_above=airbox_z_above,
-            airbox_z_below=airbox_z_below,
-        )
-
-    if surface_epr_representation in {"A", "B", "C"}:
+    if surface_epr_representation is not None:
         from gsim.palace.mesh.xao_adapter import (
             generate_mesh_from_semantic_geometry_builder,
         )
@@ -935,7 +906,7 @@ def generate_mesh(
             output_dir=output_dir,
             route=surface_epr_representation,
             activated_regions=activated_regions,
-            terminals=terminals or (),
+            terminals=terminals,
             model_name=model_name,
             refined_mesh_size=refined_mesh_size,
             max_mesh_size=max_mesh_size,
@@ -947,11 +918,9 @@ def generate_mesh(
             driven_config=driven_config,
             eigenmode_config=eigenmode_config,
             numerical_config=numerical_config,
-            refinement_config=refinement_config,
             palace_version=palace_version,
-            validate_schema=validate_schema,
+            validate_schema=True if validate_schema is None else validate_schema,
             absorbing_boundary=absorbing_boundary,
-            problem_output_formats=problem_output_formats,
             electrostatic_config=electrostatic_config,
             magnetostatic_config=magnetostatic_config,
             current_sources=current_sources or (),
@@ -960,7 +929,6 @@ def generate_mesh(
             high_order_elements=high_order_elements,
             high_order_order=high_order_order,
             high_order_optimize=high_order_optimize,
-            material_overlay=material_overlay,
         )
 
     output_dir = Path(output_dir)
@@ -970,65 +938,7 @@ def generate_mesh(
 
     # Extract geometry
     logger.info("Extracting geometry...")
-    simulation_gds_layers = simulation_layers.gds_layers if simulation_layers else None
-    if simulation_gds_layers:
-        geometry = extract_geometry(
-            component,
-            stack,
-            decimate_tolerance=decimate_tolerance,
-            exclude_gds_layers=simulation_gds_layers,
-        )
-    else:
-        geometry = extract_geometry(
-            component,
-            stack,
-            decimate_tolerance=decimate_tolerance,
-        )
-    requested_sheet_layers = {
-        port.sheet_gds_layer
-        for port in ports
-        if not port.generate_sheet and port.sheet_gds_layer is not None
-    }
-    simulation_polygons = (
-        extract_authored_sheet_polygons(component, simulation_layers)
-        if simulation_layers is not None and requested_sheet_layers
-        else {}
-    )
-    authored_sheet_polygons = {
-        layer: polygons
-        for layer, polygons in simulation_polygons.items()
-        if layer in requested_sheet_layers
-    }
-    sheet_bboxes = [
-        polygon.bbox
-        for layer, polygons in simulation_polygons.items()
-        if layer in requested_sheet_layers
-        for polygon in polygons
-    ]
-    if sheet_bboxes:
-        xmins, ymins, xmaxs, ymaxs = zip(*sheet_bboxes, strict=True)
-        sheet_xmin = min(xmins)
-        sheet_ymin = min(ymins)
-        sheet_xmax = max(xmaxs)
-        sheet_ymax = max(ymaxs)
-        gxmin, gymin, gxmax, gymax = geometry.bbox
-        if not all(math.isfinite(value) for value in geometry.bbox):
-            geometry = GeometryData(
-                polygons=geometry.polygons,
-                bbox=(sheet_xmin, sheet_ymin, sheet_xmax, sheet_ymax),
-                layer_bboxes=geometry.layer_bboxes,
-            )
-        else:
-            geometry = GeometryData(
-                polygons=geometry.polygons,
-                bbox=(
-                    min(gxmin, sheet_xmin),
-                    min(gymin, sheet_ymin),
-                    max(gxmax, sheet_xmax),
-                    max(gymax, sheet_ymax),
-                ),
-                layer_bboxes=geometry.layer_bboxes,
-            )
+    geometry = extract_geometry(component, stack, decimate_tolerance=decimate_tolerance)
     logger.info("  Polygons: %s", len(geometry.polygons))
     logger.info("  Bbox: %s", geometry.bbox)
 
@@ -1074,6 +984,7 @@ def generate_mesh(
                 airbox_z_above=airbox_z_above,
                 airbox_z_below=airbox_z_below,
             )
+
             refinement_lines = sorted(
                 {
                     int(tag)
@@ -1082,10 +993,13 @@ def generate_mesh(
                 }
             )
             if refinement_lines:
+                aggressive_size = max(refined_mesh_size * 0.5, 1e-4)
                 field_id = gmsh_utils.setup_mesh_refinement(
                     refinement_lines,
-                    max(refined_mesh_size * 0.5, 1e-4),
+                    aggressive_size,
                     max_mesh_size,
+                    sampling=400,
+                    dist_max=max_mesh_size * 0.5,
                 )
                 gmsh_utils.finalize_mesh_fields([field_id])
             else:
@@ -1094,6 +1008,7 @@ def generate_mesh(
 
             if show_gui:
                 gmsh.fltk.run()
+
             if high_order_elements:
                 gmsh.option.setNumber("Mesh.ElementOrder", high_order_order)
                 gmsh.option.setNumber("Mesh.SecondOrderLinear", 0)
@@ -1103,6 +1018,7 @@ def generate_mesh(
 
             logger.info("Generating native 2D BoundaryMode mesh...")
             gmsh.model.mesh.generate(2)
+
             if high_order_elements:
                 gmsh.model.mesh.setOrder(high_order_order)
                 if high_order_optimize:
@@ -1110,11 +1026,12 @@ def generate_mesh(
                         gmsh.model.mesh.optimize("HighOrder")
 
             mesh_stats = collect_mesh_stats()
+
             gmsh.option.setNumber("Mesh.Binary", 0)
             gmsh.option.setNumber("Mesh.SaveAll", 0)
             gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
             gmsh.write(str(msh_path))
-            manifest = build_mesh_manifest(groups)
+
             if write_config:
                 config_path = generate_palace_config(
                     groups=groups,
@@ -1127,15 +1044,16 @@ def generate_mesh(
                     simulation_type=simulation_type,
                     driven_config=driven_config,
                     eigenmode_config=eigenmode_config,
-                    boundary_mode_config=boundary_mode_config,
                     numerical_config=numerical_config,
-                    refinement_config=refinement_config,
-                    palace_version=palace_version,
-                    validate_schema=validate_schema,
+                    boundary_mode_config=boundary_mode_config,
                     absorbing_boundary=absorbing_boundary,
                     periodic_axis=periodic_axis,
-                    problem_output_formats=problem_output_formats,
-                    prepare_run_folder=False,
+                    magnetostatic_config=magnetostatic_config,
+                    current_sources=current_sources or [],
+                    palace_version=palace_version,
+                    validate_schema=False
+                    if validate_schema is None
+                    else validate_schema,
                 )
 
             return MeshResult(
@@ -1148,23 +1066,15 @@ def generate_mesh(
                 model_name=model_name,
                 fmax=fmax,
                 periodic_axis=periodic_axis,
-                manifest=manifest,
             )
 
         periodic_info: dict[str, object] | None = None
 
         # Add geometry
         logger.info("Adding metals...")
-        metal_result = add_metals(
-            kernel,
-            geometry,
-            stack,
-            planar_conductors,
-            merge_via_distance,
+        metal_tags = add_metals(
+            kernel, geometry, stack, planar_conductors, merge_via_distance
         )
-        metal_tags = metal_result.metal_tags
-        shaped_dielectric_names = metal_result.shaped_dielectric_names
-        pec_surface_bboxes = metal_result.pec_surface_bboxes
 
         # Add PEC blocks if configured
         pec_block_tags: dict = {}
@@ -1183,31 +1093,21 @@ def generate_mesh(
             airbox_margin_y=airbox_margin_y,
             airbox_z_above=airbox_z_above,
             airbox_z_below=airbox_z_below,
-            activated_regions=activated_regions,
         )
-        if activated_regions:
-            domain_bbox = (
-                domain_bounds[0],
-                domain_bounds[1],
-                domain_bounds[3],
-                domain_bounds[4],
-            )
-        else:
-            domain_bbox = (
-                geometry.bbox[0] - margin_x,
-                geometry.bbox[1] - margin_y,
-                geometry.bbox[2] + margin_x,
-                geometry.bbox[3] + margin_y,
-            )
+        domain_bbox = (
+            geometry.bbox[0] - margin_x,
+            geometry.bbox[1] - margin_y,
+            geometry.bbox[2] + margin_x,
+            geometry.bbox[3] + margin_y,
+        )
         port_tags, port_info = add_ports(
             kernel,
             ports,
             stack,
             domain_bbox=domain_bbox,
             domain_bounds=domain_bounds,
-            simulation_layers=simulation_layers,
-            authored_sheet_polygons=authored_sheet_polygons,
         )
+
         logger.info("Adding dielectrics...")
         dielectric_tags = add_dielectrics(
             kernel,
@@ -1220,7 +1120,6 @@ def generate_mesh(
             airbox_margin_y=airbox_margin_y,
             airbox_z_above=airbox_z_above,
             airbox_z_below=airbox_z_below,
-            activated_regions=activated_regions,
         )
 
         logger.info("Adding patterned dielectric layers...")
@@ -1241,10 +1140,7 @@ def generate_mesh(
         for layer_name, vol_tags in patterned_dielectric_tags.items():
             all_dielectric_tags.setdefault(layer_name, []).extend(vol_tags)
 
-        # Native gsim path: build geometry from layout and run the standard
-        # boolean pipeline. Surface EPR A/B/C route geometry is an explicit
-        # optional SGB input contract; the XAO adapter starts from already-built
-        # conformal topology instead of extending this path.
+        # Build entities and run boolean pipeline
         logger.info("Running boolean pipeline...")
         entities = build_entities(
             metal_tags,
@@ -1254,8 +1150,6 @@ def generate_mesh(
             port_info,
             pec_block_tags=pec_block_tags or None,
             stack=stack,
-            activated_regions=activated_regions,
-            shaped_dielectric_names=shaped_dielectric_names,
         )
         pg_map = gmsh_utils.run_boolean_pipeline(entities)
 
@@ -1273,10 +1167,7 @@ def generate_mesh(
             entities,
             pg_map,
             stack,
-            activated_regions=activated_regions,
             pec_block_tags=pec_block_tags or None,
-            shaped_dielectric_names=shaped_dielectric_names,
-            pec_surface_bboxes=pec_surface_bboxes,
         )
 
         # After assign_physical_groups, refinement_lines may reference
@@ -1398,32 +1289,23 @@ def generate_mesh(
         if write_config:
             logger.info("Generating Palace config...")
             config_path = generate_palace_config(
-                groups,
-                ports,
-                port_info,
-                stack,
-                output_dir,
-                model_name,
-                fmax,
-                simulation_type,
-                driven_config,
-                eigenmode_config,
-                numerical_config,
-                refinement_config,
-                palace_version,
-                validate_schema,
-                absorbing_boundary,
-                periodic_axis,
-                problem_output_formats=problem_output_formats,
-                electrostatic_config=electrostatic_config,
-                terminals=terminals,
-                magnetostatic_config=magnetostatic_config,
-                current_sources=current_sources,
-                material_overlay=material_overlay,
+                groups=groups,
+                ports=ports,
+                port_info=port_info,
+                stack=stack,
+                output_path=output_dir,
+                model_name=model_name,
+                fmax=fmax,
+                simulation_type=simulation_type,
+                driven_config=driven_config,
+                eigenmode_config=eigenmode_config,
+                numerical_config=numerical_config,
                 boundary_mode_config=boundary_mode_config,
+                absorbing_boundary=absorbing_boundary,
+                periodic_axis=periodic_axis,
+                palace_version=palace_version,
+                validate_schema=False if validate_schema is None else validate_schema,
             )
-
-        manifest = build_mesh_manifest(groups)
 
     finally:
         gmsh.clear()
@@ -1440,7 +1322,6 @@ def generate_mesh(
         model_name=model_name,
         fmax=fmax,
         periodic_axis=periodic_axis,
-        manifest=manifest,
     )
 
     return result

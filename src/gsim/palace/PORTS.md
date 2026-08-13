@@ -39,87 +39,35 @@ layers, similar to how a via connects layers.
 A lumped port is a **2D surface** with:
 
 - `R` = impedance (typically 50Ω)
-- `Direction` = positive solver field/polarization direction as a unit Cartesian vector
+- `Direction` = positive current flow direction (X, Y, Z, -X, -Y, -Z)
 
 Palace integrates the E-field across this surface to compute voltage. The port acts as a lumped resistor connected
 between whatever conductors touch the port surface.
 
-`gsim` accepts legacy Manhattan labels such as `X`, `+X`, and `-Y` on `add_port(direction=...)`, but normalizes them to
-vectors such as `[1.0, 0.0, 0.0]` before writing Palace config. Arbitrary finite nonzero 3-vectors are accepted and
-normalized. Radial labels (`+R`, `-R`) are not valid for LumpedPort v1; they remain specific to current-source models.
+## GDS Port Geometry
 
-`Direction` is solver intent only. Generated port-sheet geometry is determined from the GDSFactory port `center`,
-`width`, `orientation`, and layer. Changing `direction` does not rotate or resize the generated sheet.
+### In-Plane Ports: Rectangle Required
 
-## Port Sheet Geometry Sources
-
-`gsim` supports two horizontal sheet sources for in-plane LumpedPorts and CPW LumpedPort elements:
-
-1. Generated sheets: `generate_sheet=True` (default). Mesh generation creates the solver sheet from the GDSFactory port
-   anchor.
-1. Layout-authored sheets: `generate_sheet=False`. Mesh generation selects an existing polygon from a PDK-declared
-   simulation layer catalog.
-
-The high-level port declaration stays the same in both cases. `add_port()` and `add_cpw_port()` declare solver port
-intent; `set_simulation_layers()` supplies PDK-owned simulation-only layer meaning; mesh generation owns selecting or
-creating the final solver boundary surface. Config generation only receives the resulting physical group.
-
-### Layout-Authored Horizontal Sheets
-
-Use layout-authored sheets when the port sheet is too geometry-specific for a generic rectangle. The PDK/project passes
-a catalog:
+In-plane ports need a **rectangle** in the GDS (not just a line):
 
 ```python
-sim.set_simulation_layers(
-    {
-        "D0_TOP_SIM_BOUNDARY": {
-            "gds_layer": (202, 1),
-            "stack_layer": "D0_TOP_SIM_BOUNDARY",
-        }
-    }
-)
+# Port dimensions from GDS bounding box
+xmin, xmax, ymin, ymax = polygon.bbox
+
+# For Y-direction port (typical CPW facet):
+width  = xmax - xmin   # CPW cross-section width
+length = ymax - ymin   # extent perpendicular to port face
+
+# For X-direction port:
+width  = ymax - ymin
+length = xmax - xmin
 ```
-
-Then the component port used by `add_port()` must live on that simulation layer. Passing `generate_sheet=False` tells
-mesh generation to select the unique polygon on that layer that covers the port center:
-
-```python
-sim.add_port(
-    "o1",
-    layer="topmetal2",
-    length=5.0,
-    generate_sheet=False,
-)
-```
-
-The `layer` argument remains the target stack/material layer. The authored sheet layer comes from
-`component.ports["o1"].layer` and must be registered in the simulation layer catalog. If no catalog is set, the port
-layer is not in the catalog, or the port center matches zero or multiple polygons, meshing fails.
-
-Via ports remain generated vertical sheets because their geometry spans between `from_layer` and `to_layer` in z rather
-than selecting a horizontal GDS polygon.
-
-## Generated Port Geometry
-
-### In-Plane Ports: Oriented Rectangle
-
-In-plane lumped ports generate a rectangular sheet in the XY plane from the GDSFactory port metadata:
-
-```python
-center = port.center
-width = port.width
-orientation = port.orientation
-length = palace_port.length
-```
-
-The sheet length follows `orientation`; the sheet width is transverse to `orientation`. This supports non-Manhattan
-GDSFactory ports without coupling sheet rotation to the solver `Direction` vector.
 
 ### Via Ports: Line Expected
 
 Via ports expect essentially a line in the GDS:
 
-- The GDSFactory port orientation determines whether the vertical sheet spans XZ or YZ
+- The smaller XY dimension determines orientation
 - The port surface is created vertically between the two layers
 
 ## Transmission Line Configurations
@@ -179,16 +127,17 @@ gdsfactory ports have:
 - `width`: port width (e.g., CPW signal + gaps)
 - `orientation`: angle in degrees (0=east, 90=north, 180=west, 270=south)
 
-Using the high-level `gsim` simulation API:
+Using palace_api:
 
 ```python
-from gsim.palace import DrivenSim
+from gplugins.palace_api import configure_port, extract_ports
 
-sim = DrivenSim()
-sim.set_geometry(c)
-sim.set_stack()
-sim.add_port("o1", layer="topmetal2", length=5.0, direction="+X")
-sim.add_port("o2", layer="topmetal2", length=5.0, direction=[-1.0, 0.0, 0.0])
+# Configure ports
+configure_port(c.ports['o1'], type='lumped', layer='topmetal2', length=5.0)
+configure_port(c.ports['o2'], type='lumped', layer='topmetal2', length=5.0)
+
+# Extract for simulation
+ports = extract_ports(c, stack)
 ```
 
 ## Why Ports Must Touch Both Signal and Ground
@@ -233,14 +182,19 @@ The port rectangle represents exactly this: the cross-section where your virtual
 
 ## Multi-Element CPW Ports
 
-For proper CPW mode excitation, use `add_cpw_port()` with one GDSFactory port at the signal center:
+For proper CPW mode excitation, use `configure_cpw_port()` to link two gap ports:
 
 ```python
-from gsim.palace import DrivenSim
+from gplugins.palace_api import configure_cpw_port
 
-sim = DrivenSim()
-sim.set_geometry(c)
-sim.add_cpw_port("o1", layer="topmetal2", s_width=10.0, gap_width=6.0, length=5.0)
+# CPW has two gaps with opposite E-field directions
+configure_cpw_port(
+    port_upper=c.ports['gap_upper'],  # signal-to-ground2 gap
+    port_lower=c.ports['gap_lower'],  # ground1-to-signal gap
+    layer='topmetal2',
+    length=5.0,
+    impedance=50.0,
+)
 ```
 
 This generates a multi-element lumped port in Palace:
@@ -250,8 +204,8 @@ This generates a multi-element lumped port in Palace:
   "Index": 1,
   "R": 50.0,
   "Elements": [
-    {"Attributes": [gap1_surface], "Direction": [0.0, -1.0, 0.0]},
-    {"Attributes": [gap2_surface], "Direction": [0.0, 1.0, 0.0]}
+    {"Attributes": [gap1_surface], "Direction": "+Y"},
+    {"Attributes": [gap2_surface], "Direction": "-Y"}
   ]
 }
 ```
@@ -260,7 +214,7 @@ This generates a multi-element lumped port in Palace:
 
 1. **One port = one rectangle** defining the port surface
 1. **Port must touch both signal and ground** - it's the bridge between them
-1. **Direction** tells Palace the solver field/polarization direction and is emitted as a normalized Cartesian vector
+1. **Direction** tells Palace the positive current flow direction
 1. **In-plane ports** need actual area (rectangle), not just a line
 1. **Via ports** are for vertical connections between layers
-1. **CPW ports** need two elements with opposite transverse directions derived from the GDSFactory port orientation
+1. **CPW ports** need two elements with opposite directions

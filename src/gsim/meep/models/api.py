@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # ---------------------------------------------------------------------------
 # Geometry
@@ -17,7 +17,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class Geometry(BaseModel):
-    """Physical layout: component + layer stack + optional z-crop."""
+    """Physical layout: component + layer stack.
+
+    The vertical crop reference lives on ``Domain.z_ref`` and the 2D cut
+    plane lives on ``FDTD`` (``solver.y_cut`` / ``z_cut``).
+    """
 
     model_config = ConfigDict(
         validate_assignment=True,
@@ -27,18 +31,6 @@ class Geometry(BaseModel):
 
     component: Any = None
     stack: Any = None
-    z_crop: str | None = Field(
-        default=None,
-        description='Z-crop mode: "auto" | layer_name | None (no crop)',
-    )
-    y_cut: float | None = Field(
-        default=None,
-        description=(
-            "Y coordinate of the XZ cross-section cut (um). "
-            "Only meaningful when solver.is_3d=False and solver.plane='xz'. "
-            "None -> resolved to the component bbox Y-center at build time."
-        ),
-    )
 
     def __call__(self, **kwargs: Any) -> Geometry:
         """Update fields in place. Returns self for chaining."""
@@ -160,7 +152,7 @@ class FiberSource(BaseModel):
     The beam center sits at (``x``, ``z``) in the XZ plane — ``z`` is the
     absolute Z coordinate of the beam plane (um). The beam tilts from the
     +Z normal by ``angle_deg`` toward +X. Only valid in XZ 2D mode
-    (``solver.is_3d=False, solver.plane='xz'``).
+    (``solver.mode='2d'`` with ``solver.y_cut`` set).
 
     Beam waist convention (matches MEEP's ``beam_w0``):
 
@@ -231,17 +223,36 @@ class Domain(BaseModel):
 
     model_config = ConfigDict(validate_assignment=True, extra="forbid")
 
+    z_ref: str | None = Field(
+        default=None,
+        description=(
+            "Vertical crop reference: None = auto (highest-n layer actually "
+            "drawn by the component, i.e. the photonic core), 'stack' = full "
+            "non-air material stack, or a specific layer name. "
+            "margin_z is measured from this reference."
+        ),
+    )
     pml: float = Field(default=1.0, ge=0, description="PML thickness in um")
-    margin: float = Field(
+    margin_x: float | tuple[float, float] = Field(
         default=0.5,
-        ge=0,
-        description="XY margin between geometry and PML in um",
+        description=(
+            "Air gap between geometry and PML along X in um. Scalar = both "
+            "sides equal; (low, high) = (-x side, +x side)."
+        ),
     )
-    margin_z_above: float = Field(
-        default=0.5, ge=0, description="Z margin above core in um"
+    margin_y: float | tuple[float, float] = Field(
+        default=0.5,
+        description=(
+            "Air gap between geometry and PML along Y in um. Scalar = both "
+            "sides equal; (low, high) = (-y side, +y side)."
+        ),
     )
-    margin_z_below: float = Field(
-        default=0.5, ge=0, description="Z margin below core in um"
+    margin_z: float | tuple[float, float] = Field(
+        default=0.5,
+        description=(
+            "Vertical margin around the z_ref reference in um. Scalar = both "
+            "sides equal; (low, high) = (below, above)."
+        ),
     )
     port_margin: float = Field(
         default=0.5,
@@ -251,7 +262,7 @@ class Domain(BaseModel):
     extend_ports: float = Field(
         default=0.0,
         ge=0,
-        description="Extend ports into PML (um). 0 = auto (margin + pml).",
+        description="Extend ports into PML (um). 0 = auto (max XY margin + pml).",
     )
     source_port_offset: float = Field(
         default=0.1,
@@ -271,6 +282,41 @@ class Domain(BaseModel):
         description="Mirror symmetry planes. Not yet used in production runs.",
     )
 
+    @field_validator("margin_x", "margin_y", "margin_z", mode="before")
+    @classmethod
+    def _validate_margin(cls, v: Any) -> Any:
+        """Accept a non-negative scalar or a (low, high) tuple of them."""
+        if isinstance(v, (int, float)):
+            if v < 0:
+                raise ValueError("margin must be >= 0")
+            return float(v)
+        try:
+            low, high = v
+        except (TypeError, ValueError):
+            raise ValueError("margin must be a number or a (low, high) tuple") from None
+        if low < 0 or high < 0:
+            raise ValueError("margin sides must be >= 0")
+        return (float(low), float(high))
+
+    @staticmethod
+    def _as_pair(v: float | tuple[float, float]) -> tuple[float, float]:
+        """Normalize a scalar or (low, high) tuple to a (low, high) pair."""
+        if isinstance(v, tuple):
+            return v
+        return (float(v), float(v))
+
+    def resolved_margin_x(self) -> tuple[float, float]:
+        """Return XY margin as ``(-x side, +x side)``."""
+        return self._as_pair(self.margin_x)
+
+    def resolved_margin_y(self) -> tuple[float, float]:
+        """Return XY margin as ``(-y side, +y side)``."""
+        return self._as_pair(self.margin_y)
+
+    def resolved_margin_z(self) -> tuple[float, float]:
+        """Return vertical margin as ``(below, above)``."""
+        return self._as_pair(self.margin_z)
+
     def __call__(self, **kwargs: Any) -> Domain:
         """Update fields in place. Returns self for chaining."""
         for k, v in kwargs.items():
@@ -288,21 +334,34 @@ class FDTD(BaseModel):
 
     model_config = ConfigDict(validate_assignment=True, extra="forbid")
 
-    is_3d: bool = Field(
-        default=True,
+    mode: Literal["2d", "3d"] = Field(
+        default="3d",
         description=(
-            "Run a full 3D simulation (True) or an effective-index 2D "
-            "simulation (False). 2D collapses the z-dimension, ignores "
-            "sidewall angles, and enforces transverse-electric parity "
-            "(EVEN_Y+ODD_Z)."
+            "Dimensionality: '3d' runs a full 3D simulation; '2d' runs an "
+            "effective-index / cross-section simulation. In 2D the plane is "
+            "implied by which of x_cut/y_cut/z_cut is set."
         ),
     )
-    plane: Literal["xy", "xz"] = Field(
-        default="xy",
+    x_cut: float | Literal["auto"] | None = Field(
+        default=None,
         description=(
-            "2D simulation plane. 'xy' is the effective-index top-down sim; "
-            "'xz' is a vertical cross-section (for grating couplers and "
-            "edge couplers). Only meaningful when is_3d=False."
+            "YZ cross-section plane (perpendicular to X). Reserved — not yet "
+            "implemented. 'auto' = bbox-centered."
+        ),
+    )
+    y_cut: float | Literal["auto"] | None = Field(
+        default=None,
+        description=(
+            "XZ cross-section plane (perpendicular to Y), for grating and "
+            "edge couplers. 'auto' = component bbox Y-center; a float sets the "
+            "Y coordinate of the cross-section (um)."
+        ),
+    )
+    z_cut: float | Literal["auto"] | None = Field(
+        default=None,
+        description=(
+            "XY top-down plane (perpendicular to Z), the effective-index sim. "
+            "'auto' = centered; a float sets the Z coordinate (advisory)."
         ),
     )
     resolution: int = Field(default=32, ge=4, description="Pixels per micrometer")
@@ -459,9 +518,15 @@ class FDTD(BaseModel):
         return self
 
     def __call__(self, **kwargs: Any) -> FDTD:
-        """Update fields in place. Returns self for chaining."""
-        for k, v in kwargs.items():
-            setattr(self, k, v)
+        """Update fields in place (validated as one batch). Returns self.
+
+        Unlike per-field assignment, the ``mode``/cut invariant is checked
+        against the *final* state, so ``solver(mode="2d", y_cut="auto")``
+        never trips on an invalid intermediate (mode set, cut not yet).
+        """
+        validated = FDTD.model_validate({**self.__dict__, **kwargs})
+        for name in FDTD.model_fields:
+            object.__setattr__(self, name, getattr(validated, name))
         return self
 
     # Dispersion control
@@ -491,8 +556,164 @@ class FDTD(BaseModel):
     verbose_interval: float = Field(default=0, ge=0)
 
     @model_validator(mode="after")
-    def _validate_plane_vs_3d(self) -> FDTD:
-        """Reject ``plane='xz'`` when ``is_3d`` is True."""
-        if self.is_3d and self.plane == "xz":
-            raise ValueError("plane='xz' requires is_3d=False")
+    def _validate_mode(self) -> FDTD:
+        """Validate mode against the set of active cut planes.
+
+        - ``mode='3d'`` -> none of x_cut/y_cut/z_cut may be set.
+        - ``mode='2d'`` -> exactly one of x_cut/y_cut/z_cut must be set.
+        - ``x_cut`` (YZ plane) is reserved and not yet implemented.
+        """
+        cuts = {
+            "x_cut": self.x_cut,
+            "y_cut": self.y_cut,
+            "z_cut": self.z_cut,
+        }
+        n_set = sum(v is not None for v in cuts.values())
+        if self.mode == "3d":
+            if n_set:
+                raise ValueError(
+                    "3d mode requires x_cut/y_cut/z_cut to all be None "
+                    f"(got {n_set} set)"
+                )
+        else:  # mode == "2d"
+            if n_set != 1:
+                raise ValueError(
+                    "2d mode requires exactly one of x_cut/y_cut/z_cut "
+                    f"(got {n_set} set)"
+                )
+        if self.x_cut is not None:
+            raise NotImplementedError("YZ plane (x_cut) not yet supported")
+        return self
+
+    # -- Translation helpers (mode/cuts -> internal is_3d/plane/cut) --
+
+    def resolved_is_3d(self) -> bool:
+        """Whether this solves a full 3D simulation."""
+        return self.mode == "3d"
+
+    def resolved_plane(self) -> Literal["xy", "xz"] | None:
+        """Internal 2D plane name implied by the active cut ('xz'|'xy'|None)."""
+        if self.y_cut is not None:
+            return "xz"
+        if self.z_cut is not None:
+            return "xy"
+        return None
+
+    def resolved_cut(self) -> float | str | None:
+        """Value of the active cut ('auto', a float, or None in 3D)."""
+        if self.y_cut is not None:
+            return self.y_cut
+        if self.z_cut is not None:
+            return self.z_cut
+        if self.x_cut is not None:
+            return self.x_cut
+        return None
+
+
+# ---------------------------------------------------------------------------
+# ModeSolver
+# ---------------------------------------------------------------------------
+
+
+class ModeSolver(BaseModel):
+    """Eigenmode solver configuration for waveguide cross-section analysis.
+
+    Configure mode-solving parameters declaratively, then solve via
+    ``sim.solve_modes()``.
+
+    Example::
+
+        sim.mode_solver(wavelengths=[1.55], num_bands=3)
+        sim.mode_solver.first(3).at_port("o1")
+        results = sim.solve_modes()
+    """
+
+    model_config = ConfigDict(validate_assignment=True, extra="forbid")
+
+    where: Literal["auto", "slab", "cross_section"] = Field(default="auto")
+    wavelengths: list[float] = Field(default_factory=list)
+    num_bands: int = Field(default=1, ge=1)
+    band: int | None = Field(default=None, ge=1)
+    parity: Literal[
+        "NO_PARITY", "EVEN_Y", "ODD_Y", "EVEN_Z", "ODD_Z", "EVEN_Y+ODD_Z"
+    ] = Field(default="NO_PARITY")
+    eigensolver_tol: float = Field(default=1e-6, gt=0)
+    port: str | None = Field(default=None)
+    position: tuple[float, float] | None = Field(default=None)
+    x_span: float | None = Field(default=None)
+    y_span: float | None = Field(default=None)
+    n_field_x: int = Field(default=0, ge=0)
+    n_field_y: int = Field(default=0, ge=0)
+    n_field_z: int = Field(default=0, ge=0)
+    background_material: str = Field(
+        default="air",
+        description="MEEP default_material (e.g. 'sio2' for oxide-clad waveguides).",
+    )
+
+    @model_validator(mode="after")
+    def _validate_where_constraints(self) -> ModeSolver:
+        """Enforce cross-field constraints between where and spatial params."""
+        if self.where == "slab":
+            if self.port is not None:
+                raise ValueError(
+                    "port must be None when where='slab' — slab mode does "
+                    "not use a component port."
+                )
+            if self.position is not None:
+                raise ValueError(
+                    "position must be None when where='slab' — slab mode "
+                    "does not use a spatial position."
+                )
+            if self.x_span is not None:
+                raise ValueError(
+                    "x_span must be None when where='slab' — slab mode "
+                    "spans the full x-extent automatically."
+                )
+            if self.y_span is not None:
+                raise ValueError(
+                    "y_span must be None when where='slab' — slab mode "
+                    "spans the full y-extent automatically."
+                )
+        if self.port is not None and self.position is not None:
+            raise ValueError("Cannot set both port and position — use exactly one.")
+        return self
+
+    def fundamental(self) -> ModeSolver:
+        """Solve only the fundamental mode (num_bands=1, band=None)."""
+        self.num_bands = 1
+        self.band = None
+        return self
+
+    def first(self, n: int) -> ModeSolver:
+        """Solve the first *n* bands (num_bands=n, band=None)."""
+        self.num_bands = n
+        self.band = None
+        return self
+
+    def at_port(self, name: str) -> ModeSolver:
+        """Set the port name for cross-section mode solving."""
+        self.port = name
+        return self
+
+    def at_slab(self) -> ModeSolver:
+        """Set solver mode to slab (1D vertical)."""
+        self.where = "slab"
+        return self
+
+    def at_cross_section(self) -> ModeSolver:
+        """Set solver mode to cross-section (2D transverse)."""
+        self.where = "cross_section"
+        return self
+
+    def sweep_wavelength(self, start: float, stop: float, num: int) -> ModeSolver:
+        """Populate wavelengths from a linear sweep (start, stop, num)."""
+        import numpy as np
+
+        self.wavelengths = list(np.linspace(start, stop, num))
+        return self
+
+    def __call__(self, **kwargs: Any) -> ModeSolver:
+        """Update fields in place, return self for fluent chaining."""
+        for k, v in kwargs.items():
+            setattr(self, k, v)
         return self

@@ -3,22 +3,26 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
-from gsim.palace.base import PalaceSimBase
+from gsim.common import Geometry, LayerStack
+from gsim.palace.base import PalaceSimMixin
 from gsim.palace.models import (
     CurrentSourceConfig,
     CurrentSourceElementConfig,
     MagnetostaticConfig,
+    MaterialConfig,
+    NumericalConfig,
     WavePortConfig,
 )
 
 logger = logging.getLogger(__name__)
 
 
-class MagnetostaticSim(PalaceSimBase):
+class MagnetostaticSim(PalaceSimMixin, BaseModel):
     """Magnetostatic simulation for surface-current source problems.
 
     This class configures Palace magnetostatic runs without introducing a
@@ -27,6 +31,7 @@ class MagnetostaticSim(PalaceSimBase):
     electrostatic terminal-selection pattern.
     """
 
+    model_config = ConfigDict(validate_assignment=True, arbitrary_types_allowed=True)
     simulation_type: Literal["magnetostatic"] = "magnetostatic"
 
     driven: None = None
@@ -40,7 +45,16 @@ class MagnetostaticSim(PalaceSimBase):
 
     current_sources: list[CurrentSourceConfig] = Field(default_factory=list)
     magnetostatic: MagnetostaticConfig = Field(default_factory=MagnetostaticConfig)
+    geometry: Geometry | None = None
+    stack: LayerStack | None = None
+    materials: dict[str, MaterialConfig] = Field(default_factory=dict)
+    numerical: NumericalConfig = Field(default_factory=NumericalConfig)
 
+    _stack_kwargs: dict[str, Any] = PrivateAttr(default_factory=dict)
+    _airbox_config: dict[str, float] = PrivateAttr(default_factory=dict)
+    _pec_blocks: list = PrivateAttr(default_factory=list)
+    _hints: dict[str, Any] = PrivateAttr(default_factory=dict)
+    _output_dir: Path | None = PrivateAttr(default=None)
     _configured_sources: bool = PrivateAttr(default=False)
 
     def add_current_source(

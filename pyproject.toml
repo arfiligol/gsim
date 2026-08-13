@@ -1,7 +1,7 @@
 [project]
 name = "gsim"
-version = "0.1.0+scq.1"
-description = ""
+version = "0.2.0+scq.1"
+description = "Electromagnetic simulation for photonics and electronics, powered by GDSFactory."
 readme = "README.md"
 requires-python = "~=3.12.0"
 license = { text = "Apache-2.0" }
@@ -13,20 +13,23 @@ classifiers = [
 ]
 dependencies = [
   "gdsfactory>=9,<10",
-  "gdsfactoryplus>=1.6.4,<2",
+  "gdsfactoryplus>=1.8.20,<3",
   "gmsh",
-  "jsonschema>=4",
-  "kaleido>=1.0.0",
+  "jsonschema",
   "meshio>=5.0.0",
   "nbformat>=4.2.0",
   "nest_asyncio2",
   "plotly",
   "pyvista>=0.43.0",
-  "referencing>=0.37",
-  "semantic-geometry-builder>=0.1.0",
+  "referencing",
   "trame",
   "trame-vtk",
   "trame-vuetify",
+]
+
+[project.optional-dependencies]
+sgb = [
+  "semantic-geometry-builder @ git+https://github.com/OrPenStrike/semantic-geometry-builder.git@e74a343154c6b19b6ba32d6fb297e700cfe08ff2"
 ]
 
 [dependency-groups]
@@ -42,18 +45,14 @@ docs = [
   "griffe>=1.5.6",
   "ipykernel>=6.29.5",
   "matplotlib>=3.10.0",
-  "mkautodoc>=0.2.0",
-  "mkdocs>=1.6.1",
-  "mkdocs-autorefs>=1.3.0",
-  "mkdocs-material>=9.6.0",
-  "mkdocs-shadcn>=0.2",
   "mkdocstrings[python]>=0.27.0",
   "nb-clean>=4.0.1",
   "nbconvert>=7.16.6",
   "nbstripout>=0.8.1",
   "papermill>=2.6.0",
   "plotly>=6.0.0",
-  "vega-datasets>=0.9.0"
+  "vega-datasets>=0.9.0",
+  "zensical>=0.0.46"
 ]
 lint = [
   "jupytext>=1.16.0",
@@ -76,18 +75,6 @@ test = [
 [build-system]
 requires = ["build", "setuptools>=61", "uv", "wheel"]
 build-backend = "setuptools.build_meta"
-
-[[tool.bver.file]]
-src = "README.md"
-
-[[tool.bver.file]]
-src = "pyproject.toml"
-
-[[tool.bver.file]]
-src = "src/gsim/__init__.py"
-
-[tool.bver.git]
-commit-template = "Release {new-version}"
 
 [tool.codespell]
 ignore-words-list = "doubleclick,euclidian,te"
@@ -167,6 +154,14 @@ module = "plotly"
 ignore_missing_imports = true
 module = "plotly.*"
 
+[[tool.mypy.overrides]]
+ignore_missing_imports = true
+module = "palacetoolkit_palace_cpu"
+
+[[tool.mypy.overrides]]
+ignore_missing_imports = true
+module = "palacetoolkit_palace_cpu.*"
+
 [tool.pylsp-mypy]
 enabled = true
 live_mode = true
@@ -180,10 +175,11 @@ reportMissingImports = "none"
 reportMissingTypeStubs = "none"
 
 [tool.pytest.ini_options]
-addopts = "--tb=short -m 'not cloud'"
+addopts = "--tb=short -m 'not cloud and not meep_local'"
 markers = [
   "cloud: tests that submit jobs to GDSFactory+ cloud servers (deselected by default; run with `pytest -m cloud`)",
   "sim_smoke_test: smallest cloud sims (one per solver) run automatically per-PR; run with `pytest -m sim_smoke_test`",
+  "meep_local: tests requiring a local MEEP installation (deselected by default; run with `pytest -m meep_local`)",
 ]
 norecursedirs = ["scripts"]
 testpaths = ["tests"]
@@ -253,11 +249,6 @@ select = ["ALL"]
   "SLF001",  # private-member-access
   "T201",  # print
 ]
-"docs/hooks.py" = [
-  "ARG001",  # unused-function-argument (MkDocs hooks require specific signatures)
-  "INP001",  # implicit-namespace-package
-  "PERF401",  # use-list-extend (keeping for readability)
-]
 "nbs/*.py" = [
   "ANN",  # flake8-annotations
   "ARG001",  # unused-function-argument
@@ -307,17 +298,18 @@ select = ["ALL"]
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
-[tool.setuptools.package-data]
-"gsim.palace.config_schemas" = ["**/*.json"]
-
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+gsim = ["palace/config_schemas/**/*.json"]
 
 [[tool.ty.overrides]]
 include = ["tests/**"]
 
 [tool.ty.overrides.rules]
 possibly-missing-attribute = "ignore"
+invalid-argument-type = "ignore"
 
 [tool.ty.rules]
 missing-argument = "ignore"
@@ -330,6 +322,3 @@ unresolved-import = "ignore"
 
 [tool.ty.src]
 include = ["src"]
-
-[tool.uv.sources]
-semantic-geometry-builder = { git = "https://github.com/OrPenStrike/semantic-geometry-builder", rev = "538d014ac1a3afce532c665c1e300e775b7f09fe" }

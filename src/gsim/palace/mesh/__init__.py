@@ -1,9 +1,7 @@
-"""3D mesh generation and reportable mesh artifacts for Palace EM simulation.
+"""3D mesh generation for Palace EM simulation.
 
 This module provides mesh generation directly from gdsfactory components
-and Palace API data structures. The package root is intentionally limited to
-notebook-facing mesh controls and artifact helpers; lower-level manifest row
-models and typing aliases live in their owner modules.
+and palace-api data structures.
 
 Usage:
     from gsim.palace.mesh import generate_mesh, MeshConfig
@@ -34,33 +32,21 @@ Usage:
 
 from __future__ import annotations
 
-from gsim.palace.mesh.generator import MeshResult, generate_mesh
-from gsim.palace.mesh.manifest import (
-    MeshManifest,
+from gsim.palace.mesh.generator import (
+    GeometryData,
+    MeshResult,
+    generate_mesh,
+    write_config,
 )
-from gsim.palace.mesh.postprocessing import (
-    SurfaceFluxSpec,
-    build_dielectric_interface_specs_from_assignments,
-    build_dielectric_interface_specs_from_material_kinds,
-    build_postprocessing_config_from_manifest,
-    build_surface_epr_dielectric_specs,
-)
-from gsim.palace.mesh.surface_epr import (
-    build_interface_surface_catalog,
-)
-from gsim.palace.mesh.xao_adapter import generate_mesh_from_semantic_xao
 from gsim.palace.models.mesh import MeshConfig
 
+from . import gmsh_utils
+
 __all__ = [
+    "GeometryData",
     "MeshConfig",
-    "MeshManifest",
     "MeshResult",
-    "SurfaceFluxSpec",
-    "build_dielectric_interface_specs_from_assignments",
-    "build_dielectric_interface_specs_from_material_kinds",
-    "build_interface_surface_catalog",
-    "build_postprocessing_config_from_manifest",
-    "build_surface_epr_dielectric_specs",
     "generate_mesh",
-    "generate_mesh_from_semantic_xao",
+    "gmsh_utils",
+    "write_config",
 ]

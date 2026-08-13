@@ -203,7 +203,12 @@ def _append_entry(
     if metadata:
         entry_metadata.update(metadata)
     physical_names = _physical_names(name=name, info=info)
-    interface_of, exterior_of = _parse_physical_relation(physical_names)
+    if _is_structured_sgb_record(info):
+        # Route A/B records carry exact ownership and adjacency in metadata.
+        # Display physical names are deliberately not a second topology authority.
+        interface_of, exterior_of = _structured_relation(info)
+    else:
+        interface_of, exterior_of = _parse_physical_relation(physical_names)
     entries.append(
         MeshPhysicalGroup(
             name=str(name),
@@ -247,6 +252,28 @@ def _physical_names(*, name: str, info: Mapping[str, Any]) -> tuple[str, ...]:
     if isinstance(value, Iterable) and not isinstance(value, (str, bytes, Mapping)):
         return tuple(str(item) for item in value)
     return (str(name),)
+
+
+def _is_structured_sgb_record(info: Mapping[str, Any]) -> bool:
+    """Return whether a group carries current SGB structured provenance."""
+    return (
+        info.get("sgb_record") == "final_physical_group"
+        and info.get("geometry_kind") == "sgb_occ"
+    )
+
+
+def _structured_relation(
+    info: Mapping[str, Any],
+) -> tuple[tuple[str, str] | None, str | None]:
+    """Derive a manifest relation only from structured SGB adjacency."""
+    adjacent = info.get("adjacent_solution_volume_ids")
+    if isinstance(adjacent, Iterable) and not isinstance(
+        adjacent, (str, bytes, Mapping)
+    ):
+        values = tuple(str(value) for value in adjacent)
+        if len(values) == 2 and all(values):
+            return (values[0], values[1]), None
+    return None, None
 
 
 def _dimension(*, role: MeshRole, info: Mapping[str, Any]) -> int | None:
