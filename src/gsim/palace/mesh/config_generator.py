@@ -294,6 +294,7 @@ def generate_palace_config(
     materials_by_lower = {
         str(name).lower().strip(): props for name, props in stack_materials.items()
     }
+    is_electrostatic = simulation_type in ("electrostatic", "electrostatics")
 
     def lookup_material(name: str) -> dict[str, Any]:
         direct = stack_materials.get(name)
@@ -350,7 +351,7 @@ def generate_palace_config(
         elif is_via:
             sigma = mat_props.get("conductivity", 0.0)
             mat_entry["Permittivity"] = 1.0
-            if isinstance(sigma, (int, float)) and sigma > 0:
+            if not is_electrostatic and isinstance(sigma, (int, float)) and sigma > 0:
                 mat_entry["Conductivity"] = sigma
         elif is_shaped_dielectric:
             perm = mat_props.get("permittivity", 1.0)
@@ -376,8 +377,9 @@ def generate_palace_config(
 
             sigma = mat_props.get("conductivity", 0.0)
             lt = mat_props.get("loss_tangent", 0.0)
-            if (isinstance(sigma, (int, float)) and sigma > 0) or isinstance(
-                sigma, list
+            if not is_electrostatic and (
+                (isinstance(sigma, (int, float)) and sigma > 0)
+                or isinstance(sigma, list)
             ):
                 mat_entry["Conductivity"] = sigma
             elif isinstance(lt, list) or (isinstance(lt, (int, float)) and lt > 0):
@@ -464,7 +466,6 @@ def generate_palace_config(
         )
     pec_attrs = sorted(set(pec_attrs))
 
-    is_electrostatic = simulation_type in ("electrostatic", "electrostatics")
     is_magnetostatic = simulation_type == "magnetostatic"
     boundaries: dict[str, object]
 
