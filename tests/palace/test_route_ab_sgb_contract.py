@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import gdsfactory as gf
 import meshio
@@ -100,15 +101,13 @@ def _surface_epr_interfaces() -> dict[str, dict[str, object]]:
     }
 
 
-def _attributes(entries: list[dict[str, object]]) -> set[int]:
+def _attributes(entries: list[dict[str, Any]]) -> set[int]:
     return {
-        int(attribute)
-        for entry in entries
-        for attribute in entry.get("attributes", [])
+        int(attribute) for entry in entries for attribute in entry.get("attributes", [])
     }
 
 
-@pytest.mark.parametrize("route", ("A", "B"))
+@pytest.mark.parametrize("route", ["A", "B"])
 def test_route_ab_sgb_mesh_manifest_config_and_handoff(
     route: str, tmp_path: Path
 ) -> None:
@@ -127,9 +126,7 @@ def test_route_ab_sgb_mesh_manifest_config_and_handoff(
     sim.set_electrostatic(
         unassigned_conductor_policy="error", exterior_boundary_policy="ground"
     )
-    sim.set_surface_epr(
-        representation=route, interfaces=_surface_epr_interfaces()
-    )
+    sim.set_surface_epr(representation=route, interfaces=_surface_epr_interfaces())
     sim.set_output_dir(output_dir)
 
     result = sim.mesh(
@@ -157,7 +154,9 @@ def test_route_ab_sgb_mesh_manifest_config_and_handoff(
     assert resolved.run_summary.mesh_manifest["entry_count"] == len(entries)
 
     volume_entries = {
-        entry["name"]: entry for entry in entries if entry["role"] == "dielectric_volume"
+        entry["name"]: entry
+        for entry in entries
+        if entry["role"] == "dielectric_volume"
     }
     assert set(volume_entries) == {"SUBSTRATE", "AIR_ABOVE", "AIR_BELOW"}
     assert all(entry["dimension"] == 3 for entry in volume_entries.values())
@@ -200,7 +199,9 @@ def test_route_ab_sgb_mesh_manifest_config_and_handoff(
         if route == "A"
         else {("MA", "top"), ("MS", "bottom"), ("MA", "sidewall")}
     )
-    expected_representation = "surface_sheet" if route == "A" else "cutout_boundary_shell"
+    expected_representation = (
+        "surface_sheet" if route == "A" else "cutout_boundary_shell"
+    )
     for component_id in components:
         component_entries = [
             entry
@@ -221,8 +222,7 @@ def test_route_ab_sgb_mesh_manifest_config_and_handoff(
             )
             assert metadata["adjacent_solution_volume_ids"]
             assert {
-                source["route"]
-                for source in metadata["source_provenance"]["sources"]
+                source["route"] for source in metadata["source_provenance"]["sources"]
             } == {route}
 
     pec_entries = [entry for entry in entries if entry["role"] == "pec_surface"]
@@ -231,8 +231,7 @@ def test_route_ab_sgb_mesh_manifest_config_and_handoff(
     assert all(entry["dimension"] == 2 for entry in pec_entries)
     if route == "A":
         assert all(
-            entry["metadata"]["bbox"][5] - entry["metadata"]["bbox"][2]
-            <= 2.1e-7
+            entry["metadata"]["bbox"][5] - entry["metadata"]["bbox"][2] <= 2.1e-7
             for entry in pec_entries
         )
 
@@ -267,9 +266,7 @@ def test_route_ab_sgb_mesh_manifest_config_and_handoff(
     terminal_rows = config["Boundaries"]["Terminal"]
     assert len(terminal_rows) == 3
     terminal_attributes = [
-        int(attribute)
-        for row in terminal_rows
-        for attribute in row["Attributes"]
+        int(attribute) for row in terminal_rows for attribute in row["Attributes"]
     ]
     assert len(terminal_attributes) == len(set(terminal_attributes))
     assert set(terminal_attributes) == _attributes(conductor_entries)
@@ -287,9 +284,10 @@ def test_route_ab_sgb_mesh_manifest_config_and_handoff(
     ground_index = [
         entry for entry in terminal_index if entry["terminal_name"] == "GND"
     ]
-    assert {
-        entry["metadata"]["conductor_component_id"] for entry in ground_index
-    } == {"COMP__GROUND_0000", "COMP__GROUND_0001"}
+    assert {entry["metadata"]["conductor_component_id"] for entry in ground_index} == {
+        "COMP__GROUND_0000",
+        "COMP__GROUND_0001",
+    }
     assert {entry["metadata"]["net_id"] for entry in ground_index} == {"Ground"}
     gnd_terminal = next(row for row in terminal_rows if row["Index"] == 3)
     assert set(gnd_terminal["Attributes"]) == _attributes(ground_index)
@@ -297,8 +295,7 @@ def test_route_ab_sgb_mesh_manifest_config_and_handoff(
     exterior_entries = [
         entry
         for entry in entries
-        if entry["role"] == "boundary_surface"
-        and entry["source"] == "domain_boundary"
+        if entry["role"] == "boundary_surface" and entry["source"] == "domain_boundary"
     ]
     exterior_attributes = _attributes(exterior_entries)
     assert set(config["Boundaries"]["Ground"]["Attributes"]) == exterior_attributes
