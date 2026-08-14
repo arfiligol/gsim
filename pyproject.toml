@@ -29,7 +29,7 @@ dependencies = [
 
 [project.optional-dependencies]
 sgb = [
-  "semantic-geometry-builder @ git+https://github.com/OrPenStrike/semantic-geometry-builder.git@f3fd898d6e4eaf31595c9aaca6a0658f0cb7f3b1"
+  "semantic-geometry-builder @ git+https://github.com/OrPenStrike/semantic-geometry-builder.git@3929078b396bbdeb1853b57c6252d8003e75918f"
 ]
 
 [dependency-groups]
