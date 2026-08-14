@@ -459,7 +459,7 @@ class PalaceSlurmSbatchSpec:
                 "",
             ]
         )
-        lines.extend(self.setup_commands)
+        lines.extend(_render_setup_commands(self.setup_commands))
         if self.setup_commands:
             lines.append("")
         lines.extend(
@@ -745,6 +745,8 @@ def write_palace_slurm_sbatch_handoff(
         _require_file(run_dir / spec.config_path, "Palace config")
         _require_file(run_dir / spec.mesh_path, "Palace mesh")
 
+    for log_path in (spec.stdout_path, spec.stderr_path):
+        (run_dir / log_path).parent.mkdir(parents=True, exist_ok=True)
     output_script_path.parent.mkdir(parents=True, exist_ok=True)
     output_script_path.write_text(spec.render(), encoding="utf-8")
     output_script_path.chmod(output_script_path.stat().st_mode | 0o755)
@@ -1239,7 +1241,7 @@ def _render_sweep_array_sbatch(
             "",
         ]
     )
-    lines.extend(spec.setup_commands)
+    lines.extend(_render_setup_commands(spec.setup_commands))
     if spec.setup_commands:
         lines.append("")
     lines.extend(
@@ -1526,13 +1528,24 @@ def _render_petsc_options(options: Sequence[str]) -> list[str]:
     return [
         "",
         f"PALACE_PETSC_OPTIONS={option_string}",
-        'if [[ -v PETSC_OPTIONS && -n "$PETSC_OPTIONS" ]]; then',
+        'if [[ -n "${PETSC_OPTIONS:-}" ]]; then',
         '  export PETSC_OPTIONS="$PETSC_OPTIONS $PALACE_PETSC_OPTIONS"',
         "else",
         '  export PETSC_OPTIONS="$PALACE_PETSC_OPTIONS"',
         "fi",
         'echo "PETSC_OPTIONS=$PETSC_OPTIONS"',
     ]
+
+
+def _render_setup_commands(commands: Sequence[str]) -> list[str]:
+    """Render sourced vendor environments without leaking the nounset override."""
+    lines: list[str] = []
+    for command in commands:
+        if command.lstrip().startswith((". ", "source ")):
+            lines.extend(("set +u", command, "set -u"))
+        else:
+            lines.append(command)
+    return lines
 
 
 def _validate_sbatch_token(label: str, value: str) -> None:
@@ -1924,6 +1937,8 @@ def _filter_run_handoff_tarinfo(
     include_results: bool,
 ) -> tarfile.TarInfo | None:
     """Exclude result and log members when a compact archive is requested."""
+    if info.isdir():
+        return info
     parts = Path(info.name).parts
     relative_parts = parts[1:] if parts and parts[0] == archive_root_name else parts
     return (
