@@ -18,7 +18,7 @@ from gsim.palace.results.indexed import IndexedCsv, IndexedCsvColumn
 _CSV_INDEX_SECTIONS = {
     "domain-E.csv": "Domains.Postprocessing.Energy",
     "surface-Q.csv": "Boundaries.Postprocessing.Dielectric",
-    "port-EPR.csv": "Boundaries.Postprocessing.SurfaceFlux",
+    "port-EPR.csv": "Boundaries.LumpedPort",
 }
 _INDEXED_CSV_COLUMN_RE = re.compile(
     r"^(?P<prefix>[A-Za-z][A-Za-z0-9_]*)\[(?P<index>\d+)\](?P<suffix>.*)$"
@@ -137,7 +137,10 @@ def indexed_column_provenance(
 ) -> dict[str, Any]:
     """Return physical-name provenance for one indexed Palace CSV column."""
     metadata = dict(column.metadata)
-    source_name = _metadata_string(metadata, "source_name")
+    port_name = column.extra.get("port_name")
+    source_name = port_name if isinstance(port_name, str) and port_name else None
+    if source_name is None:
+        source_name = _metadata_string(metadata, "source_name")
     if source_name is None:
         source_name = _metadata_string(metadata, "source_entry_name")
     if source_name is None:
@@ -160,6 +163,8 @@ def indexed_column_provenance(
     }
     if column.metadata:
         row["metadata"] = dict(column.metadata)
+    if isinstance(port_name, str) and port_name:
+        row["port_name"] = port_name
     interface_type = interface_type_for_column(column)
     if interface_type is not None:
         row["interface_type"] = interface_type

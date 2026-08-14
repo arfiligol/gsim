@@ -227,6 +227,7 @@ def generate_mesh_from_semantic_geometry_builder(
             gds_path=gds_path,
             activated_regions=activated_regions,
             terminals=terminals,
+            ports=ports,
             route=route,
         )
     )
@@ -370,7 +371,14 @@ def generate_mesh_from_semantic_xao(
                 "SGB XAO did not expose any live volume physical groups. "
                 "Check that 04_export_physical_groups.json matches the XAO file."
             )
+        _embed_port_sheet_surfaces(groups)
         _setup_xao_refinement(groups, refined_mesh_size, max_mesh_size)
+        if any(
+            info.get("type") == "lumped_sheet"
+            for info in groups["port_surfaces"].values()
+        ):
+            # Gmsh's default/HXT path rejects embedded internal sheet PLCs.
+            gmsh.option.setNumber("Mesh.Algorithm3D", 4)
         gmsh.model.mesh.generate(3)
         if high_order_elements:
             gmsh.model.mesh.setOrder(high_order_order)
@@ -424,7 +432,7 @@ def generate_mesh_from_semantic_xao(
     return MeshResult(
         mesh_path=mesh_path,
         config_path=config_path,
-        port_info=[],
+        port_info=_port_information_from_sgb_groups(groups),
         mesh_stats=mesh_stats,
         groups=groups,
         output_dir=run_folder.root,
@@ -432,6 +440,32 @@ def generate_mesh_from_semantic_xao(
         fmax=fmax,
         manifest=manifest or build_mesh_manifest(groups),
     )
+
+
+def _port_information_from_sgb_groups(
+    groups: Mapping[str, Mapping[str, Mapping[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Preserve layout-sheet port labels in the canonical result sidecar."""
+    rows: list[dict[str, Any]] = []
+    for key, info in groups.get("port_surfaces", {}).items():
+        if info.get("type") != "lumped_sheet":
+            continue
+        attribute = info.get("physical_attribute")
+        if not isinstance(attribute, Mapping):
+            raise TypeError(f"SGB layout sheet {key!r} needs physical_attribute.")
+        rows.append(
+            {
+                "portnumber": attribute["port_index"],
+                "name": attribute["port_name"],
+                "type": "lumped_sheet",
+                "direction": list(info["direction"]),
+                "physical_name": info["physical_name"],
+                "attributes": [info["phys_group"]],
+                "source_layer": attribute["source_layer"],
+                "target_layer": attribute["target_layer"],
+            }
+        )
+    return rows
 
 
 def _write_component_gds(component: Any, path: Path) -> None:
@@ -596,6 +630,7 @@ def _sgb_stack_mapping_from_gsim_inputs(
     gds_path: Path,
     activated_regions: Sequence[ActivatedRegion],
     terminals: Sequence[TerminalConfig],
+    ports: Sequence[PalacePort],
     route: Literal["A", "B"],
 ) -> tuple[dict[str, Any], dict[str, str], dict[str, str]]:
     """Lower active gsim regions and layers to the SGB stack contract."""
@@ -728,6 +763,7 @@ def _sgb_stack_mapping_from_gsim_inputs(
                 "units": "um",
                 "source": str(gds_path),
                 "adapter": "gsim",
+                "port_sheet_source_layers": _port_sheet_source_layers(ports),
             },
             "solution_regions": solution_regions,
             "layers": layer_records,
@@ -735,6 +771,68 @@ def _sgb_stack_mapping_from_gsim_inputs(
         semantic_layer_map,
         solution_stack_layers | semantic_layer_map,
     )
+
+
+def _port_sheet_source_layers(ports: Sequence[PalacePort]) -> list[dict[str, Any]]:
+    """Lower exact gdsfactory port-layer ownership for SGB Route A/B sheets."""
+    from gsim.palace.ports.config import PortGeometry, PortType
+
+    records: list[dict[str, Any]] = []
+    used_layers: set[tuple[int, int]] = set()
+    for port_index, port in enumerate(ports, start=1):
+        if port.sheet_layer is None:
+            continue
+        if (
+            port.port_type != PortType.LUMPED
+            or port.geometry != PortGeometry.INPLANE
+            or port.multi_element
+            or port.layer is None
+        ):
+            raise ValueError(
+                f"layout_sheet port '{port.name}' must be one single inplane "
+                "lumped port"
+            )
+        layer, datatype = port.sheet_layer
+        if isinstance(layer, bool) or isinstance(datatype, bool):
+            raise TypeError(f"layout_sheet port '{port.name}' has invalid GDS layer")
+        source_layer = (int(layer), int(datatype))
+        if source_layer in used_layers:
+            raise ValueError(
+                "layout_sheet ports must use distinct gdsfactory port layers: "
+                f"{source_layer!r}"
+            )
+        used_layers.add(source_layer)
+        orientation = float(port.orientation)
+        if not math.isfinite(orientation):
+            raise ValueError(
+                f"layout_sheet port '{port.name}' has non-finite orientation"
+            )
+        direction = _orientation_direction(orientation)
+        records.append(
+            {
+                "layer": source_layer[0],
+                "datatype": source_layer[1],
+                "name": port.name,
+                "port_index": port_index,
+                "target_layer": port.layer,
+                "direction": direction,
+                "orientation_degrees": orientation,
+                "direction_sign_convention": "gdsfactory_port_orientation_outward",
+                "source": "palace_lumped_port_sheet",
+            }
+        )
+    return records
+
+
+def _orientation_direction(orientation: float) -> tuple[float, float, float]:
+    """Return a stable normalized XY current direction from port orientation."""
+    angle = math.radians(orientation)
+    x = round(math.cos(angle), 15)
+    y = round(math.sin(angle), 15)
+    length = math.hypot(x, y)
+    if not math.isfinite(length) or length == 0.0:
+        raise ValueError("layout_sheet port orientation has no finite XY direction")
+    return (x / length, y / length, 0.0)
 
 
 def _solution_regions_from_activated(
@@ -1147,6 +1245,15 @@ def _groups_from_sgb_records(
                 structured_required=True,
             )
         elif dim == 2:
+            if record.get("role") == "lumped_port":
+                _add_lumped_port_sheet_group(
+                    groups=groups,
+                    name=name,
+                    phys_group=phys_group,
+                    entity_tags=entity_tags,
+                    record=record,
+                )
+                continue
             _add_surface_group_records(
                 groups=groups,
                 name=name,
@@ -1164,6 +1271,197 @@ def _groups_from_sgb_records(
             + ", ".join(sorted(missing))
         )
     return groups
+
+
+def _add_lumped_port_sheet_group(
+    *,
+    groups: dict[str, dict[str, Any]],
+    name: str,
+    phys_group: int,
+    entity_tags: tuple[int, ...],
+    record: Mapping[str, Any],
+) -> None:
+    """Classify an SGB Route A/B lumped-port sheet before interface parsing."""
+    if (
+        record.get("interface_type") != "lumped_port"
+        or record.get("face_kind") != "sheet"
+        or record.get("representation") != "lumped_port_sheet"
+        or record.get("solver_use") != "solver_active"
+        or record.get("route") not in {"A", "B"}
+        or _optional_string(record.get("surface_id")) is None
+        or not isinstance(record.get("source_provenance"), Mapping)
+    ):
+        raise ValueError(f"SGB lumped-port sheet {name!r} has invalid structure.")
+    owners = record.get("owner_semantic_ids")
+    adjacent = record.get("adjacent_solution_volume_ids")
+    if (
+        not isinstance(owners, (list, tuple))
+        or len(owners) != 2
+        or not all(isinstance(value, str) and value for value in owners)
+        or len(set(owners)) != 2
+        or not isinstance(adjacent, (list, tuple))
+        or len(adjacent) not in {1, 2}
+        or not all(isinstance(value, str) and value for value in adjacent)
+    ):
+        raise ValueError(
+            f"SGB lumped-port sheet {name!r} needs owners and solution-volume "
+            "provenance."
+        )
+    owner_ids = tuple(str(value) for value in owners)
+    adjacent_ids = tuple(str(value) for value in adjacent)
+    attribute = record.get("physical_attribute")
+    if not isinstance(attribute, Mapping):
+        raise TypeError(f"SGB lumped-port sheet {name!r} needs physical_attribute.")
+    port_index = attribute.get("port_index")
+    port_name = _optional_string(attribute.get("port_name"))
+    target_layer = _optional_string(attribute.get("target_layer"))
+    embedded_volume_id = _optional_string(attribute.get("embedded_volume_id"))
+    owner_provenance = attribute.get("owner_provenance")
+    if (
+        isinstance(port_index, bool)
+        or not isinstance(port_index, int)
+        or port_index < 1
+        or port_name is None
+        or target_layer is None
+        or embedded_volume_id is None
+        or not isinstance(owner_provenance, (list, tuple))
+        or len(owner_provenance) != 2
+    ):
+        raise ValueError(f"SGB lumped-port sheet {name!r} has incomplete attributes.")
+    provenance_owner_ids = tuple(
+        _optional_string(item.get("semantic_id")) if isinstance(item, Mapping) else None
+        for item in owner_provenance
+    )
+    if provenance_owner_ids != owner_ids:
+        raise ValueError(
+            f"SGB lumped-port sheet {name!r} owner provenance is inconsistent."
+        )
+    for item in owner_provenance:
+        if not isinstance(item, Mapping):
+            raise TypeError(
+                f"SGB lumped-port sheet {name!r} owner provenance must be mappings."
+            )
+        component_id = _optional_string(item.get("conductor_component_id"))
+        net_id = item.get("net_id")
+        equipotential_id = item.get("equipotential_id")
+        if (
+            component_id is None
+            or (net_id is not None and _optional_string(net_id) is None)
+            or (
+                equipotential_id is not None
+                and _optional_string(equipotential_id) is None
+            )
+        ):
+            raise ValueError(
+                f"SGB lumped-port sheet {name!r} has incomplete component provenance."
+            )
+    route = record["route"]
+    if (
+        route == "A"
+        and (len(adjacent_ids) != 2 or embedded_volume_id not in adjacent_ids)
+    ) or (route == "B" and adjacent_ids != (embedded_volume_id,)):
+        raise ValueError(
+            f"SGB lumped-port sheet {name!r} has invalid Route {route} adjacency."
+        )
+    direction = _normalized_port_sheet_direction(attribute.get("direction"), name)
+    source_provenance = record["source_provenance"]
+    provenance_direction = _normalized_port_sheet_direction(
+        source_provenance.get("direction"), name
+    )
+    if (
+        source_provenance.get("source_name") != port_name
+        or source_provenance.get("port_index") != port_index
+        or source_provenance.get("source_layer") != attribute.get("source_layer")
+        or source_provenance.get("target_layer") != target_layer
+        or provenance_direction != direction
+        or _optional_string(source_provenance.get("direction_sign_convention")) is None
+    ):
+        raise ValueError(
+            f"SGB lumped-port sheet {name!r} source provenance is inconsistent."
+        )
+    key = f"P{port_index}"
+    if key in groups["port_surfaces"]:
+        raise ValueError(f"Duplicate SGB lumped-port sheet index {port_index}.")
+    bbox = _entities_bbox(2, entity_tags)
+    groups["port_surfaces"][key] = {
+        "phys_group": phys_group,
+        "tags": list(entity_tags),
+        "dim": 2,
+        "type": "lumped_sheet",
+        "direction": direction,
+        "embedded_volume_id": embedded_volume_id,
+        "source": "semantic_geometry_builder",
+        "surface_epr": True,
+        "sgb_record": "final_physical_group",
+        "sgb_route": record["route"],
+        "representation": record["representation"],
+        "geometry_kind": "sgb_occ",
+        "physical_group_attribute": phys_group,
+        "physical_name": name,
+        "sgb_role": record["role"],
+        "sgb_metadata": dict(record.get("metadata", {})),
+        "surface_id": record.get("surface_id"),
+        "owner_semantic_ids": owner_ids,
+        "adjacent_solution_volume_ids": adjacent_ids,
+        "source_provenance": record.get("source_provenance"),
+        "physical_attribute": dict(attribute),
+        "bbox": bbox,
+        "centroid": _bbox_centroid(bbox),
+    }
+
+
+def _normalized_port_sheet_direction(
+    value: Any, name: str
+) -> tuple[float, float, float]:
+    """Validate the exact numeric Route A/B current direction."""
+    if (
+        isinstance(value, (str, bytes))
+        or not isinstance(value, Sequence)
+        or len(value) != 3
+    ):
+        raise ValueError(f"SGB lumped-port sheet {name!r} needs a 3D direction.")
+    direction = tuple(float(item) for item in value)
+    if not all(math.isfinite(item) for item in direction) or not math.isclose(
+        direction[2], 0.0, abs_tol=1e-12
+    ):
+        raise ValueError(
+            f"SGB lumped-port sheet {name!r} direction must be finite and in-plane."
+        )
+    length = math.hypot(direction[0], direction[1])
+    if (
+        not math.isfinite(length)
+        or length == 0.0
+        or not math.isclose(length, 1.0, rel_tol=1e-12, abs_tol=1e-12)
+    ):
+        raise ValueError(
+            f"SGB lumped-port sheet {name!r} direction must be normalized and nonzero."
+        )
+    return (direction[0], direction[1], 0.0)
+
+
+def _embed_port_sheet_surfaces(
+    groups: Mapping[str, Mapping[str, Mapping[str, Any]]],
+) -> None:
+    """Embed each Route A/B port sheet in its SGB-owned solution volume."""
+    volumes = groups.get("volumes", {})
+    for port_key, port_info in groups.get("port_surfaces", {}).items():
+        if port_info.get("type") != "lumped_sheet":
+            continue
+        if port_info.get("sgb_route") == "A":
+            continue
+        volume_id = _optional_string(port_info.get("embedded_volume_id"))
+        volume = volumes.get(volume_id) if volume_id is not None else None
+        if not isinstance(volume, Mapping) or not volume.get("tags"):
+            raise ValueError(
+                f"SGB lumped-port sheet {port_key!r} has no live embedded volume "
+                f"{volume_id!r}."
+            )
+        surface_tags = [int(tag) for tag in port_info.get("tags", ())]
+        volume_tags = [int(tag) for tag in volume.get("tags", ())]
+        if not surface_tags or not volume_tags:
+            raise ValueError(f"SGB lumped-port sheet {port_key!r} has no live tags.")
+        for volume_tag in volume_tags:
+            gmsh.model.mesh.embed(2, surface_tags, 3, volume_tag)
 
 
 def _sgb_records_route_context(records: Sequence[Any]) -> Literal["A", "B"]:

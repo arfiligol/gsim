@@ -6,6 +6,7 @@ This module handles generating Palace config.json and collecting mesh statistics
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Mapping
 from copy import deepcopy
@@ -496,7 +497,26 @@ def generate_palace_config(
             if port_key in groups["port_surfaces"]:
                 port_group = groups["port_surfaces"][port_key]
 
-                if port.multi_element:
+                if port.sheet_layer is not None:
+                    _validate_layout_sheet_port_group(port, port_group, port_key)
+                    entry: dict[str, object] = {
+                        "Index": port_idx,
+                        "Direction": list(port_group["direction"]),
+                        "Excitation": (
+                            False
+                            if simulation_type == "eigenmode"
+                            else (port_idx if port.excited else False)
+                        ),
+                        "Attributes": [port_group["phys_group"]],
+                    }
+                    if port.resistance is not None:
+                        entry["R"] = port.resistance
+                    if port.inductance is not None and port.inductance > 0:
+                        entry["L"] = port.inductance
+                    if port.capacitance is not None and port.capacitance > 0:
+                        entry["C"] = port.capacitance
+                    lumped_ports.append(entry)
+                elif port.multi_element:
                     # Multi-element port (CPW)
                     if port_group.get("type") == "cpw":
                         elements = [
@@ -588,6 +608,11 @@ def generate_palace_config(
                                 "Attributes": [port_group["phys_group"]],
                             }
                         )
+            elif port.sheet_layer is not None:
+                raise ValueError(
+                    f"layout_sheet port '{port.name}' has no SGB port surface "
+                    f"{port_key}."
+                )
             port_idx += 1
 
         # Assign unique indices to passive reactive ports now that all primary
@@ -733,6 +758,55 @@ def generate_palace_config(
         json.dump(port_info_struct, f, indent=4)
 
     return config_path
+
+
+def _validate_layout_sheet_port_group(
+    port: PalacePort, group: Mapping, key: str
+) -> None:
+    """Require an exact SGB sheet direction matching the gdsfactory port."""
+    if group.get("type") != "lumped_sheet":
+        raise ValueError(f"layout_sheet port '{port.name}' has invalid group {key}.")
+    attribute = group.get("physical_attribute")
+    expected_source_layer = (
+        None
+        if port.sheet_layer is None
+        else f"{port.sheet_layer[0]}/{port.sheet_layer[1]}"
+    )
+    if (
+        not isinstance(attribute, Mapping)
+        or attribute.get("port_name") != port.name
+        or attribute.get("port_index") != int(key.removeprefix("P"))
+        or attribute.get("source_layer") != expected_source_layer
+        or attribute.get("target_layer") != port.layer
+    ):
+        raise ValueError(
+            f"layout_sheet port '{port.name}' does not match SGB source ownership."
+        )
+    direction = group.get("direction")
+    if (
+        isinstance(direction, (str, bytes))
+        or not isinstance(direction, (tuple, list))
+        or len(direction) != 3
+    ):
+        raise ValueError(f"layout_sheet port '{port.name}' has no numeric direction.")
+    vector = tuple(float(value) for value in direction)
+    length = math.hypot(vector[0], vector[1])
+    if (
+        not all(math.isfinite(value) for value in vector)
+        or not math.isclose(vector[2], 0.0, abs_tol=1e-12)
+        or not math.isclose(length, 1.0, rel_tol=1e-12, abs_tol=1e-12)
+    ):
+        raise ValueError(
+            f"layout_sheet port '{port.name}' direction must be finite normalized XY."
+        )
+    angle = math.radians(port.orientation)
+    expected = (math.cos(angle), math.sin(angle))
+    if not math.isclose(vector[0], expected[0], abs_tol=1e-12) or not math.isclose(
+        vector[1], expected[1], abs_tol=1e-12
+    ):
+        raise ValueError(
+            f"layout_sheet port '{port.name}' direction does not match orientation."
+        )
 
 
 def _resolve_boundary_dielectric_interfaces(

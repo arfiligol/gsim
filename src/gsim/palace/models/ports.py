@@ -48,6 +48,10 @@ class PortConfig(BaseModel):
     capacitance: float | None = Field(
         default=None, ge=0, description="Capacitance in F"
     )
+    layout_sheet: bool = Field(
+        default=False,
+        description="Lower this inplane lumped port from its gdsfactory port layer.",
+    )
     excited: bool = True
     geometry: Literal["inplane", "via"] = "inplane"
     offset: float = Field(
@@ -65,6 +69,8 @@ class PortConfig(BaseModel):
             self.from_layer is None or self.to_layer is None
         ):
             raise ValueError("Via ports require both 'from_layer' and 'to_layer'")
+        if self.layout_sheet and self.geometry != "inplane":
+            raise ValueError("layout_sheet ports must use inplane geometry")
         return self
 
 

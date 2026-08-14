@@ -26,7 +26,7 @@ jobs:
     - name: Verify exact SGB revision
       if: runner.os == 'Linux'
       run: >-
-        uv run python -c "import importlib.metadata as m,json; p=json.loads(m.distribution('semantic-geometry-builder').read_text('direct_url.json')); assert p['vcs_info']['commit_id']=='e74a343154c6b19b6ba32d6fb297e700cfe08ff2'; print(p['vcs_info']['commit_id'])"
+        uv run python -c "import importlib.metadata as m,json; p=json.loads(m.distribution('semantic-geometry-builder').read_text('direct_url.json')); assert p['vcs_info']['commit_id']=='401c4f10b1999434689eb820d735457c8e9fb3d9'; print(p['vcs_info']['commit_id'])"
     - name: Run tests
       run: uv run pytest
   test_coverage:

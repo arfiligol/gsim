@@ -8,6 +8,8 @@ This module provides:
 from __future__ import annotations
 
 import itertools
+import math
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -34,8 +36,16 @@ _DIR_MAP: dict[str, np.ndarray] = {
 }
 
 
-def _parse_direction(direction: str) -> np.ndarray:
-    """Parse a direction string (e.g. '+X', '-Y', 'Z') into a unit vector."""
+def _parse_direction(direction: str | Sequence[float]) -> np.ndarray:
+    """Parse an axis token or exact numeric direction into a unit vector."""
+    if not isinstance(direction, str):
+        if len(direction) != 3:
+            raise ValueError("Port direction vector must have three components")
+        vector = np.asarray(tuple(float(value) for value in direction), dtype=float)
+        length = float(np.linalg.norm(vector))
+        if not all(math.isfinite(value) for value in vector) or length == 0.0:
+            raise ValueError("Port direction vector must be finite and nonzero")
+        return vector / length
     key = direction.strip().lower()
     if key not in _DIR_MAP:
         raise ValueError(f"Unknown port direction '{direction}'")
@@ -170,7 +180,7 @@ def _check_surface_geometry(
     *,
     mesh_path: Path,
     phys_tag: int,
-    direction_str: str,
+    direction_str: str | Sequence[float],
     context: str,
     rel_tol: float,
 ) -> list[str]:
@@ -302,7 +312,11 @@ def check_lumped_port_geometry(
                 )
                 continue
             direction_str = (
-                "+Z" if port.geometry == PortGeometry.VIA else port.direction.upper()
+                port_group["direction"]
+                if port_group.get("type") == "lumped_sheet"
+                else "+Z"
+                if port.geometry == PortGeometry.VIA
+                else port.direction.upper()
             )
             context = f"Port {port_idx} ('{port.name}') (physical group {phys_tag})"
             errors.extend(
