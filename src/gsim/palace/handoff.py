@@ -745,6 +745,8 @@ def write_palace_slurm_sbatch_handoff(
         _require_file(run_dir / spec.config_path, "Palace config")
         _require_file(run_dir / spec.mesh_path, "Palace mesh")
 
+    for log_path in (spec.stdout_path, spec.stderr_path):
+        (run_dir / log_path).parent.mkdir(parents=True, exist_ok=True)
     output_script_path.parent.mkdir(parents=True, exist_ok=True)
     output_script_path.write_text(spec.render(), encoding="utf-8")
     output_script_path.chmod(output_script_path.stat().st_mode | 0o755)
@@ -1924,6 +1926,8 @@ def _filter_run_handoff_tarinfo(
     include_results: bool,
 ) -> tarfile.TarInfo | None:
     """Exclude result and log members when a compact archive is requested."""
+    if info.isdir():
+        return info
     parts = Path(info.name).parts
     relative_parts = parts[1:] if parts and parts[0] == archive_root_name else parts
     return (
