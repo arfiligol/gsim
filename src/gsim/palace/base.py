@@ -1074,6 +1074,7 @@ class PalaceSimMixin:
                     impedance=port_config.impedance,
                     excited=port_config.excited,
                     offset=port_config.offset,
+                    layout_sheet=port_config.layout_sheet,
                 )
             elif port_config.geometry == "via" and (
                 port_config.from_layer is not None and port_config.to_layer is not None
@@ -1172,6 +1173,13 @@ class PalaceSimMixin:
         airbox_cfg = self._airbox_config or {}
         domain_margin_x = airbox_cfg.get("margin_x", mesh_config.effective_margin_x)
         domain_margin_y = airbox_cfg.get("margin_y", mesh_config.effective_margin_y)
+
+        if any(port.sheet_layer is not None for port in ports) and not getattr(
+            self, "_surface_epr_config", None
+        ):
+            raise ValueError(
+                "layout_sheet ports require set_surface_epr(representation='A' or 'B')"
+            )
 
         if verbose:
             logger.info("Generating mesh in %s", output_dir)
@@ -1717,6 +1725,7 @@ class PalaceSimMixin:
             from gsim.palace.mesh.postprocessing import (
                 PostprocessingIndexEntry,
                 PostprocessingIndexMap,
+                build_lumped_port_index_map_from_manifest,
                 build_surface_current_index_map_from_manifest,
                 build_terminal_index_map_from_manifest,
             )
@@ -1745,6 +1754,14 @@ class PalaceSimMixin:
                     ),
                 )
                 index_entries.extend(current_map.entries)
+            elif self.simulation_type in {"driven", "eigenmode"}:
+                lumped_port_rows = config.get("Boundaries", {}).get("LumpedPort", [])
+                port_map = build_lumped_port_index_map_from_manifest(
+                    manifest,
+                    lumped_port_rows if isinstance(lumped_port_rows, list) else (),
+                    port_names=tuple(port.name for port in self._last_ports),
+                )
+                index_entries.extend(port_map.entries)
             PostprocessingIndexMap(entries=tuple(index_entries)).write_json(
                 prepare_palace_run_folder(config_path.parent).index_map_path
             )
@@ -2109,6 +2126,7 @@ class PalaceSimMixin:
         resistance: float | None = None,
         inductance: float | None = None,
         capacitance: float | None = None,
+        layout_sheet: bool = False,
         excited: bool = True,
         geometry: Literal["inplane", "via"] = "inplane",
     ) -> None:
@@ -2126,6 +2144,8 @@ class PalaceSimMixin:
             resistance: Series resistance (Ohms)
             inductance: Series inductance (H)
             capacitance: Shunt capacitance (F)
+            layout_sheet: Lower this inplane lumped port from the gdsfactory port layer
+                for Surface EPR Route A/B.
             excited: Whether this port is excited
             geometry: Port geometry type ("inplane" or "via")
 
@@ -2150,6 +2170,7 @@ class PalaceSimMixin:
                 resistance=resistance,
                 inductance=inductance,
                 capacitance=capacitance,
+                layout_sheet=layout_sheet,
                 excited=excited,
                 geometry=geometry,
             )

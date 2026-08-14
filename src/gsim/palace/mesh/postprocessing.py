@@ -626,6 +626,46 @@ def build_terminal_index_map_from_manifest(
     return PostprocessingIndexMap(entries=tuple(index_entries))
 
 
+def build_lumped_port_index_map_from_manifest(
+    manifest: MeshManifest,
+    lumped_port_entries: Iterable[Mapping[str, Any]],
+    *,
+    port_names: tuple[str, ...] = (),
+) -> PostprocessingIndexMap:
+    """Link Palace lumped-port indices to structured port surfaces."""
+    manifest_entries = {
+        attribute: entry
+        for entry in manifest.entries
+        if entry.role == "port_surface"
+        for attribute in entry.attributes
+    }
+    index_entries: list[PostprocessingIndexEntry] = []
+    for port_entry in lumped_port_entries:
+        index = port_entry.get("Index")
+        if not isinstance(index, int):
+            continue
+        port_name = (
+            port_names[index - 1] if 0 <= index - 1 < len(port_names) else f"P{index}"
+        )
+        attributes = int_tuple(port_entry.get("Attributes", ()))
+        for attribute in attributes:
+            entry = manifest_entries.get(attribute)
+            if entry is None:
+                continue
+            index_entries.append(
+                _index_entry(
+                    section="Boundaries.LumpedPort",
+                    index=index,
+                    entry=entry,
+                    extra={
+                        "port_name": port_name,
+                        "port_attributes": list(attributes),
+                    },
+                )
+            )
+    return PostprocessingIndexMap(entries=tuple(index_entries))
+
+
 def build_surface_current_index_map_from_manifest(
     manifest: MeshManifest,
     surface_current_entries: Iterable[Mapping[str, Any]],
@@ -1155,6 +1195,7 @@ __all__ = [
     "SurfaceFluxType",
     "build_dielectric_interface_specs_from_assignments",
     "build_dielectric_interface_specs_from_material_kinds",
+    "build_lumped_port_index_map_from_manifest",
     "build_postprocessing_config_from_manifest",
     "build_surface_current_index_map_from_manifest",
     "build_surface_epr_dielectric_specs",

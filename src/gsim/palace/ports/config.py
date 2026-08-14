@@ -47,6 +47,7 @@ class PalacePort:
 
     # Layer info
     layer: str | None = None  # For inplane: target layer
+    sheet_layer: tuple[int, int] | None = None  # GDS source layer for SGB Route A/B
     from_layer: str | None = None  # For via: bottom layer
     to_layer: str | None = None  # For via: top layer
 
@@ -118,6 +119,7 @@ def configure_inplane_port(
     impedance: float = 50.0,
     excited: bool = True,
     offset: float = 0.0,
+    layout_sheet: bool = False,
 ):
     """Configure gdsfactory port(s) as inplane (lumped) ports for Palace simulation.
 
@@ -152,6 +154,7 @@ def configure_inplane_port(
         port.info["length"] = length
         port.info["impedance"] = impedance
         port.info["excited"] = excited
+        port.info["layout_sheet"] = layout_sheet
 
 
 def configure_via_port(
@@ -450,6 +453,15 @@ def extract_ports(component, stack: LayerStack) -> list[PalacePort]:
         else:
             raise ValueError(f"Unknown port type: {palace_type}")
 
+        layout_sheet = bool(info.get("layout_sheet", False))
+        sheet_layer = _resolve_port_sheet_layer(port) if layout_sheet else None
+        if layout_sheet and (
+            port_type != PortType.LUMPED or geometry != PortGeometry.INPLANE
+        ):
+            raise ValueError(
+                f"layout_sheet port '{port.name}' must be a single inplane lumped port"
+            )
+
         palace_port = PalacePort(
             name=port.name,
             port_type=port_type,
@@ -460,6 +472,7 @@ def extract_ports(component, stack: LayerStack) -> list[PalacePort]:
             zmin=zmin,
             zmax=zmax,
             layer=layer_name,
+            sheet_layer=sheet_layer,
             from_layer=from_layer,
             to_layer=to_layer,
             length=info.get("length"),
@@ -477,3 +490,22 @@ def extract_ports(component, stack: LayerStack) -> list[PalacePort]:
         palace_ports.append(palace_port)
 
     return palace_ports
+
+
+def _resolve_port_sheet_layer(port) -> tuple[int, int]:
+    """Return the exact GDS layer carried by a gdsfactory port."""
+    raw_layer = getattr(port, "layer", None)
+    if isinstance(raw_layer, tuple) and len(raw_layer) == 2:
+        return (int(raw_layer[0]), int(raw_layer[1]))
+    if isinstance(raw_layer, list) and len(raw_layer) == 2:
+        return (int(raw_layer[0]), int(raw_layer[1]))
+    if hasattr(raw_layer, "layer") and hasattr(raw_layer, "datatype"):
+        return (int(raw_layer.layer), int(raw_layer.datatype))
+
+    try:
+        info = port.kcl.layout.get_info(int(str(raw_layer)))
+        return (int(info.layer), int(info.datatype))
+    except (AttributeError, TypeError, ValueError) as error:
+        raise ValueError(
+            f"layout_sheet port '{port.name}' requires an exact gdsfactory port layer"
+        ) from error
