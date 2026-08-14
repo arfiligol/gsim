@@ -1528,7 +1528,7 @@ def _render_petsc_options(options: Sequence[str]) -> list[str]:
     return [
         "",
         f"PALACE_PETSC_OPTIONS={option_string}",
-        'if [[ -v PETSC_OPTIONS && -n "$PETSC_OPTIONS" ]]; then',
+        'if [[ -n "${PETSC_OPTIONS:-}" ]]; then',
         '  export PETSC_OPTIONS="$PETSC_OPTIONS $PALACE_PETSC_OPTIONS"',
         "else",
         '  export PETSC_OPTIONS="$PALACE_PETSC_OPTIONS"',
