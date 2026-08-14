@@ -459,7 +459,7 @@ class PalaceSlurmSbatchSpec:
                 "",
             ]
         )
-        lines.extend(self.setup_commands)
+        lines.extend(_render_setup_commands(self.setup_commands))
         if self.setup_commands:
             lines.append("")
         lines.extend(
@@ -1241,7 +1241,7 @@ def _render_sweep_array_sbatch(
             "",
         ]
     )
-    lines.extend(spec.setup_commands)
+    lines.extend(_render_setup_commands(spec.setup_commands))
     if spec.setup_commands:
         lines.append("")
     lines.extend(
@@ -1535,6 +1535,17 @@ def _render_petsc_options(options: Sequence[str]) -> list[str]:
         "fi",
         'echo "PETSC_OPTIONS=$PETSC_OPTIONS"',
     ]
+
+
+def _render_setup_commands(commands: Sequence[str]) -> list[str]:
+    """Render sourced vendor environments without leaking the nounset override."""
+    lines: list[str] = []
+    for command in commands:
+        if command.lstrip().startswith((". ", "source ")):
+            lines.extend(("set +u", command, "set -u"))
+        else:
+            lines.append(command)
+    return lines
 
 
 def _validate_sbatch_token(label: str, value: str) -> None:

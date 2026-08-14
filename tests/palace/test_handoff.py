@@ -28,11 +28,16 @@ def test_slurm_handoff_archive_contains_log_output_parents(tmp_path: Path) -> No
         ),
         stdout_path="logs/stdout/%x-%j.out",
         stderr_path="logs/stderr/%x-%j.err",
+        setup_commands=(". /pkg/compiler/intel/2021_4/mkl/latest/env/vars.sh intel64",),
     )
     handoff = write_palace_slurm_sbatch_handoff(run_dir, spec)
+    script = handoff.script_path.read_text(encoding="utf-8")
+    assert (
+        "set +u\n. /pkg/compiler/intel/2021_4/mkl/latest/env/vars.sh intel64\nset -u"
+    ) in script
     log_paths = [
         Path(line.split("=", 1)[1])
-        for line in handoff.script_path.read_text(encoding="utf-8").splitlines()
+        for line in script.splitlines()
         if line.startswith(("#SBATCH --output=", "#SBATCH --error="))
     ]
     package = package_palace_run_handoff_archive(
