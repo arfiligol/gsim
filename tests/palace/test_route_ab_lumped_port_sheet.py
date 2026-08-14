@@ -102,6 +102,50 @@ def _surface_nodes(mesh: meshio.Mesh, attributes: set[int]) -> set[int]:
     }
 
 
+def _structured_owner_pec_attributes(
+    manifest: dict[str, object],
+    port_metadata: dict[str, object],
+) -> dict[str, set[int]]:
+    """Map each SGB-declared port owner to its Route B PEC attributes."""
+    entries = manifest["entries"]
+    assert isinstance(entries, list)
+    attribute = port_metadata["physical_attribute"]
+    assert isinstance(attribute, dict)
+    owner_provenance = attribute["owner_provenance"]
+    assert isinstance(owner_provenance, list)
+    owner_components = {
+        owner["semantic_id"]: owner["conductor_component_id"]
+        for owner in owner_provenance
+    }
+    assert len(owner_components) == 2
+    pec_attributes = {
+        int(value)
+        for entry in entries
+        if entry["role"] == "pec_surface"
+        for value in entry["attributes"]
+    }
+    attrs_by_owner = {owner_id: set() for owner_id in owner_components}
+    for entry in entries:
+        if entry["role"] != "boundary_surface":
+            continue
+        metadata = entry["metadata"]
+        if (
+            metadata["sgb_record"] != "final_physical_group"
+            or metadata["representation"] != "B"
+        ):
+            continue
+        component_id = metadata["conductor_component_id"]
+        for owner_id, expected_component_id in owner_components.items():
+            if component_id != expected_component_id:
+                continue
+            assert owner_id in metadata["owner_semantic_ids"]
+            attrs_by_owner[owner_id].update(
+                int(value) for value in entry["attributes"] if value in pec_attributes
+            )
+    assert all(attrs_by_owner.values())
+    return attrs_by_owner
+
+
 def _component() -> gf.Component:
     gf.gpdk.PDK.activate()
     component = gf.Component()
@@ -234,10 +278,16 @@ def test_route_ab_lumped_port_sheet_uses_gf_port_layer_only(
 
     mesh = meshio.read(result.mesh_path)
     port_nodes = _surface_nodes(mesh, {int(port["Attributes"][0])})
-    pec_nodes = _surface_nodes(
-        mesh, {int(value) for value in config["Boundaries"]["PEC"]["Attributes"]}
-    )
-    assert len(port_nodes & pec_nodes) >= 2
+    if route == "B":
+        for owner_id, owner_attributes in _structured_owner_pec_attributes(
+            manifest, metadata
+        ).items():
+            assert port_nodes & _surface_nodes(mesh, owner_attributes), owner_id
+    else:
+        pec_nodes = _surface_nodes(
+            mesh, {int(value) for value in config["Boundaries"]["PEC"]["Attributes"]}
+        )
+        assert len(port_nodes & pec_nodes) >= 2
     tetra_attributes = {
         int(attribute)
         for cells, physical in zip(
