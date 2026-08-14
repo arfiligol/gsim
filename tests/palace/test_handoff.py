@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import tarfile
 from pathlib import Path
 
@@ -28,13 +30,21 @@ def test_slurm_handoff_archive_contains_log_output_parents(tmp_path: Path) -> No
         ),
         stdout_path="logs/stdout/%x-%j.out",
         stderr_path="logs/stderr/%x-%j.err",
+        palace_executable="/home/qusim/palace-0.16.1/bin/palace-x86_64.bin",
         setup_commands=(". /pkg/compiler/intel/2021_4/mkl/latest/env/vars.sh intel64",),
     )
     handoff = write_palace_slurm_sbatch_handoff(run_dir, spec)
     script = handoff.script_path.read_text(encoding="utf-8")
-    assert (
+    guarded_mkl_setup = (
         "set +u\n. /pkg/compiler/intel/2021_4/mkl/latest/env/vars.sh intel64\nset -u"
-    ) in script
+    )
+    assert script.count(guarded_mkl_setup) == 1
+    assert script.index("set -euo pipefail") < script.index(guarded_mkl_setup)
+    assert "PALACE_EXECUTABLE=/home/qusim/palace-0.16.1/bin/palace-x86_64.bin" in script
+    assert "spack" not in script.lower()
+    bash = shutil.which("bash")
+    assert bash is not None
+    subprocess.run([bash, "-n", handoff.script_path], check=True)  # noqa: S603
     log_paths = [
         Path(line.split("=", 1)[1])
         for line in script.splitlines()
@@ -47,7 +57,9 @@ def test_slurm_handoff_archive_contains_log_output_parents(tmp_path: Path) -> No
     assert package.archive_path is not None
     extract_dir = tmp_path / "extracted"
     with tarfile.open(package.archive_path) as archive:
-        assert f"{run_dir.name}/logs" in archive.getnames()
+        names = archive.getnames()
+        assert f"{run_dir.name}/logs" in names
+        assert f"{run_dir.name}/results/palace" in names
         archive.extractall(extract_dir, filter="data")
 
     extracted_run = extract_dir / run_dir.name
